@@ -143,3 +143,26 @@ async def test_async_fleet_step_timeout_applies_to_handle():
     assert h.default_timeout_s == 42.0
     await fleet.release(h)
     fleet.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_batch_releases_acquired_handles_on_partial_failure():
+    from ate_env.errors import SandboxStartError
+
+    cfg = FleetConfig(backend="mock")
+    fleet = AsyncSandboxFleet(cfg)
+    tasks = [Task(id=f"t-{i}", image="img-1") for i in range(3)]
+    real_acquire = fleet.acquire
+
+    async def flaky_acquire(task, timeout_s=None):
+        if task.id == "t-1":
+            raise SandboxStartError("boom")
+        return await real_acquire(task, timeout_s=timeout_s)
+
+    fleet.acquire = flaky_acquire  # type: ignore[method-assign]
+    with pytest.raises(SandboxStartError):
+        await fleet.acquire_batch(tasks)
+
+    # The two sandboxes that were acquired must not leak.
+    assert fleet.backend.instances == {}
+    fleet.close()

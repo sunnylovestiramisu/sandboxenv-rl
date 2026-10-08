@@ -74,7 +74,7 @@ jobs:
       - run: python -m pytest clients/python/tests -q
       - run: python -m pytest internal/benchmarking/swebench/trajectories -q
       - run: python -m pytest benchmarking/swebench -q
-      - run: ruff check clients/python
+      - run: ruff check clients/python examples/verl_swebench
       - run: python -m pytest integrations/nemo-gym/tests -q
       - run: python -m pytest benchmarking/telemetry_report -q
       - run: ruff check benchmarking/telemetry_report

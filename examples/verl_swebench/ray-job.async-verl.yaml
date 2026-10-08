@@ -1,0 +1,149 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# RayJob for examples/verl_swebench/async_verl_swebench_pipeline.py.
+#
+# Render with envsubst before applying (see README.md):
+#   VERL_WORKER_IMAGE  Ray worker image with python3, ray and torch installed.
+#   SWEBENCH_IMAGE     SWE-bench eval image for the instance (rootfs of the sandbox).
+#   SWEBENCH_TEMPLATE  Substrate ActorTemplate built from SWEBENCH_IMAGE.
+#
+# The policy (sampler/trainer) is simulated, so this job requests no GPUs. To run
+# a real VeRL policy, add a GPU worker group and pass --sampler-gpus/--trainer-gpus.
+
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: async-verl-swebench-sandbox-sdk
+  namespace: default
+spec:
+  entrypoint: >-
+    python3 /workspace/examples/verl_swebench/async_verl_swebench_pipeline.py
+    --backend substrate --data-plane ate_env --task-type swebench
+    --num-iters 3 --group-size 4 --evaluator-resource sandbox_evaluator
+  # Delete the RayCluster once the job is done so nothing keeps running.
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 300
+
+  rayClusterSpec:
+    rayVersion: "2.58.0"
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-cpus: "2"
+        temp-dir: "/tmp/ray"
+      template:
+        metadata:
+          labels:
+            ray.io/node-type: head
+        spec:
+          initContainers:
+          - &init-workspace
+            name: init-workspace
+            image: ${VERL_WORKER_IMAGE}
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              mkdir -p /workspace/site-packages
+              base64 -d /etc/pkg/pkg.tar.gz.b64 | tar -xz -C /workspace
+              # TODO: bake these pins into VERL_WORKER_IMAGE instead of installing per pod.
+              pip install --no-cache-dir --target=/workspace/site-packages \
+                'numpy==1.26.4' 'grpcio>=1.84' 'protobuf>=7.35'
+              printf 'import pkgutil\n__path__ = pkgutil.extend_path(__path__, __name__)\n' \
+                > /workspace/site-packages/google/__init__.py
+            volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: pkg
+              mountPath: /etc/pkg
+          containers:
+          - name: ray-head
+            image: ${VERL_WORKER_IMAGE}
+            imagePullPolicy: IfNotPresent
+            env: &env
+            - name: PYTHONPATH
+              value: "/workspace/site-packages:/workspace/clients/python/src:/workspace/examples/verl_swebench"
+            - name: SUBSTRATE_API_ENDPOINT
+              value: "ate-env-api.ate-env.svc.cluster.local:7777"
+            - name: SUBSTRATE_ATESPACE
+              value: "ate-env"
+            - name: SANDBOX_WORKER_FAMILY
+              value: "c2"
+            - name: SWEBENCH_IMAGE
+              value: "${SWEBENCH_IMAGE}"
+            - name: SWEBENCH_TEMPLATE
+              value: "${SWEBENCH_TEMPLATE}"
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            resources:
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+              requests:
+                cpu: "1"
+                memory: "4Gi"
+            volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          volumes: &volumes
+          - name: workspace
+            emptyDir: {}
+          - name: pkg
+            configMap:
+              name: sandbox-sdk-pkg
+
+    workerGroupSpecs:
+    # --------------------------------------------------------------------------
+    # CPU evaluator group: hosts the AsyncEvaluationPoolActor that talks to
+    # Agent Substrate. The custom resource lets the driver pin the actor here.
+    # --------------------------------------------------------------------------
+    - groupName: cpu-evaluators
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 2
+      rayStartParams:
+        num-cpus: "2"
+        temp-dir: "/tmp/ray"
+        resources: '"{\"sandbox_evaluator\": 1}"'
+      template:
+        metadata:
+          labels:
+            ray.io/node-type: cpu-evaluator
+        spec:
+          initContainers:
+          - *init-workspace
+          containers:
+          - name: ray-cpu-worker
+            image: ${VERL_WORKER_IMAGE}
+            imagePullPolicy: IfNotPresent
+            env: *env
+            resources:
+              limits:
+                cpu: "2"
+                memory: "6Gi"
+              requests:
+                cpu: "1"
+                memory: "3Gi"
+            volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          volumes: *volumes
