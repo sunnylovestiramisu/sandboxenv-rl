@@ -219,8 +219,11 @@ async def test_substrate_driver_sets_acquire_path_and_join_keys(fake_stack, sink
     assert warm.metadata["acquire_path"] == "warm_pool"
     assert fresh.metadata["acquire_path"] == "create"
     assert fresh.metadata["telemetry_attrs"] == {
-        "ate.atespace": "ate-env", "ate.actor.name": fresh.instance_id,
+        "ate.atespace": "ate-env",
+        "ate.actor.name": fresh.instance_id,
+        "ate.actor.uid": f"uid-{fresh.instance_id}",
     }
+    assert warm.metadata["telemetry_attrs"]["ate.actor.uid"] == f"uid-{warm.instance_id}"
 
 
 async def test_substrate_fleet_ready_event_has_join_keys(fake_stack, sink):
@@ -247,4 +250,5 @@ async def test_substrate_fleet_ready_event_has_join_keys(fake_stack, sink):
     assert ready["ate.atespace"] == "ate-env"
     assert ready["ate.actor.name"] == sandbox_id
     assert ready["acquire_path"] == "create"
+    assert ready["ate.actor.uid"] == f"uid-{sandbox_id}"
     assert sink.events(telemetry.RELEASED)[0]["ate.actor.name"] == sandbox_id

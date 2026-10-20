@@ -74,6 +74,8 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
             atespace=atespace,
             template=template,
             status=env_pb2.ENVIRONMENT_STATUS_RUNNING,
+            uid=f"uid-{request.id}",
+            assigned_node="node-a",
         )
         self.environments[key] = environment
         return env_pb2.CreateEnvironmentResponse(environment=environment)

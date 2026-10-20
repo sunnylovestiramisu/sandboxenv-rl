@@ -50,16 +50,20 @@ class Template(_message.Message):
     def __init__(self, name: _Optional[str] = ..., atespace: _Optional[str] = ...) -> None: ...
 
 class Environment(_message.Message):
-    __slots__ = ("id", "atespace", "template", "status")
+    __slots__ = ("id", "atespace", "template", "status", "uid", "assigned_node")
     ID_FIELD_NUMBER: _ClassVar[int]
     ATESPACE_FIELD_NUMBER: _ClassVar[int]
     TEMPLATE_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
+    UID_FIELD_NUMBER: _ClassVar[int]
+    ASSIGNED_NODE_FIELD_NUMBER: _ClassVar[int]
     id: str
     atespace: str
     template: Template
     status: EnvironmentStatus
-    def __init__(self, id: _Optional[str] = ..., atespace: _Optional[str] = ..., template: _Optional[_Union[Template, _Mapping]] = ..., status: _Optional[_Union[EnvironmentStatus, str]] = ...) -> None: ...
+    uid: str
+    assigned_node: str
+    def __init__(self, id: _Optional[str] = ..., atespace: _Optional[str] = ..., template: _Optional[_Union[Template, _Mapping]] = ..., status: _Optional[_Union[EnvironmentStatus, str]] = ..., uid: _Optional[str] = ..., assigned_node: _Optional[str] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
     __slots__ = ("id", "atespace", "template", "rootfs_image")

@@ -533,7 +533,9 @@ func ActorToEnvironment(actor *ateapipb.Actor) *ateenvv1alpha.Environment {
 			Name:     templateName,
 			Atespace: templateAtespace,
 		},
-		Status: ActorStatusToEnvStatus(actor.GetStatus()),
+		Status:       ActorStatusToEnvStatus(actor.GetStatus()),
+		Uid:          actor.GetMetadata().GetUid(),
+		AssignedNode: actor.GetStatus().GetAssignedNode(),
 	}
 }
 

@@ -57,10 +57,16 @@ class Env:
     routing metadata the API server requires.
     """
 
-    def __init__(self, client: Client, id: str, atespace: str):
+    def __init__(self, client: Client, id: str, atespace: str, *, uid: str | None = None):
         self._client = client
         self._id = id
         self._atespace = atespace
+        self._uid = uid or None
+
+    @property
+    def uid(self) -> str | None:
+        """The backing actor's server-assigned uid, when known (set by Client.create())."""
+        return self._uid
 
     @property
     def id(self) -> str:

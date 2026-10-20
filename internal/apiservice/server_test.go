@@ -706,3 +706,22 @@ func TestCreateFromImageRejects(t *testing.T) {
 		t.Errorf("conflicting derived template: code = %v (%v), want FailedPrecondition", status.Code(err), err)
 	}
 }
+
+func TestActorToEnvironmentExposesUIDAndNode(t *testing.T) {
+	env := apiservice.ActorToEnvironment(&ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Name: "sb-1", Atespace: "ate-env", Uid: "8f2a"},
+		Status: &ateapipb.ActorStatus{
+			State:        ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			AssignedNode: "gke-node-7",
+		},
+	})
+	if env.GetUid() != "8f2a" {
+		t.Errorf("Uid = %q, want %q", env.GetUid(), "8f2a")
+	}
+	if env.GetAssignedNode() != "gke-node-7" {
+		t.Errorf("AssignedNode = %q, want %q", env.GetAssignedNode(), "gke-node-7")
+	}
+	if env.GetStatus() != ateenvv1alpha.EnvironmentStatus_ENVIRONMENT_STATUS_RUNNING {
+		t.Errorf("Status = %v, want RUNNING", env.GetStatus())
+	}
+}

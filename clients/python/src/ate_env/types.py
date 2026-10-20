@@ -122,6 +122,8 @@ class EnvironmentInfo:
     atespace: str
     template: Template | None
     status: EnvironmentStatus
+    uid: str = ""  # backing actor's server-assigned uid; empty if the server predates it
+    assigned_node: str = ""  # node the actor is placed on; empty when not placed
 
 
 @dataclass(frozen=True)
@@ -175,6 +177,8 @@ def _environment_info_from_pb(pb: env_pb2.Environment) -> EnvironmentInfo:
         atespace=pb.atespace,
         template=template,
         status=EnvironmentStatus(pb.status),
+        uid=pb.uid,
+        assigned_node=pb.assigned_node,
     )
 
 

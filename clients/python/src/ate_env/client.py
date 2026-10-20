@@ -259,7 +259,7 @@ class Client:
         except grpc.RpcError as e:
             raise map_rpc_error(e) from e
         created = resp.environment
-        return self.env(created.id, atespace=created.atespace)
+        return Env(self, created.id, created.atespace or DEFAULT_ATESPACE, uid=created.uid)
 
     async def get(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> EnvironmentInfo:
         """Retrieve the status and configuration of an environment."""

@@ -305,3 +305,11 @@ async def test_auth_token_sent_once_across_unary_and_streaming_env_rpcs(external
     for method, vals in seen_auth:
         assert vals == ["Bearer s3cr3t"], f"unexpected authorization headers on {method}: {vals}"
 
+
+async def test_create_and_get_expose_actor_uid_and_node(fake_stack):
+    client, _fakes = fake_stack
+    env = await client.create("uid-check")
+    assert env.uid == "uid-uid-check"
+    info = await client.get("uid-check")
+    assert info.uid == "uid-uid-check" and info.assigned_node == "node-a"
+    assert client.env("uid-check").uid is None

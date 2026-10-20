@@ -267,6 +267,7 @@ class SubstrateBackendDriver(BackendDriver):
         """
         pool_key = (template_id, rootfs_image)
         acquire_path = "create"
+        actor_uid: str | None = None
         while True:
             actor_id: str | None = None
             with self._lock:
@@ -283,10 +284,11 @@ class SubstrateBackendDriver(BackendDriver):
                 )
                 # Verify warm actor still exists on the server
                 try:
-                    await asyncio.wait_for(
+                    info = await asyncio.wait_for(
                         self.client.get(actor_id, atespace=self.atespace),
                         timeout=min(self.ready_timeout_s, 15.0),
                     )
+                    actor_uid = getattr(info, "uid", None) or None
                 except NotFoundError:
                     logger.warning("Warm actor %s not found on server, dropping from pool", actor_id)
                     with self._lock:
@@ -311,12 +313,13 @@ class SubstrateBackendDriver(BackendDriver):
                 last_err: Exception | None = None
                 for attempt in range(4):
                     try:
-                        await self.client.create(
+                        created = await self.client.create(
                             actor_id,
                             template_name=template_id,
                             atespace=self.atespace,
                             rootfs_image=rootfs_image,
                         )
+                        actor_uid = getattr(created, "uid", None) or None
                         last_err = None
                         break
                     except (NotFoundError, FailedPreconditionError) as e:
@@ -346,6 +349,8 @@ class SubstrateBackendDriver(BackendDriver):
 
         instance = self._make_instance(actor_id, template_id, run_id, rootfs_image=rootfs_image)
         instance.metadata[META_ACQUIRE_PATH] = acquire_path
+        if actor_uid:
+            instance.metadata[META_TELEMETRY_ATTRS]["ate.actor.uid"] = actor_uid
         with self._lock:
             self._owned_actors[actor_id] = instance
         return instance

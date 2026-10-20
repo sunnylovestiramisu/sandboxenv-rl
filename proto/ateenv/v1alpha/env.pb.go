@@ -181,7 +181,14 @@ type Environment struct {
 	// ActorTemplate configuration the environment is instantiated from.
 	Template *Template `protobuf:"bytes,3,opt,name=template,proto3" json:"template,omitempty"`
 	// Current lifecycle status of the environment.
-	Status        EnvironmentStatus `protobuf:"varint,4,opt,name=status,proto3,enum=ateenv.v1alpha.EnvironmentStatus" json:"status,omitempty"`
+	Status EnvironmentStatus `protobuf:"varint,4,opt,name=status,proto3,enum=ateenv.v1alpha.EnvironmentStatus" json:"status,omitempty"`
+	// Server-assigned unique identifier of the backing Substrate actor. Unlike
+	// the id, it is never reused, so telemetry can join an environment to
+	// Substrate's records (ate.actor.uid) unambiguously. Output only.
+	Uid string `protobuf:"bytes,5,opt,name=uid,proto3" json:"uid,omitempty"`
+	// Kubernetes node the environment's actor is currently assigned to, if any.
+	// Empty while the actor is not placed on a worker. Output only.
+	AssignedNode  string `protobuf:"bytes,6,opt,name=assigned_node,json=assignedNode,proto3" json:"assigned_node,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -242,6 +249,20 @@ func (x *Environment) GetStatus() EnvironmentStatus {
 		return x.Status
 	}
 	return EnvironmentStatus_ENVIRONMENT_STATUS_UNSPECIFIED
+}
+
+func (x *Environment) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+func (x *Environment) GetAssignedNode() string {
+	if x != nil {
+		return x.AssignedNode
+	}
+	return ""
 }
 
 // Request to create and start a new environment.
@@ -664,12 +685,14 @@ const file_proto_ateenv_v1alpha_env_proto_rawDesc = "" +
 	"\x1eproto/ateenv/v1alpha/env.proto\x12\x0eateenv.v1alpha\":\n" +
 	"\bTemplate\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
-	"\batespace\x18\x02 \x01(\tR\batespace\"\xaa\x01\n" +
+	"\batespace\x18\x02 \x01(\tR\batespace\"\xe1\x01\n" +
 	"\vEnvironment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\batespace\x18\x02 \x01(\tR\batespace\x124\n" +
 	"\btemplate\x18\x03 \x01(\v2\x18.ateenv.v1alpha.TemplateR\btemplate\x129\n" +
-	"\x06status\x18\x04 \x01(\x0e2!.ateenv.v1alpha.EnvironmentStatusR\x06status\"\x9f\x01\n" +
+	"\x06status\x18\x04 \x01(\x0e2!.ateenv.v1alpha.EnvironmentStatusR\x06status\x12\x10\n" +
+	"\x03uid\x18\x05 \x01(\tR\x03uid\x12#\n" +
+	"\rassigned_node\x18\x06 \x01(\tR\fassignedNode\"\x9f\x01\n" +
 	"\x18CreateEnvironmentRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\batespace\x18\x02 \x01(\tR\batespace\x124\n" +
