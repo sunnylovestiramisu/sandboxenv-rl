@@ -27,6 +27,8 @@ from .base import BackendDriver
 class MockBackendDriver(BackendDriver):
     """In-memory mock backend driver for hermetic unit testing and PoC simulation."""
 
+    telemetry_name = "mock"
+
     def __init__(self, fail_preflight: bool = False, fail_acquire: bool = False):
         self.fail_preflight = fail_preflight
         self.fail_acquire = fail_acquire
@@ -72,7 +74,7 @@ class MockBackendDriver(BackendDriver):
             raise SandboxStartError("Mock acquire failed: capacity exhausted")
 
         inst_id = f"mock-sb-{uuid.uuid4().hex[:8]}"
-        metadata = {"created_at": time.time(), "template": template_id}
+        metadata = {"created_at": time.time(), "template": template_id, "acquire_path": "mock"}
         if rootfs_image is not None:
             metadata["rootfs_image"] = rootfs_image
         inst = RawSandboxInstance(

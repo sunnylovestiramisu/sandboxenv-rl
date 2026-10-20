@@ -14,12 +14,18 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from .backend.base import BackendDriver
 from .errors import CommandExecutionError, CommandTimeoutError
 from .runtime.base import RuntimeGuestHook
+from .telemetry.instrument import HandleTelemetry
 from .types import DataPlaneEndpoint, ExecResult, Task
+
+
+def _nbytes(content: bytes | str) -> int:
+    return len(content) if isinstance(content, (bytes, bytearray)) else len(content.encode())
 
 
 @dataclass
@@ -32,6 +38,9 @@ class SandboxHandle:
     ``data_plane`` holds this sandbox's own connection coordinates (address
     plus routing headers) for harnesses that talk to the sandbox
     directly; it is None for the mock backend.
+
+    ``telemetry`` is set by the fleet when sandbox telemetry is enabled
+    (see ``ate_env.telemetry``); it records each step and the release.
     """
     sandbox_id: str
     endpoint: str
@@ -41,6 +50,7 @@ class SandboxHandle:
     runtime: RuntimeGuestHook = field(repr=False)
     data_plane: DataPlaneEndpoint | None = None
     default_timeout_s: float = 120.0
+    telemetry: HandleTelemetry | None = field(default=None, repr=False, compare=False)
 
     def exec(
         self,
@@ -59,7 +69,13 @@ class SandboxHandle:
         Returns ExecResult.
         """
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
+        t0 = time.monotonic()
+        try:
+            res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
+        except BaseException as e:
+            self._record_step("exec", t0, exc=e)
+            raise
+        self._record_step("exec", t0, result=res)
         if check and res.timed_out:
             raise CommandTimeoutError(
                 f"Command '{command}' timed out after {to_s:g}s:\n"
@@ -84,7 +100,13 @@ class SandboxHandle:
     ) -> ExecResult:
         """Asynchronously execute command inside the sandbox."""
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
+        t0 = time.monotonic()
+        try:
+            res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
+        except BaseException as e:
+            self._record_step("exec", t0, exc=e)
+            raise
+        self._record_step("exec", t0, result=res)
         if check and res.timed_out:
             raise CommandTimeoutError(
                 f"Command '{command}' timed out after {to_s:g}s:\n"
@@ -101,19 +123,45 @@ class SandboxHandle:
 
     def write_file(self, path: str, content: bytes | str) -> None:
         """Write file content directly into sandbox filesystem."""
-        self.runtime.write_file(path, content)
+        t0 = time.monotonic()
+        try:
+            self.runtime.write_file(path, content)
+        except BaseException as e:
+            self._record_step("write_file", t0, exc=e)
+            raise
+        self._record_step("write_file", t0, bytes=_nbytes(content))
 
     async def write_file_async(self, path: str, content: bytes | str) -> None:
         """Asynchronously write file content directly into sandbox filesystem."""
-        await self.runtime.write_file_async(path, content)
+        t0 = time.monotonic()
+        try:
+            await self.runtime.write_file_async(path, content)
+        except BaseException as e:
+            self._record_step("write_file", t0, exc=e)
+            raise
+        self._record_step("write_file", t0, bytes=_nbytes(content))
 
     def read_file_bytes(self, path: str) -> bytes:
         """Read binary file content from sandbox filesystem."""
-        return self.runtime.read_file_bytes(path)
+        t0 = time.monotonic()
+        try:
+            data = self.runtime.read_file_bytes(path)
+        except BaseException as e:
+            self._record_step("read_file", t0, exc=e)
+            raise
+        self._record_step("read_file", t0, bytes=len(data))
+        return data
 
     async def read_file_bytes_async(self, path: str) -> bytes:
         """Asynchronously read binary file content from sandbox filesystem."""
-        return await self.runtime.read_file_bytes_async(path)
+        t0 = time.monotonic()
+        try:
+            data = await self.runtime.read_file_bytes_async(path)
+        except BaseException as e:
+            self._record_step("read_file", t0, exc=e)
+            raise
+        self._record_step("read_file", t0, bytes=len(data))
+        return data
 
     def initialize(
         self,
@@ -126,23 +174,33 @@ class SandboxHandle:
 
     def release(self) -> None:
         """Release this sandbox back to the backend or terminate it."""
+        t0, err = time.monotonic(), None
         try:
             self.backend.release(self.sandbox_id, recycle=False)
+        except BaseException as e:
+            err = e
+            raise
         finally:
             self.runtime.close()
+            self._record_release(recycled=False, t0=t0, exc=err)
 
     async def release_async(self) -> None:
         """Asynchronously release this sandbox back to the backend or terminate it."""
+        t0, err = time.monotonic(), None
         try:
             if hasattr(self.backend, "release_async"):
                 await self.backend.release_async(self.sandbox_id, recycle=False)
             else:
                 self.backend.release(self.sandbox_id, recycle=False)
+        except BaseException as e:
+            err = e
+            raise
         finally:
             if hasattr(self.runtime, "close_async"):
                 await self.runtime.close_async()
             else:
                 self.runtime.close()
+            self._record_release(recycled=False, t0=t0, exc=err)
 
     def recycle(self) -> None:
         """Return sandbox to warm pool.
@@ -151,10 +209,15 @@ class SandboxHandle:
         resetting filesystem or process state. The next claim will receive
         the actor in the state left by the previous workload.
         """
+        t0, err = time.monotonic(), None
         try:
             self.backend.release(self.sandbox_id, recycle=True)
+        except BaseException as e:
+            err = e
+            raise
         finally:
             self.runtime.close()
+            self._record_release(recycled=True, t0=t0, exc=err)
 
     async def recycle_async(self) -> None:
         """Asynchronously return sandbox to warm pool.
@@ -163,16 +226,30 @@ class SandboxHandle:
         resetting filesystem or process state. The next claim will receive
         the actor in the state left by the previous workload.
         """
+        t0, err = time.monotonic(), None
         try:
             if hasattr(self.backend, "release_async"):
                 await self.backend.release_async(self.sandbox_id, recycle=True)
             else:
                 self.backend.release(self.sandbox_id, recycle=True)
+        except BaseException as e:
+            err = e
+            raise
         finally:
             if hasattr(self.runtime, "close_async"):
                 await self.runtime.close_async()
             else:
                 self.runtime.close()
+            self._record_release(recycled=True, t0=t0, exc=err)
+
+    def _record_step(self, kind: str, t0: float, **kw) -> None:
+        if self.telemetry is not None:
+            self.telemetry.step(kind, t0, **kw)
+
+    def _record_release(self, *, recycled: bool, t0: float,
+                        exc: BaseException | None) -> None:
+        if self.telemetry is not None:
+            self.telemetry.release(recycled=recycled, t0=t0, exc=exc)
 
     def __enter__(self) -> SandboxHandle:
         return self

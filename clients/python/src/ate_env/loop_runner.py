@@ -16,11 +16,24 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 import threading
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+
+async def _with_context(ctx: contextvars.Context, coro: Coroutine[Any, Any, T]) -> T:
+    """Await ``coro`` with the caller's context variables applied.
+
+    ``run_coroutine_threadsafe`` creates the task in the loop thread, so the
+    task would otherwise see that thread's context, not the caller's. The task
+    owns a private context copy, so setting the variables here does not leak.
+    """
+    for var, value in ctx.items():
+        var.set(value)
+    return await coro
 
 
 class LoopRunner:
@@ -45,13 +58,22 @@ class LoopRunner:
         return self._loop
 
     def run(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
-        """Run a coroutine on the background event loop and block for the result."""
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        """Run a coroutine on the background event loop and block for the result.
+
+        The caller's ``contextvars`` (e.g. the telemetry episode context or an
+        OpenTelemetry span) are carried into the coroutine.
+        """
+        future = asyncio.run_coroutine_threadsafe(_with_context(contextvars.copy_context(), coro),
+                                                  self._loop)
         return future.result(timeout=timeout)
 
     def submit(self, coro: Coroutine[Any, Any, T]) -> concurrent.futures.Future[T]:
-        """Submit a coroutine to the background event loop without blocking."""
-        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+        """Submit a coroutine to the background event loop without blocking.
+
+        Like ``run``, carries the caller's ``contextvars`` into the coroutine.
+        """
+        return asyncio.run_coroutine_threadsafe(_with_context(contextvars.copy_context(), coro),
+                                                self._loop)
 
     def stop(self) -> None:
         """Stop the background event loop and join the worker thread."""

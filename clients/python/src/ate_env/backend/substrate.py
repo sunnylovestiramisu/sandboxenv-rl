@@ -32,6 +32,8 @@ from ..errors import (
     SandboxStartError,
 )
 from ..loop_runner import LoopRunner
+from ..telemetry import ACQUIRE_RETRY, get_recorder
+from ..telemetry.instrument import META_ACQUIRE_PATH, META_TELEMETRY_ATTRS
 from ..types import DataPlaneEndpoint, EnvironmentSpec, RawSandboxInstance
 from .base import BackendDriver
 
@@ -75,6 +77,8 @@ class SubstrateBackendDriver(BackendDriver):
     via ate_env.Client: creating environments, suspending for pre-warmed pools,
     and deleting on release.
     """
+
+    telemetry_name = "substrate"
 
     def __init__(
         self,
@@ -219,6 +223,9 @@ class SubstrateBackendDriver(BackendDriver):
             metadata["rootfs_image"] = rootfs_image
         if self.labels:
             metadata["labels"] = dict(self.labels)
+        # Join keys to Substrate telemetry: an environment id is the actor name
+        # in its atespace (ate.* attributes on Substrate logs, metrics, spans).
+        metadata[META_TELEMETRY_ATTRS] = {"ate.atespace": self.atespace, "ate.actor.name": actor_id}
         return RawSandboxInstance(
             instance_id=actor_id,
             endpoint=self.api_endpoint,
@@ -259,6 +266,7 @@ class SubstrateBackendDriver(BackendDriver):
         guest traffic, so ready_timeout_s does not measure readiness here.
         """
         pool_key = (template_id, rootfs_image)
+        acquire_path = "create"
         while True:
             actor_id: str | None = None
             with self._lock:
@@ -289,6 +297,7 @@ class SubstrateBackendDriver(BackendDriver):
                     with self._lock:
                         self._warm_paused_pool.setdefault(pool_key, []).append(actor_id)
                     raise SandboxStartError(f"Error checking warm actor {actor_id}: {e}") from e
+                acquire_path = "warm_pool"
                 break
             else:
                 actor_id = f"sb-{uuid.uuid4().hex[:16]}"
@@ -319,6 +328,16 @@ class SubstrateBackendDriver(BackendDriver):
                         if "already exists" in str(e).lower():
                             last_err = None
                             break
+                        get_recorder().emit(
+                            ACQUIRE_RETRY,
+                            **{"rl_sandbox.backend": self.telemetry_name,
+                               "rl_sandbox.template.id": template_id,
+                               "rl_sandbox.sandbox.id": actor_id,
+                               "ate.atespace": self.atespace,
+                               "ate.actor.name": actor_id,
+                               "attempt": attempt + 1,
+                               "error.type": type(e).__name__},
+                        )
                         if attempt < 3:
                             await asyncio.sleep(0.05 * (attempt + 1))
                 if last_err is not None:
@@ -326,6 +345,7 @@ class SubstrateBackendDriver(BackendDriver):
                 break
 
         instance = self._make_instance(actor_id, template_id, run_id, rootfs_image=rootfs_image)
+        instance.metadata[META_ACQUIRE_PATH] = acquire_path
         with self._lock:
             self._owned_actors[actor_id] = instance
         return instance

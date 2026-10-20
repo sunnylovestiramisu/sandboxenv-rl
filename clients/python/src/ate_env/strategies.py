@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import collections
+import contextvars
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +49,12 @@ def process_parallel(fleet: Any, tasks: list[Task], process_fn: Callable[[Task, 
         return results
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(_execute_single, t): i for i, t in enumerate(tasks)}
+        # Run each task in a copy of the caller's context so the telemetry episode
+        # context (and any OpenTelemetry span) reaches the worker threads.
+        futures = {
+            executor.submit(contextvars.copy_context().run, _execute_single, t): i
+            for i, t in enumerate(tasks)
+        }
         for fut in as_completed(futures):
             i = futures[fut]
             try:

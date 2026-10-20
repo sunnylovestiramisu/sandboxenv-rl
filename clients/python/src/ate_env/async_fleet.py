@@ -29,6 +29,7 @@ from typing import Any
 from .config import FleetConfig
 from .fleet import SandboxFleet
 from .handle import SandboxHandle
+from .telemetry.instrument import AcquireTracker, track_warm
 from .types import FleetPlan, Task
 
 logger = logging.getLogger("sandbox_sdk.async_fleet")
@@ -102,6 +103,7 @@ class AsyncSandboxFleet:
                     entry.replicas,
                     wait=True,
                     rootfs_image=getattr(entry, "rootfs_image", None),
+                    image=entry.image,
                 )
         return self
 
@@ -117,19 +119,22 @@ class AsyncSandboxFleet:
         replicas: int,
         wait: bool = True,
         rootfs_image: str | None = None,
+        image: str | None = None,
     ) -> None:
-        if hasattr(self.backend, "warm_pool_async"):
-            await self.backend.warm_pool_async(
-                template_id, replicas, wait=wait, rootfs_image=rootfs_image
-            )
-        else:
-            await asyncio.to_thread(
-                self.backend.warm_pool,
-                template_id,
-                replicas,
-                wait=wait,
-                rootfs_image=rootfs_image,
-            )
+        with track_warm(backend=self.backend, template_id=template_id, image=image,
+                        replicas=replicas, wait=wait):
+            if hasattr(self.backend, "warm_pool_async"):
+                await self.backend.warm_pool_async(
+                    template_id, replicas, wait=wait, rootfs_image=rootfs_image
+                )
+            else:
+                await asyncio.to_thread(
+                    self.backend.warm_pool,
+                    template_id,
+                    replicas,
+                    wait=wait,
+                    rootfs_image=rootfs_image,
+                )
 
     async def warm_images(
         self, images: list[str], replicas: int | None = None, wait: bool = True
@@ -137,7 +142,9 @@ class AsyncSandboxFleet:
         rep = replicas if replicas is not None else self.config.max_warmpool_replicas
         for img in images:
             template_id, rootfs_image = await self._ensure_template_for_image_async(img)
-            await self._warm_pool_for_template(template_id, rep, wait=wait, rootfs_image=rootfs_image)
+            await self._warm_pool_for_template(
+                template_id, rep, wait=wait, rootfs_image=rootfs_image, image=img
+            )
 
     async def unwarm_image(self, image: str) -> None:
         entry = self._fleet._image_to_template.get(image)
@@ -168,23 +175,30 @@ class AsyncSandboxFleet:
         else:
             template_id, rootfs_image = await self._ensure_template_for_image_async(task_obj.image)
         to_s = timeout_s or self.config.acquire_timeout_s
+        tracker = AcquireTracker(backend=self.backend, task=task_obj, template_id=template_id,
+                                 fleet_run_id=self._fleet.run_id, timeout_s=to_s)
 
-        if hasattr(self.backend, "acquire_async"):
-            raw_inst = await self.backend.acquire_async(
-                template_id, self._fleet.run_id, timeout_s=to_s, rootfs_image=rootfs_image
-            )
-        else:
-            raw_inst = await asyncio.to_thread(
-                self.backend.acquire,
-                template_id,
-                self._fleet.run_id,
-                timeout_s=to_s,
-                rootfs_image=rootfs_image,
-            )
+        try:
+            if hasattr(self.backend, "acquire_async"):
+                raw_inst = await self.backend.acquire_async(
+                    template_id, self._fleet.run_id, timeout_s=to_s, rootfs_image=rootfs_image
+                )
+            else:
+                raw_inst = await asyncio.to_thread(
+                    self.backend.acquire,
+                    template_id,
+                    self._fleet.run_id,
+                    timeout_s=to_s,
+                    rootfs_image=rootfs_image,
+                )
+        except Exception as e:
+            tracker.failed(e)
+            raise
 
         try:
             runtime, data_plane = self._fleet._build_runtime(raw_inst)
-        except Exception:
+        except Exception as e:
+            tracker.failed(e, raw_inst)
             try:
                 if hasattr(self.backend, "release_async"):
                     await self.backend.release_async(raw_inst.instance_id, recycle=False)
@@ -207,6 +221,7 @@ class AsyncSandboxFleet:
             runtime=runtime,
             data_plane=data_plane,
             default_timeout_s=self.config.step_timeout_s,
+            telemetry=tracker.ready(raw_inst),
         )
 
     async def acquire_batch(

@@ -28,6 +28,7 @@ from .config import FleetConfig
 from .handle import SandboxHandle
 from .runtime.base import RuntimeGuestHook
 from .strategies import STRATEGIES
+from .telemetry.instrument import AcquireTracker, track_warm
 from .types import (
     DataPlaneEndpoint,
     FleetPlan,
@@ -161,19 +162,22 @@ class SandboxFleet:
         plan = self.plan()
         for entry in plan.entries:
             if entry.replicas > 0:
-                self.backend.warm_pool(
-                    entry.template_id,
-                    entry.replicas,
-                    wait=True,
-                    rootfs_image=getattr(entry, "rootfs_image", None),
-                )
+                self._warm(entry.template_id, entry.replicas, wait=True,
+                           rootfs_image=getattr(entry, "rootfs_image", None),
+                           image=entry.image)
 
     def warm_images(self, images: list[str], replicas: int | None = None, wait: bool = True) -> None:
         """Warm up pools for specific images (used by windowed strategies)."""
         rep = replicas if replicas is not None else self.config.max_warmpool_replicas
         for img in images:
             template_id, rootfs_image = self._ensure_template_for_image(img)
-            self.backend.warm_pool(template_id, rep, wait=wait, rootfs_image=rootfs_image)
+            self._warm(template_id, rep, wait=wait, rootfs_image=rootfs_image, image=img)
+
+    def _warm(self, template_id: str, replicas: int, *, wait: bool,
+              rootfs_image: str | None, image: str | None) -> None:
+        with track_warm(backend=self.backend, template_id=template_id, image=image,
+                        replicas=replicas, wait=wait):
+            self.backend.warm_pool(template_id, replicas, wait=wait, rootfs_image=rootfs_image)
 
     def unwarm_image(self, image: str) -> None:
         """Drain warm pool for a specific image."""
@@ -218,13 +222,20 @@ class SandboxFleet:
             template_id, rootfs_image = self._ensure_template_for_image(task_obj.image)
 
         to_s = timeout_s or self.config.acquire_timeout_s
-        raw_inst = self.backend.acquire(
-            template_id, self.run_id, timeout_s=to_s, rootfs_image=rootfs_image
-        )
+        tracker = AcquireTracker(backend=self.backend, task=task_obj, template_id=template_id,
+                                 fleet_run_id=self.run_id, timeout_s=to_s)
+        try:
+            raw_inst = self.backend.acquire(
+                template_id, self.run_id, timeout_s=to_s, rootfs_image=rootfs_image
+            )
+        except Exception as e:
+            tracker.failed(e)
+            raise
 
         try:
             runtime, data_plane = self._build_runtime(raw_inst)
-        except Exception:
+        except Exception as e:
+            tracker.failed(e, raw_inst)
             try:
                 self.backend.release(raw_inst.instance_id, recycle=False)
             except Exception:
@@ -244,6 +255,7 @@ class SandboxFleet:
             runtime=runtime,
             data_plane=data_plane,
             default_timeout_s=self.config.step_timeout_s,
+            telemetry=tracker.ready(raw_inst),
         )
 
     def _build_runtime(
