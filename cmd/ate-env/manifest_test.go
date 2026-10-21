@@ -650,6 +650,99 @@ func TestBuildAPIDeploymentNoAuthTokenSecret(t *testing.T) {
 	}
 }
 
+// By default the API deployment carries no telemetry flags, env or ports:
+// the manifest is what it was before telemetry existed.
+func TestBuildManifestsTelemetryOffByDefault(t *testing.T) {
+	objs := buildManifests(testManifestConfig())
+	deployment := objs[3].(*appsv1.Deployment)
+	c := deployment.Spec.Template.Spec.Containers[0]
+	for _, a := range c.Args {
+		if strings.Contains(a, "tracing") || strings.Contains(a, "metrics") {
+			t.Errorf("default args carry %q", a)
+		}
+	}
+	if len(c.Env) != 0 || len(c.Ports) != 1 || len(deployment.Spec.Template.Annotations) != 0 {
+		t.Errorf("default container env %v, ports %v, pod annotations %v; want none, the API port, none", c.Env, c.Ports, deployment.Spec.Template.Annotations)
+	}
+}
+
+// The telemetry flags render --enable-tracing, --metrics-listen-addr, the
+// OTLP env, a "metrics" container and Service port, and scrape annotations.
+func TestBuildManifestsTelemetry(t *testing.T) {
+	cfg := testManifestConfig()
+	cfg.enableTracing = true
+	cfg.otlpEndpoint = "http://otel-collector.ate-env-telemetry:4317"
+	cfg.otlpInsecure = true
+	cfg.metricsPort = 9090
+	objs := buildManifests(cfg)
+
+	deployment := objs[3].(*appsv1.Deployment)
+	c := deployment.Spec.Template.Spec.Containers[0]
+	args := strings.Join(c.Args, " ")
+	for _, want := range []string{"-enable-tracing", "-metrics-listen-addr=:9090", "-listen 0.0.0.0:7777"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("args %q lack %q", args, want)
+		}
+	}
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != cfg.otlpEndpoint || env["OTEL_EXPORTER_OTLP_INSECURE"] != "true" {
+		t.Errorf("env = %v, want the OTLP endpoint and insecure=true", env)
+	}
+	if len(c.Ports) != 2 || c.Ports[1].Name != "metrics" || c.Ports[1].ContainerPort != 9090 {
+		t.Errorf("container ports = %+v, want the API port and metrics 9090", c.Ports)
+	}
+	ann := deployment.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "9090" || ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("pod annotations = %v, want prometheus.io scrape on 9090 /metrics", ann)
+	}
+
+	service := objs[4].(*corev1.Service)
+	if len(service.Spec.Ports) != 2 {
+		t.Fatalf("service ports = %+v, want api and metrics", service.Spec.Ports)
+	}
+	api, metrics := service.Spec.Ports[0], service.Spec.Ports[1]
+	if api.Name != "api" || api.Port != 7777 {
+		t.Errorf("service api port = %+v, want api 7777", api)
+	}
+	if metrics.Name != "metrics" || metrics.Port != 9090 || metrics.TargetPort.String() != "metrics" {
+		t.Errorf("service metrics port = %+v, want metrics 9090 -> metrics", metrics)
+	}
+}
+
+func TestManifestCommandTelemetryFlags(t *testing.T) {
+	cmd := newManifestCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"--api-image=example.com/api@sha256:cccc",
+		"--worker-image=example.com/worker@sha256:bbbb",
+		"--enable-tracing",
+		"--otlp-endpoint=http://otel-collector.ate-env-telemetry:4317",
+		"--otlp-insecure",
+		"--metrics-port=9090",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute manifest: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"- -enable-tracing",
+		"- -metrics-listen-addr=:9090",
+		"name: OTEL_EXPORTER_OTLP_ENDPOINT",
+		"value: http://otel-collector.ate-env-telemetry:4317",
+		"name: OTEL_EXPORTER_OTLP_INSECURE",
+		"name: metrics",
+		"prometheus.io/scrape: \"true\"",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("manifest lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestBuildAPIDeploymentAuthTokenSecret(t *testing.T) {
 	cfg := testManifestConfig()
 	cfg.authTokenSecret = "ate-env-caller-token"
@@ -688,5 +781,17 @@ func TestBuildAPIDeploymentAuthTokenSecret(t *testing.T) {
 	}
 	if !foundVol {
 		t.Errorf("volumes = %+v, want Secret volume for ate-env-caller-token", dep.Spec.Template.Spec.Volumes)
+	}
+}
+
+func TestManifestRejectsBadMetricsPort(t *testing.T) {
+	for _, port := range []string{"--metrics-port=7777", "--metrics-port=70000", "--metrics-port=-1"} {
+		cmd := newManifestCommand()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--api-image=example.com/api@sha256:cccc", "--worker-image=example.com/worker@sha256:bbbb", port})
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("%s: manifest succeeded, want an error", port)
+		}
 	}
 }
