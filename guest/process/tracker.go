@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,7 +82,19 @@ type TrackerConfig struct {
 	RetentionPeriod time.Duration
 	// MaxRetainedProcesses caps total historical completed processes kept in memory.
 	MaxRetainedProcesses int
+	// OnExit, if set, is called once per process after it is reaped, with
+	// its run time and how it ended: one of the ExitClass values.
+	OnExit func(d time.Duration, exitClass string)
 }
+
+// How a process ended, as passed to TrackerConfig.OnExit. A bounded
+// vocabulary, fit for a metric label; the command never is.
+const (
+	ExitClassZero    = "zero"    // exited with status 0
+	ExitClassNonzero = "nonzero" // exited with another status
+	ExitClassSignal  = "signal"  // killed by a signal other than the timeout's
+	ExitClassTimeout = "timeout" // killed by the tracker's timeout
+)
 
 // resolveDefaultLogDir returns /var/log/ate-jobs or falls back to os.TempDir if not writable.
 func resolveDefaultLogDir() string {
@@ -157,9 +170,10 @@ type ProcessState struct {
 	ptmx    *os.File      // non-nil when started with a PTY
 	ptyDone chan struct{} // closed once copyPTY drains ptmx
 
-	output *notifier
-	done   chan struct{}
-	timer  *time.Timer
+	output   *notifier
+	done     chan struct{}
+	timer    *time.Timer
+	timedOut atomic.Bool // set when the timeout fired and killed the process
 }
 
 // Exited reports whether the process has been reaped.
@@ -435,6 +449,7 @@ func (t *Tracker) Start(opts StartOptions) (*ProcessState, error) {
 	}
 	if timeout > 0 {
 		state.timer = time.AfterFunc(timeout, func() {
+			state.timedOut.Store(true)
 			_ = t.Signal(processID, syscall.SIGKILL)
 		})
 	}
@@ -500,7 +515,12 @@ func (t *Tracker) reap(state *ProcessState, cmd *exec.Cmd, stdoutFile, stderrFil
 	state.FinishedAt = finishedAt
 	state.State = ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED
 	state.ExitCode, state.Signal = exitStatus(cmd.ProcessState)
+	exitClass := exitClassOf(state.ExitCode, state.Signal, state.timedOut.Load())
+	runTime := finishedAt.Sub(state.StartedAt)
 	state.mu.Unlock()
+	if t.config.OnExit != nil {
+		t.config.OnExit(runTime, exitClass)
+	}
 
 	state.stdinMu.Lock()
 	state.stdinClosed = true
@@ -509,6 +529,20 @@ func (t *Tracker) reap(state *ProcessState, cmd *exec.Cmd, stdoutFile, stderrFil
 	close(state.done)
 	state.output.notify()
 	t.decrementActive()
+}
+
+// exitClassOf classifies a reaped process for TrackerConfig.OnExit.
+func exitClassOf(code int32, sig syscall.Signal, timedOut bool) string {
+	switch {
+	case timedOut && sig != 0:
+		return ExitClassTimeout
+	case sig != 0:
+		return ExitClassSignal
+	case code == 0:
+		return ExitClassZero
+	default:
+		return ExitClassNonzero
+	}
 }
 
 // exitStatus decodes how a waited process ended: (code, 0) for a normal
