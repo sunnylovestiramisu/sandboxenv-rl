@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import collections
+import contextvars
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,7 +49,12 @@ def process_parallel(fleet: Any, tasks: list[Task], process_fn: Callable[[Task, 
         return results
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(_execute_single, t): i for i, t in enumerate(tasks)}
+        # Each worker runs in a copy of the caller's context, so spans started
+        # per task nest under the caller's current span.
+        futures = {
+            executor.submit(contextvars.copy_context().run, _execute_single, t): i
+            for i, t in enumerate(tasks)
+        }
         for fut in as_completed(futures):
             i = futures[fut]
             try:
@@ -144,7 +150,9 @@ def run_pipelined(fleet: Any, process_fn: Callable[[Task, SandboxHandle], Any],
         for n, batch in enumerate(batches):
             # Asynchronously prefetch window N+1
             nxt_future = (
-                prefetch_executor.submit(fleet.warm_images, batches[n + 1], wait=True)
+                prefetch_executor.submit(
+                    contextvars.copy_context().run, fleet.warm_images, batches[n + 1], wait=True
+                )
                 if n + 1 < len(batches) else None
             )
 

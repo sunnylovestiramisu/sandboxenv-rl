@@ -26,6 +26,7 @@ from typing import Any
 import grpc
 
 from ..client import Client as AteClient
+from ..config import TracerConfig
 from ..env import Env as AteEnv
 from ..errors import (
     CommandStartError,
@@ -59,12 +60,16 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
         client: AteClient | None = None,
         env: AteEnv | None = None,
         loop_runner: LoopRunner | None = None,
+        tracer_config: TracerConfig | None = None,
     ):
         if not env_id:
             raise ValueError("env_id is required for SubstrateEnvClientRuntime")
         self.env_id = env_id
         self.endpoint = endpoint or "localhost:7777"
         self.atespace = atespace
+        # Used only for a client the runtime builds itself; a shared client
+        # keeps its own tracing configuration.
+        self.tracer_config = tracer_config
 
         self._loop_runner = loop_runner
         self._owns_loop_runner = loop_runner is None
@@ -90,7 +95,7 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
         with self._lock:
             if self._env is None:
                 if self._client is None:
-                    self._client = AteClient(self.endpoint)
+                    self._client = AteClient(self.endpoint, tracer_config=self.tracer_config)
                 self._env = self._client.env(self.env_id, atespace=self.atespace)
             return self._env
 

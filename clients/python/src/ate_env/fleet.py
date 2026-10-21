@@ -28,6 +28,7 @@ from .config import FleetConfig
 from .handle import SandboxHandle
 from .runtime.base import RuntimeGuestHook
 from .strategies import STRATEGIES
+from .telemetry.tracing import tracer_from_config
 from .types import (
     DataPlaneEndpoint,
     FleetPlan,
@@ -53,6 +54,8 @@ class SandboxFleet:
         self._image_to_template: dict[str, tuple[str, str | None]] = {}
         self._plan: FleetPlan | None = None
         self._lock = threading.Lock()
+        # Tracing (FleetConfig.tracing): spans on handles and the Substrate driver.
+        self._tracer_manager, self._tracer = tracer_from_config(self.config.tracing)
 
         # Initialize Backend Driver
         if driver is not None:
@@ -71,6 +74,7 @@ class SandboxFleet:
                 labels=self.config.labels,
                 acquire_timeout_s=self.config.acquire_timeout_s,
                 ready_timeout_s=self.config.ready_timeout_s,
+                tracer_config=self.config.tracing,
             )
         else:
             raise NotImplementedError(f"Backend '{self.config.backend}' is not yet supported or requires extras")
@@ -244,6 +248,7 @@ class SandboxFleet:
             runtime=runtime,
             data_plane=data_plane,
             default_timeout_s=self.config.step_timeout_s,
+            tracer=self._tracer,
         )
 
     def _build_runtime(
@@ -265,6 +270,7 @@ class SandboxFleet:
             atespace=self.config.tenancy or "ate-env",
             client=client,
             loop_runner=loop_runner,
+            tracer_config=self.config.tracing,
         ), ep
 
     def release(self, handle: SandboxHandle | Sequence[SandboxHandle]) -> None:

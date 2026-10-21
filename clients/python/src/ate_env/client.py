@@ -22,8 +22,16 @@ import grpc
 import grpc.aio
 
 from ._gen.ateenv.v1alpha import env_pb2, env_pb2_grpc, guest_pb2_grpc
+from .config import TracerConfig
 from .env import Env
 from .errors import map_rpc_error
+from .telemetry.tracing import (
+    CLIENT_SPAN_PREFIX,
+    _trace_interceptors,
+    image_ref_attr,
+    start_span,
+    tracer_from_config,
+)
 from .types import EnvironmentInfo, _environment_info_from_pb
 
 __all__ = ["Client", "DEFAULT_ATESPACE"]
@@ -120,24 +128,36 @@ class Client:
         *,
         channel: grpc.aio.Channel | None = None,
         auth_token: str | None = None,
+        tracer_config: TracerConfig | None = None,
     ):
         """Create a client for the ate-env-api service at endpoint.
 
         endpoint accepts a host:port or an http(s):// URL, matching the Go
         client. Pass channel to supply a caller-owned grpc.aio.Channel
         instead; the client then never closes it.
+
+        tracer_config enables OpenTelemetry spans (``ate_env_client.<op>``)
+        and, on a channel the client owns, the W3C trace context in the
+        metadata of every call. It needs the ``tracing`` extra and is a
+        logged no-op without it.
         """
         self.endpoint = endpoint
         self._auth_token = auth_token or None
+        self.tracer_config = tracer_config or TracerConfig()
+        self.tracer_manager, self.tracer = tracer_from_config(self.tracer_config)
+        self.trace_service_name = CLIENT_SPAN_PREFIX
         if channel is not None:
             self._channel = channel
             self._owns_channel = False
         else:
             if not endpoint:
                 raise ValueError("ate_env: endpoint is required when channel is not given")
-            interceptors = _auth_interceptors(auth_token) if auth_token else None
+            interceptors = _auth_interceptors(auth_token) if auth_token else []
+            if self.tracer:
+                # After auth, so the trace context rides on the final metadata.
+                interceptors += _trace_interceptors()
             self._channel = grpc.aio.insecure_channel(
-                _normalize_target(endpoint), interceptors=interceptors
+                _normalize_target(endpoint), interceptors=interceptors or None
             )
             self._owns_channel = True
         self._environments = env_pb2_grpc.EnvironmentServiceStub(self._channel)
@@ -182,37 +202,49 @@ class Client:
         if template_name or template_atespace:
             req.template.name = template_name or ""
             req.template.atespace = template_atespace or ""
-        try:
-            resp = await self._environments.CreateEnvironment(req, metadata=self._auth_metadata())
-        except grpc.RpcError as e:
-            raise map_rpc_error(e) from e
+        with start_span(self.tracer, f"{self.trace_service_name}.create_environment", {
+            "env.id": id,
+            "env.atespace": atespace,
+            "env.template": template_name,
+            "env.rootfs_image": image_ref_attr(rootfs_image),
+        }):
+            try:
+                resp = await self._environments.CreateEnvironment(req, metadata=self._auth_metadata())
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
         created = resp.environment
         return self.env(created.id, atespace=created.atespace)
 
     async def get(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> EnvironmentInfo:
         """Retrieve the status and configuration of an environment."""
         req = env_pb2.GetEnvironmentRequest(id=id, atespace=atespace)
-        try:
-            resp = await self._environments.GetEnvironment(req, metadata=self._auth_metadata())
-        except grpc.RpcError as e:
-            raise map_rpc_error(e) from e
+        with start_span(self.tracer, f"{self.trace_service_name}.get_environment",
+                        {"env.id": id, "env.atespace": atespace}):
+            try:
+                resp = await self._environments.GetEnvironment(req, metadata=self._auth_metadata())
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
         return _environment_info_from_pb(resp.environment)
 
     async def suspend(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> None:
         """Checkpoint and stop the environment."""
         req = env_pb2.SuspendEnvironmentRequest(id=id, atespace=atespace)
-        try:
-            await self._environments.SuspendEnvironment(req, metadata=self._auth_metadata())
-        except grpc.RpcError as e:
-            raise map_rpc_error(e) from e
+        with start_span(self.tracer, f"{self.trace_service_name}.suspend_environment",
+                        {"env.id": id, "env.atespace": atespace}):
+            try:
+                await self._environments.SuspendEnvironment(req, metadata=self._auth_metadata())
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
 
     async def delete(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> None:
         """Remove the environment permanently."""
         req = env_pb2.DeleteEnvironmentRequest(id=id, atespace=atespace)
-        try:
-            await self._environments.DeleteEnvironment(req, metadata=self._auth_metadata())
-        except grpc.RpcError as e:
-            raise map_rpc_error(e) from e
+        with start_span(self.tracer, f"{self.trace_service_name}.delete_environment",
+                        {"env.id": id, "env.atespace": atespace}):
+            try:
+                await self._environments.DeleteEnvironment(req, metadata=self._auth_metadata())
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
 
     def env(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> Env:
         """Return a handle to an environment without checking that it exists."""

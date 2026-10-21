@@ -20,6 +20,8 @@ import threading
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
+from .telemetry import tracing
+
 T = TypeVar("T")
 
 
@@ -46,11 +48,16 @@ class LoopRunner:
 
     def run(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         """Run a coroutine on the background event loop and block for the result."""
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        return self.submit(coro).result(timeout=timeout)
 
     def submit(self, coro: Coroutine[Any, Any, T]) -> concurrent.futures.Future[T]:
-        """Submit a coroutine to the background event loop without blocking."""
+        """Submit a coroutine to the background event loop without blocking.
+
+        With tracing on, the caller's OpenTelemetry context is attached inside
+        the coroutine so spans on the loop nest under the caller's span.
+        """
+        if tracing.tracing_active():
+            return tracing.run_with_context(self, coro)
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def stop(self) -> None:

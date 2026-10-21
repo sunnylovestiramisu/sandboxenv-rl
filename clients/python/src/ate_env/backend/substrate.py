@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..client import DEFAULT_ATESPACE, Client
+from ..config import TracerConfig
 from ..errors import (
     FailedPreconditionError,
     InfrastructureError,
@@ -32,6 +33,12 @@ from ..errors import (
     SandboxStartError,
 )
 from ..loop_runner import LoopRunner
+from ..telemetry.tracing import (
+    CLIENT_SPAN_PREFIX,
+    set_attributes,
+    start_span,
+    tracer_from_config,
+)
 from ..types import DataPlaneEndpoint, EnvironmentSpec, RawSandboxInstance
 from .base import BackendDriver
 
@@ -74,6 +81,10 @@ class SubstrateBackendDriver(BackendDriver):
     Manages environment lifecycle directly against the ate-env-api gRPC service
     via ate_env.Client: creating environments, suspending for pre-warmed pools,
     and deleting on release.
+
+    tracer_config enables ``ate_env_client.ensure_template`` / ``.warm_pool`` /
+    ``.acquire`` / ``.release`` / ``.reap`` spans and is handed to the Client
+    the driver builds (needs the ``tracing`` extra).
     """
 
     def __init__(
@@ -90,6 +101,7 @@ class SubstrateBackendDriver(BackendDriver):
         acquire_timeout_s: float = 180.0,
         ready_timeout_s: float = 180.0,
         loop_runner: LoopRunner | None = None,
+        tracer_config: TracerConfig | None = None,
     ):
         target = (
             api_endpoint
@@ -106,6 +118,9 @@ class SubstrateBackendDriver(BackendDriver):
         self.labels = dict(labels or {})
         self.acquire_timeout_s = acquire_timeout_s
         self.ready_timeout_s = ready_timeout_s
+        self.tracer_config = tracer_config or TracerConfig()
+        self.tracer_manager, self.tracer = tracer_from_config(self.tracer_config)
+        self.trace_service_name = CLIENT_SPAN_PREFIX
 
         self._loop_runner = loop_runner
         self._owns_loop_runner = loop_runner is None
@@ -132,7 +147,9 @@ class SubstrateBackendDriver(BackendDriver):
     @property
     def client(self) -> Client:
         if self._client is None:
-            self._client = Client(self.api_endpoint, auth_token=self.auth_token)
+            self._client = Client(
+                self.api_endpoint, auth_token=self.auth_token, tracer_config=self.tracer_config
+            )
         return self._client
 
     def _sync(self, coro: Any) -> Any:
@@ -184,6 +201,12 @@ class SubstrateBackendDriver(BackendDriver):
         fields in EnvironmentSpec are reserved for future scheduling extensions.
         Current Substrate environments are provisioned from pre-registered ActorTemplates.
         """
+        with start_span(self.tracer, f"{self.trace_service_name}.ensure_template") as span:
+            template = self._resolve_template(env)
+            set_attributes(span, {"env.template": template})
+            return template
+
+    def _resolve_template(self, env: EnvironmentSpec | str) -> str:
         if isinstance(env, str):
             image = env
             if image in self.image_templates:
@@ -238,14 +261,18 @@ class SubstrateBackendDriver(BackendDriver):
     ) -> RawSandboxInstance:
         """Acquire a live sandbox instance within timeout_s."""
         to_s = timeout_s or self.acquire_timeout_s
-        try:
-            return await asyncio.wait_for(
-                self._acquire_internal(template_id, run_id, rootfs_image=rootfs_image), timeout=to_s
-            )
-        except asyncio.TimeoutError as e:
-            raise SandboxStartError(
-                f"Timed out acquiring sandbox for template {template_id} after {to_s:g}s"
-            ) from e
+        with start_span(self.tracer, f"{self.trace_service_name}.acquire",
+                        {"env.template": template_id, "env.run_id": run_id}) as span:
+            try:
+                instance = await asyncio.wait_for(
+                    self._acquire_internal(template_id, run_id, rootfs_image=rootfs_image), timeout=to_s
+                )
+            except asyncio.TimeoutError as e:
+                raise SandboxStartError(
+                    f"Timed out acquiring sandbox for template {template_id} after {to_s:g}s"
+                ) from e
+            set_attributes(span, {"env.id": instance.instance_id})
+            return instance
 
     async def _acquire_internal(
         self,
@@ -350,6 +377,23 @@ class SubstrateBackendDriver(BackendDriver):
         rootfs_image: str | None = None,
     ) -> None:
         """Pre-warm a pool of actors by creating and suspending them."""
+        with start_span(self.tracer, f"{self.trace_service_name}.warm_pool", {
+            "env.template": template_id,
+            "env.replicas": replicas,
+            "env.run_id": run_id,
+        }):
+            await self._warm_pool_internal(
+                template_id, replicas, wait=wait, run_id=run_id, rootfs_image=rootfs_image
+            )
+
+    async def _warm_pool_internal(
+        self,
+        template_id: str,
+        replicas: int,
+        wait: bool,
+        run_id: str | None,
+        rootfs_image: str | None,
+    ) -> None:
         logger.info(
             "Sizing warm pool for template %s (rootfs_image=%s) to %d paused actors...",
             template_id,
@@ -466,6 +510,10 @@ class SubstrateBackendDriver(BackendDriver):
         Note: Recycling suspends the actor and returns it to the warm pool
         without resetting guest filesystem or processes.
         """
+        with start_span(self.tracer, f"{self.trace_service_name}.release", {"env.id": instance_id}):
+            await self._release_internal(instance_id, recycle)
+
+    async def _release_internal(self, instance_id: str, recycle: bool) -> None:
         with self._lock:
             instance = self._owned_actors.pop(instance_id, None)
 
@@ -492,6 +540,10 @@ class SubstrateBackendDriver(BackendDriver):
 
     async def reap_async(self, run_id: str) -> int:
         """Force delete all environments tagged with this run_id and all warm pool actors."""
+        with start_span(self.tracer, f"{self.trace_service_name}.reap", {"env.run_id": run_id}):
+            return await self._reap_internal(run_id)
+
+    async def _reap_internal(self, run_id: str) -> int:
         with self._lock:
             warm_actors: list[str] = []
             for tid, actors in list(self._warm_paused_pool.items()):

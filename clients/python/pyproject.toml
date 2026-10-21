@@ -35,6 +35,13 @@ dev = [
     "grpcio-tools>=1.84",
     "ruff==0.17.0",
 ]
+# OpenTelemetry tracing (ate_env.telemetry.tracing). 1.43 is the first release
+# whose opentelemetry-proto accepts protobuf 7.
+tracing = [
+    "opentelemetry-api>=1.43,<1.46",
+    "opentelemetry-sdk>=1.43,<1.46",
+    "opentelemetry-exporter-otlp>=1.43,<1.46",
+]
 
 [project.urls]
 Homepage = "https://github.com/agent-substrate/env"

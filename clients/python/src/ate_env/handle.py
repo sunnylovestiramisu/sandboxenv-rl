@@ -14,11 +14,19 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from typing import Any
 
 from .backend.base import BackendDriver
 from .errors import CommandExecutionError, CommandTimeoutError
 from .runtime.base import RuntimeGuestHook
+from .telemetry.tracing import (
+    CLIENT_SPAN_PREFIX,
+    executable_attr,
+    set_attributes,
+    start_span,
+)
 from .types import DataPlaneEndpoint, ExecResult, Task
 
 
@@ -32,6 +40,10 @@ class SandboxHandle:
     ``data_plane`` holds this sandbox's own connection coordinates (address
     plus routing headers) for harnesses that talk to the sandbox
     directly; it is None for the mock backend.
+
+    ``tracer`` (set by the fleet when tracing is on) wraps exec and file
+    operations in ``ate_env_client.exec`` / ``.write_file`` / ``.read_file``
+    spans.
     """
     sandbox_id: str
     endpoint: str
@@ -41,6 +53,29 @@ class SandboxHandle:
     runtime: RuntimeGuestHook = field(repr=False)
     data_plane: DataPlaneEndpoint | None = None
     default_timeout_s: float = 120.0
+    tracer: Any = field(default=None, repr=False, compare=False)
+    trace_service_name: str = field(default=CLIENT_SPAN_PREFIX, repr=False, compare=False)
+
+    def _exec_span(self, command: str | list[str]) -> Any:
+        if not self.tracer:
+            return nullcontext()
+        return start_span(self.tracer, f"{self.trace_service_name}.exec", {
+            "env.id": self.sandbox_id,
+            "env.command.executable": executable_attr(command),
+        })
+
+    def _file_span(self, op: str, path: str, content: bytes | str | None = None) -> Any:
+        if not self.tracer:
+            return nullcontext()
+        return start_span(self.tracer, f"{self.trace_service_name}.{op}", {
+            "env.id": self.sandbox_id,
+            "env.file.path": path,
+            "env.file.size": None if content is None else _size(content),
+        })
+
+    @staticmethod
+    def _exec_result_attrs(span: Any, res: ExecResult) -> None:
+        set_attributes(span, {"env.exit_code": res.exit_code, "env.timed_out": res.timed_out})
 
     def exec(
         self,
@@ -59,7 +94,9 @@ class SandboxHandle:
         Returns ExecResult.
         """
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
+        with self._exec_span(command) as span:
+            res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
+            self._exec_result_attrs(span, res)
         if check and res.timed_out:
             raise CommandTimeoutError(
                 f"Command '{command}' timed out after {to_s:g}s:\n"
@@ -84,7 +121,9 @@ class SandboxHandle:
     ) -> ExecResult:
         """Asynchronously execute command inside the sandbox."""
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
+        with self._exec_span(command) as span:
+            res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
+            self._exec_result_attrs(span, res)
         if check and res.timed_out:
             raise CommandTimeoutError(
                 f"Command '{command}' timed out after {to_s:g}s:\n"
@@ -101,19 +140,27 @@ class SandboxHandle:
 
     def write_file(self, path: str, content: bytes | str) -> None:
         """Write file content directly into sandbox filesystem."""
-        self.runtime.write_file(path, content)
+        with self._file_span("write_file", path, content):
+            self.runtime.write_file(path, content)
 
     async def write_file_async(self, path: str, content: bytes | str) -> None:
         """Asynchronously write file content directly into sandbox filesystem."""
-        await self.runtime.write_file_async(path, content)
+        with self._file_span("write_file", path, content):
+            await self.runtime.write_file_async(path, content)
 
     def read_file_bytes(self, path: str) -> bytes:
         """Read binary file content from sandbox filesystem."""
-        return self.runtime.read_file_bytes(path)
+        with self._file_span("read_file", path) as span:
+            data = self.runtime.read_file_bytes(path)
+            set_attributes(span, {"env.file.size": len(data)})
+            return data
 
     async def read_file_bytes_async(self, path: str) -> bytes:
         """Asynchronously read binary file content from sandbox filesystem."""
-        return await self.runtime.read_file_bytes_async(path)
+        with self._file_span("read_file", path) as span:
+            data = await self.runtime.read_file_bytes_async(path)
+            set_attributes(span, {"env.file.size": len(data)})
+            return data
 
     def initialize(
         self,
@@ -185,3 +232,7 @@ class SandboxHandle:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.release_async()
+
+
+def _size(content: bytes | str) -> int:
+    return len(content.encode("utf-8")) if isinstance(content, str) else len(content)
