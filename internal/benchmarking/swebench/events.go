@@ -15,10 +15,14 @@
 package swebench
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/agent-substrate/env/internal/telemetry"
 )
 
 // Event names. Every timed operation of a run is one of these.
@@ -67,20 +71,59 @@ type Event struct {
 }
 
 // Recorder writes events as JSON lines. It is safe for concurrent use.
+//
+// With an Instrumenter (WithInstrumenter), every event is also one span. An
+// event is written when its operation finishes, with the finish time and the
+// duration, so the span is recorded after the fact: it starts at Time minus
+// DurMS and ends at Time. The span is named after Event.Event (a fixed
+// vocabulary, never an id), carries run, env, instance, step and task as
+// attributes, and has status Ok when the event is ok and Error otherwise.
+// The JSONL is the same with or without an Instrumenter.
 type Recorder struct {
 	mu  sync.Mutex
 	w   io.Writer
 	enc *json.Encoder
 	n   int
 	err error
+
+	inst   telemetry.Instrumenter
+	parent context.Context
+}
+
+// RecorderOption configures a Recorder.
+type RecorderOption func(*Recorder)
+
+// WithInstrumenter makes the Recorder record one span per event on inst. The
+// default is telemetry.NewNoOp(), which records none.
+func WithInstrumenter(inst telemetry.Instrumenter) RecorderOption {
+	return func(r *Recorder) {
+		if inst != nil {
+			r.inst = inst
+		}
+	}
+}
+
+// WithParent makes the event spans children of the span in ctx, so a whole
+// run lands in one trace. The default is a span-less context: every event
+// span is a root.
+func WithParent(ctx context.Context) RecorderOption {
+	return func(r *Recorder) {
+		if ctx != nil {
+			r.parent = ctx
+		}
+	}
 }
 
 // NewRecorder writes to w; a nil w discards events.
-func NewRecorder(w io.Writer) *Recorder {
+func NewRecorder(w io.Writer, opts ...RecorderOption) *Recorder {
 	if w == nil {
 		w = io.Discard
 	}
-	return &Recorder{w: w, enc: json.NewEncoder(w)}
+	r := &Recorder{w: w, enc: json.NewEncoder(w), inst: telemetry.NewNoOp(), parent: context.Background()}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Record writes one event, stamping the time if unset.
@@ -89,11 +132,51 @@ func (r *Recorder) Record(e Event) {
 		e.Time = time.Now()
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.enc.Encode(e); err != nil && r.err == nil {
 		r.err = err
 	}
 	r.n++
+	r.mu.Unlock()
+	if r.inst != telemetry.NewNoOp() {
+		r.span(e)
+	}
+}
+
+// span records e as a span that ran for DurMS up to e.Time.
+func (r *Recorder) span(e Event) {
+	end := e.Time
+	start := end.Add(-time.Duration(e.DurMS * float64(time.Millisecond)))
+	attrs := map[string]string{"run": e.RunID}
+	set := func(k, v string) {
+		if v != "" {
+			attrs[k] = v
+		}
+	}
+	set("env", e.Env)
+	set("instance", e.Instance)
+	set("step", strconv.Itoa(e.Step))
+	set("task", strconv.Itoa(e.Task))
+	set("name", e.Name)
+	if e.Attempts > 0 {
+		attrs["attempts"] = strconv.Itoa(e.Attempts)
+	}
+	if e.Count > 0 {
+		attrs["count"] = strconv.Itoa(e.Count)
+	}
+	if e.Exit != nil {
+		attrs["exit"] = strconv.Itoa(*e.Exit)
+	}
+	if e.Reward != nil {
+		attrs["reward"] = strconv.Itoa(*e.Reward)
+	}
+	errMsg := ""
+	if !e.OK {
+		errMsg = e.Err
+		if errMsg == "" {
+			errMsg = "not ok"
+		}
+	}
+	r.inst.RecordSpan(r.parent, e.Event, start, end, attrs, errMsg)
 }
 
 // Len is the number of events written so far.
