@@ -326,6 +326,85 @@ results = await asyncio.gather(
 )
 ```
 
+### Observability
+
+Three layers, all off the hot path when disabled. The base install has
+no telemetry dependency; the optional layers need extras:
+
+```bash
+pip install './clients/python[tracing,metrics]'
+```
+
+**Run report** (always on, no dependency). After `fleet.run(...)`,
+`fleet.report` is a `RunReport` with per-phase count, total and max
+(`preflight`, `plan`, `ensure_template`, `warm_pool`, `acquire`,
+`process`, `recycle`, `release`, `reap`, `teardown`), claims, task
+outcomes and warm replicas:
+
+```python
+fleet = SandboxFleet(FleetConfig(backend="mock", strategy="naive"))
+fleet.load_tasks(tasks)
+fleet.run(process_fn)
+print(fleet.report.summary())          # table, same shape as agent-sandbox-rl
+fleet.report.to_dict()                 # JSON-ready
+fleet.report.write(os.environ["REPORT_DIR"])   # <strategy>_<n>tasks_<stamp>.txt/.json
+```
+
+`AsyncSandboxFleet.run` fills `fleet.report` the same way.
+
+**Prometheus** (`metrics` extra; `ObservabilityConfig.enable_metrics`,
+on by default and a logged no-op without the extra). The fleet records
+`atefleet_phase_latency_seconds`, `atefleet_task_latency_seconds`,
+`atefleet_run_latency_seconds`, `atefleet_claims_total`,
+`atefleet_tasks_total` and `atefleet_warm_replicas`, and the client
+records `ate_env_client_{acquire,exec,suspend,wake,release}_seconds`.
+Collectors register on the first metrics-enabled `Observer`, never at
+import. Labels are bounded to `phase`, `backend` (`substrate` or `mock`),
+`family` (the task's repo family, see `ate_env.observability.repo_family`),
+`strategy` and `status` (`ok` or `error`); environment ids, run ids,
+commands, paths and image tags never become labels. Expose them with:
+
+```python
+from ate_env.observability import serve_metrics
+serve_metrics(9095)                    # /metrics on the default registry
+```
+
+**Tracing** (`tracing` extra). Either switch turns on tracing for the
+whole fleet, under one service name:
+
+```python
+FleetConfig(observability=ObservabilityConfig(enable_tracing=True))   # service "ate-env-fleet"
+FleetConfig(tracing=TracerConfig(enable_tracing=True))                # service "ate-env-client"
+Client("localhost:7777", tracer_config=TracerConfig(enable_tracing=True))  # client only
+```
+
+Spans are exported over OTLP, configured by the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_INSECURE` variables
+(an SDK `TracerProvider` the application already installed is used as
+is). One `fleet.run(...)` is one trace:
+
+```
+atefleet.run
+  atefleet.acquire
+    ate_env_client.acquire
+      ate_env_client.create_environment
+  atefleet.process
+    ate_env_client.exec
+  atefleet.release
+    ate_env_client.release
+      ate_env_client.delete_environment
+  atefleet.teardown
+    ate_env_client.reap
+```
+
+Every gRPC call carries the W3C `traceparent` (never baggage), so
+`ate-env-api` can continue the trace. Span attributes carry ids and sizes
+(`env.id`, `env.template`, `env.command.executable`, `env.exit_code`,
+`env.file.size`, ...), never command lines, file content or image tags.
+A caller-owned `Client(channel=...)` gets spans but not the
+`traceparent` header: add `ate_env.telemetry.TraceContextInterceptor`
+subclasses to your channel yourself.
+
 ### Develop against a local guest daemon (no cluster)
 
 The guest daemon example serves the process and filesystem services

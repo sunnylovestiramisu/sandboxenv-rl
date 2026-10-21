@@ -23,12 +23,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
 from .config import FleetConfig
 from .fleet import SandboxFleet
 from .handle import SandboxHandle
+from .observability import Observer, RunReport, repo_family
 from .types import FleetPlan, Task
 
 logger = logging.getLogger("sandbox_sdk.async_fleet")
@@ -74,6 +76,19 @@ class AsyncSandboxFleet:
     def tasks(self) -> list[Task]:
         return self._fleet.tasks
 
+    @property
+    def observer(self) -> Observer:
+        return self._fleet.observer
+
+    @property
+    def report(self) -> RunReport | None:
+        """The RunReport of the last run()."""
+        return self._fleet.report
+
+    @property
+    def _backend_label(self) -> str:
+        return self._fleet.backend_label
+
     def load_tasks(self, tasks: list[Any]) -> None:
         self._fleet.load_tasks(tasks)
 
@@ -83,7 +98,8 @@ class AsyncSandboxFleet:
     # --- Awaitable Lifecycle Methods ---
     async def preflight(self) -> None:
         if hasattr(self.backend, "preflight_async"):
-            await self.backend.preflight_async()
+            with self.observer.phase("preflight", backend=self._backend_label):
+                await self.backend.preflight_async()
         else:
             await asyncio.to_thread(self._fleet.preflight)
 
@@ -102,6 +118,7 @@ class AsyncSandboxFleet:
                     entry.replicas,
                     wait=True,
                     rootfs_image=getattr(entry, "rootfs_image", None),
+                    family=repo_family(entry.image),
                 )
         return self
 
@@ -117,19 +134,21 @@ class AsyncSandboxFleet:
         replicas: int,
         wait: bool = True,
         rootfs_image: str | None = None,
+        family: str = "-",
     ) -> None:
-        if hasattr(self.backend, "warm_pool_async"):
-            await self.backend.warm_pool_async(
-                template_id, replicas, wait=wait, rootfs_image=rootfs_image
-            )
-        else:
-            await asyncio.to_thread(
-                self.backend.warm_pool,
-                template_id,
-                replicas,
-                wait=wait,
-                rootfs_image=rootfs_image,
-            )
+        with self.observer.phase("warm_pool", backend=self._backend_label, family=family):
+            if hasattr(self.backend, "warm_pool_async"):
+                await self.backend.warm_pool_async(
+                    template_id, replicas, wait=wait, rootfs_image=rootfs_image
+                )
+            else:
+                await asyncio.to_thread(
+                    self.backend.warm_pool,
+                    template_id,
+                    replicas,
+                    wait=wait,
+                    rootfs_image=rootfs_image,
+                )
 
     async def warm_images(
         self, images: list[str], replicas: int | None = None, wait: bool = True
@@ -137,7 +156,9 @@ class AsyncSandboxFleet:
         rep = replicas if replicas is not None else self.config.max_warmpool_replicas
         for img in images:
             template_id, rootfs_image = await self._ensure_template_for_image_async(img)
-            await self._warm_pool_for_template(template_id, rep, wait=wait, rootfs_image=rootfs_image)
+            await self._warm_pool_for_template(
+                template_id, rep, wait=wait, rootfs_image=rootfs_image, family=repo_family(img)
+            )
 
     async def unwarm_image(self, image: str) -> None:
         entry = self._fleet._image_to_template.get(image)
@@ -162,6 +183,11 @@ class AsyncSandboxFleet:
         else:
             task_obj = task
 
+        with self.observer.phase("acquire", backend=self._backend_label,
+                                 family=repo_family(task_obj)):
+            return await self._acquire_task(task_obj, timeout_s)
+
+    async def _acquire_task(self, task_obj: Task, timeout_s: float | None) -> SandboxHandle:
         if task_obj.template:
             template_id = task_obj.template
             rootfs_image = None
@@ -219,13 +245,19 @@ class AsyncSandboxFleet:
         )
 
     async def release(self, handle: SandboxHandle) -> None:
-        await handle.release_async()
+        with self.observer.phase("release", backend=self._backend_label,
+                                 family=repo_family(handle.task)):
+            await handle.release_async()
 
     async def teardown(self) -> None:
-        if hasattr(self.backend, "reap_async"):
-            await self.backend.reap_async(self._fleet.run_id)
-        else:
-            await asyncio.to_thread(self.backend.reap, self._fleet.run_id)
+        try:
+            with self.observer.phase("teardown", backend=self._backend_label):
+                if hasattr(self.backend, "reap_async"):
+                    await self.backend.reap_async(self._fleet.run_id)
+                else:
+                    await asyncio.to_thread(self.backend.reap, self._fleet.run_id)
+        finally:
+            self.observer.warm_reset()
 
     # --- Async Context Manager ---
     async def __aenter__(self) -> AsyncSandboxFleet:
@@ -256,22 +288,47 @@ class AsyncSandboxFleet:
         process_fn: Callable[[Task, SandboxHandle], Any],
         concurrency: int | None = None,
     ) -> list[Any]:
-        """Execute tasks asynchronously with bounded concurrency."""
+        """Execute tasks asynchronously with bounded concurrency.
+
+        The run's RunReport is available as ``fleet.report`` afterwards.
+        """
         c = concurrency or min(self.config.max_concurrent, len(self.tasks) or 1)
         sem = asyncio.Semaphore(max(1, c))
         results: list[Any] = [None] * len(self.tasks)
+        obs = self.observer
+        backend = self._backend_label
+
+        def _release(handle: SandboxHandle) -> None:
+            with obs.phase("release", backend=backend, family=repo_family(handle.task)):
+                handle.release()
 
         async def _worker(idx: int, task: Task) -> None:
             async with sem:
-                handle = await self.acquire(task)
+                family = repo_family(task)
+                start = time.monotonic()
+                status = "ok"
                 try:
-                    res = await self._call_process_fn(process_fn, task, handle)
-                    results[idx] = res
-                    handle.release()
-                except Exception as e:
-                    logger.error("Async execution failed for task %s: %s", task.id, e)
-                    handle.release()
-                    results[idx] = e
+                    handle = await self.acquire(task)
+                    try:
+                        with obs.phase("process", backend=backend, family=family):
+                            res = await self._call_process_fn(process_fn, task, handle)
+                        results[idx] = res
+                        _release(handle)
+                    except Exception as e:
+                        status = "error"
+                        logger.error("Async execution failed for task %s: %s", task.id, e)
+                        _release(handle)
+                        results[idx] = e
+                except BaseException:
+                    status = "error"
+                    raise
+                finally:
+                    obs.task_done(backend, family, status, time.monotonic() - start)
 
-        await asyncio.gather(*(_worker(i, t) for i, t in enumerate(self.tasks)))
+        strategy = self.config.strategy
+        with obs.run(strategy, backend=backend) as report:
+            self._fleet.report = report
+            report.environment = self._fleet.describe_environment(concurrency=max(1, c))
+            await asyncio.gather(*(_worker(i, t) for i, t in enumerate(self.tasks)))
+        logger.info("\n%s", report.summary())
         return results

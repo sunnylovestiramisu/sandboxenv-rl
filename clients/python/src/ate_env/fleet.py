@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import collections
+import dataclasses
 import logging
 import threading
 import uuid
@@ -24,8 +25,9 @@ from typing import Any
 from .backend.base import BackendDriver
 from .backend.mock import MockBackendDriver
 from .backend.substrate import SubstrateBackendDriver
-from .config import FleetConfig
+from .config import ALLOWED_BACKENDS, FleetConfig, TracerConfig
 from .handle import SandboxHandle
+from .observability import Observer, RunReport, repo_family
 from .runtime.base import RuntimeGuestHook
 from .strategies import STRATEGIES
 from .telemetry.tracing import tracer_from_config
@@ -54,8 +56,20 @@ class SandboxFleet:
         self._image_to_template: dict[str, tuple[str, str | None]] = {}
         self._plan: FleetPlan | None = None
         self._lock = threading.Lock()
-        # Tracing (FleetConfig.tracing): spans on handles and the Substrate driver.
-        self._tracer_manager, self._tracer = tracer_from_config(self.config.tracing)
+
+        # Telemetry. Either FleetConfig.tracing or observability.enable_tracing
+        # turns on tracing for the whole fleet under one service name, so
+        # atefleet.* spans parent ate_env_client.* spans in one trace.
+        obs_cfg = self.config.observability
+        tracing_on = self.config.tracing.enable_tracing or obs_cfg.enable_tracing
+        service = (obs_cfg.trace_service_name if obs_cfg.enable_tracing
+                   else self.config.tracing.trace_service_name)
+        self._tracer_config = TracerConfig(enable_tracing=tracing_on, trace_service_name=service)
+        self._obs = Observer(dataclasses.replace(
+            obs_cfg, enable_tracing=tracing_on, trace_service_name=service
+        ))
+        self._tracer_manager, self._tracer = tracer_from_config(self._tracer_config)
+        self.report: RunReport | None = None  # set by run()
 
         # Initialize Backend Driver
         if driver is not None:
@@ -74,10 +88,22 @@ class SandboxFleet:
                 labels=self.config.labels,
                 acquire_timeout_s=self.config.acquire_timeout_s,
                 ready_timeout_s=self.config.ready_timeout_s,
-                tracer_config=self.config.tracing,
+                tracer_config=self._tracer_config,
             )
         else:
             raise NotImplementedError(f"Backend '{self.config.backend}' is not yet supported or requires extras")
+
+        name = getattr(self.backend, "backend_name", None)
+        self.backend_label = name if name in ALLOWED_BACKENDS else self.config.backend
+        try:
+            self.backend.observer = self._obs
+        except AttributeError:  # a driver that refuses new attributes
+            pass
+
+    @property
+    def observer(self) -> Observer:
+        """The fleet's Observer (phases, tasks, claims, warm replicas)."""
+        return self._obs
 
     def __enter__(self) -> SandboxFleet:
         return self
@@ -137,10 +163,15 @@ class SandboxFleet:
 
     def preflight(self) -> None:
         """Run backend connectivity, permissions, and capacity checks."""
-        self.backend.preflight()
+        with self._obs.phase("preflight", backend=self.backend_label):
+            self.backend.preflight()
 
     def plan(self) -> FleetPlan:
         """Compute provisioning sizing for all tasks."""
+        with self._obs.phase("plan", backend=self.backend_label):
+            return self._plan_entries()
+
+    def _plan_entries(self) -> FleetPlan:
         entries: list[PlanEntry] = []
         counts = self.image_counts()
         for img, task_count in counts.items():
@@ -165,19 +196,22 @@ class SandboxFleet:
         plan = self.plan()
         for entry in plan.entries:
             if entry.replicas > 0:
-                self.backend.warm_pool(
-                    entry.template_id,
-                    entry.replicas,
-                    wait=True,
-                    rootfs_image=getattr(entry, "rootfs_image", None),
-                )
+                with self._obs.phase("warm_pool", backend=self.backend_label,
+                                     family=repo_family(entry.image)):
+                    self.backend.warm_pool(
+                        entry.template_id,
+                        entry.replicas,
+                        wait=True,
+                        rootfs_image=getattr(entry, "rootfs_image", None),
+                    )
 
     def warm_images(self, images: list[str], replicas: int | None = None, wait: bool = True) -> None:
         """Warm up pools for specific images (used by windowed strategies)."""
         rep = replicas if replicas is not None else self.config.max_warmpool_replicas
         for img in images:
             template_id, rootfs_image = self._ensure_template_for_image(img)
-            self.backend.warm_pool(template_id, rep, wait=wait, rootfs_image=rootfs_image)
+            with self._obs.phase("warm_pool", backend=self.backend_label, family=repo_family(img)):
+                self.backend.warm_pool(template_id, rep, wait=wait, rootfs_image=rootfs_image)
 
     def unwarm_image(self, image: str) -> None:
         """Drain warm pool for a specific image."""
@@ -215,6 +249,10 @@ class SandboxFleet:
         else:
             task_obj = task
 
+        with self._obs.phase("acquire", backend=self.backend_label, family=repo_family(task_obj)):
+            return self._acquire_task(task_obj, timeout_s)
+
+    def _acquire_task(self, task_obj: Task, timeout_s: float | None) -> SandboxHandle:
         if task_obj.template:
             template_id = task_obj.template
             rootfs_image = None
@@ -270,39 +308,70 @@ class SandboxFleet:
             atespace=self.config.tenancy or "ate-env",
             client=client,
             loop_runner=loop_runner,
-            tracer_config=self.config.tracing,
+            tracer_config=self._tracer_config,
         ), ep
 
     def release(self, handle: SandboxHandle | Sequence[SandboxHandle]) -> None:
         """Release sandbox instance(s) back to backend and close runtime(s)."""
-        if isinstance(handle, (list, tuple)):
-            for h in handle:
+        for h in handle if isinstance(handle, (list, tuple)) else (handle,):
+            with self._obs.phase("release", backend=self.backend_label, family=repo_family(h.task)):
                 h.release()
-        else:
-            handle.release()
+
+    def recycle(self, handle: SandboxHandle | Sequence[SandboxHandle]) -> None:
+        """Return sandbox instance(s) to the warm pool (see SandboxHandle.recycle)."""
+        for h in handle if isinstance(handle, (list, tuple)) else (handle,):
+            with self._obs.phase("recycle", backend=self.backend_label, family=repo_family(h.task)):
+                h.recycle()
 
     def teardown(self) -> None:
         """Teardown all resources provisioned by this fleet's run_id."""
-        self.backend.reap(self.run_id)
+        try:
+            with self._obs.phase("teardown", backend=self.backend_label):
+                self.backend.reap(self.run_id)
+        finally:
+            self._obs.warm_reset()
 
     def run(self, process_fn: Callable[[Task, SandboxHandle], Any],
             concurrency: int | None = None) -> list[Any]:
-        """Execute all tasks using the configured strategy."""
+        """Execute all tasks using the configured strategy.
+
+        The run's RunReport is available as ``fleet.report`` afterwards.
+        """
         strat_fn = STRATEGIES.get(self.config.strategy)
         if not strat_fn:
             raise ValueError(f"Unknown strategy: {self.config.strategy}")
         c = concurrency or min(self.config.max_concurrent, len(self._tasks))
-        return strat_fn(self, process_fn, max(1, c))
+        with self._obs.run(self.config.strategy, backend=self.backend_label) as report:
+            self.report = report
+            report.environment = self.describe_environment(concurrency=max(1, c))
+            results = strat_fn(self, process_fn, max(1, c))
+        logger.info("\n%s", report.summary())
+        return results
+
+    def describe_environment(self, concurrency: int | None = None) -> dict[str, dict[str, Any]]:
+        """The run's environment block for the RunReport, keyed by backend."""
+        info: dict[str, Any] = {"atespace": self.config.tenancy}
+        if self.backend_label == "substrate":
+            info["endpoint"] = getattr(self.backend, "api_endpoint", self.config.endpoint)
+        info.update({
+            "strategy": self.config.strategy,
+            "concurrency": concurrency,
+            "tasks": len(self._tasks),
+            "images": len(self.image_counts()),
+        })
+        return {self.backend_label: info}
 
     def _ensure_template_for_image(self, image: str) -> tuple[str, str | None]:
         with self._lock:
             if image in self._image_to_template:
                 return self._image_to_template[image]
-            res: tuple[str, str | None]
-            if image in self.config.image_templates:
-                res = (self.config.image_templates[image], None)
-            else:
-                base = self.config.template or "default-template"
-                res = (base, image)
-            self._image_to_template[image] = res
+            with self._obs.phase("ensure_template", backend=self.backend_label,
+                                 family=repo_family(image)):
+                res: tuple[str, str | None]
+                if image in self.config.image_templates:
+                    res = (self.config.image_templates[image], None)
+                else:
+                    base = self.config.template or "default-template"
+                    res = (base, image)
+                self._image_to_template[image] = res
             return res

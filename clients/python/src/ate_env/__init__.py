@@ -36,7 +36,7 @@ Quickstart:
 # Layer 2: High-Level Fleet Management & Abstractions
 from .async_fleet import AsyncSandboxFleet
 from .client import DEFAULT_ATESPACE, Client
-from .config import FleetConfig
+from .config import FleetConfig, ObservabilityConfig, TracerConfig
 from .env import Env, Process
 
 # Exceptions
@@ -61,6 +61,7 @@ from .errors import (
 from .exceptions import SandboxError
 from .fleet import SandboxFleet
 from .handle import SandboxHandle
+from .observability import Observer, RunReport
 
 # Types
 from .types import (
@@ -94,6 +95,11 @@ __all__ = [
     "SandboxFleet",
     "AsyncSandboxFleet",
     "SandboxHandle",
+    # Telemetry
+    "TracerConfig",
+    "ObservabilityConfig",
+    "Observer",
+    "RunReport",
     # Low-level Errors
     "EnvError",
     "FailedPreconditionError",
