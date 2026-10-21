@@ -35,6 +35,9 @@ import (
 	"time"
 
 	"github.com/agent-substrate/env/guest"
+	"github.com/agent-substrate/env/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -46,6 +49,8 @@ func main() {
 	var sidecars, sidecarReadyz multiFlag
 	flag.Var(&sidecars, "sidecar", "extra runtime to start next to the guest and keep running: an absolute binary path followed by its arguments, whitespace-separated (repeatable)")
 	flag.Var(&sidecarReadyz, "sidecar-readyz", "URL that must answer 2xx before /readyz reports ready, e.g. http://127.0.0.1:44772/ready (repeatable)")
+	enableTracing := flag.Bool("enable-tracing", false, "export OpenTelemetry traces over OTLP/gRPC, configured by OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_INSECURE; continues the trace context ate-env-api sends")
+	enableMetrics := flag.Bool("enable-metrics", false, "serve Prometheus metrics (ate_env_guest_process_duration_seconds) at /metrics on the guest listener")
 	flag.Parse()
 
 	// Reject bad sidecar values before listening, so a misconfigured template
@@ -72,6 +77,19 @@ func main() {
 		EnableProcess:    true,
 		EnableFileSystem: true,
 	}
+	if *enableTracing {
+		shutdown, err := telemetry.SetupOTel(context.Background(), "ate-env-guest")
+		if err != nil {
+			log.Fatalf("-enable-tracing: %v", err)
+		}
+		defer shutdown()
+		cfg.ServerOptions = append(cfg.ServerOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	var metrics *telemetry.GuestMetrics
+	if *enableMetrics {
+		metrics = telemetry.NewGuestMetrics()
+		cfg.OnProcessExit = metrics.ObserveProcess
+	}
 
 	grpcServer, cleanup, err := guest.NewServer(cfg)
 	if err != nil {
@@ -87,6 +105,9 @@ func main() {
 		}
 		io.WriteString(w, "ok\n")
 	})
+	if metrics != nil {
+		mux.Handle("GET /metrics", metrics.Handler())
+	}
 	mux.Handle("/", grpcServer)
 
 	// Enable both HTTP/1.1 (for the /readyz probe) and unencrypted HTTP/2

@@ -60,7 +60,11 @@ func (e *Env) Shell(ctx context.Context, commandLine string) (*ShellResponse, er
 // Run executes `sh -c req.Command` inside the environment, feeds it
 // req.Stdin, and returns its buffered output and exit status once it exits.
 // For incremental output or interactive input use StartProcess.
-func (e *Env) Run(ctx context.Context, req ShellRequest) (*ShellResponse, error) {
+func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err error) {
+	ctx, span := e.client.tracer.start(ctx, opExec,
+		AttrActorName.String(e.id), AttrAtespace.String(e.atespace),
+		AttrCommandExecutable.String(executable(req.Command)))
+	defer func() { endSpan(span, err) }()
 	start := &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"sh", "-c", req.Command},
 		Cwd:     req.Cwd,
@@ -115,6 +119,7 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (*ShellResponse, error)
 		return nil, errors.New("env: output stream ended before the process exited")
 	}
 
+	span.SetAttributes(AttrExitCode.Int(int(exit.GetExitCode())))
 	return &ShellResponse{
 		Stdout:   stdoutBuf.String(),
 		Stderr:   stderrBuf.String(),
@@ -124,7 +129,27 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (*ShellResponse, error)
 
 // ReadFile streams the contents of the file at path inside the environment using FileSystemService.
 // The caller must close the returned reader.
-func (e *Env) ReadFile(ctx context.Context, p string) (io.ReadCloser, error) {
+func (e *Env) ReadFile(ctx context.Context, p string) (_ io.ReadCloser, err error) {
+	ctx, span := e.client.tracer.start(ctx, opReadFile,
+		AttrActorName.String(e.id), AttrAtespace.String(e.atespace), AttrFilePath.String(p))
+	// The span stays open while the caller reads and ends, with the size
+	// read, at EOF, on an error or on Close.
+	defer func() {
+		if err != nil {
+			endSpan(span, err)
+		}
+	}()
+	rc, err := e.readFile(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if e.client.tracer.tracer == nil {
+		return rc, nil
+	}
+	return &spanReader{ReadCloser: rc, span: span}, nil
+}
+
+func (e *Env) readFile(ctx context.Context, p string) (io.ReadCloser, error) {
 	ctx = e.withEnv(ctx)
 	stream, err := e.client.filesystem.ReadFile(ctx, &ateenvv1alpha.ReadFileRequest{
 		Path: p,
@@ -189,7 +214,20 @@ func (e *Env) WriteFileAt(ctx context.Context, p string, offset int64, r io.Read
 	return e.writeFile(ctx, p, r, mode, offset)
 }
 
-func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.FileMode, seekOffset int64) error {
+func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.FileMode, seekOffset int64) (err error) {
+	ctx, span := e.client.tracer.start(ctx, opWriteFile,
+		AttrActorName.String(e.id), AttrAtespace.String(e.atespace), AttrFilePath.String(p))
+	var counter *countingReader
+	if e.client.tracer.tracer != nil {
+		counter = &countingReader{r: r}
+		r = counter
+	}
+	defer func() {
+		if counter != nil {
+			span.SetAttributes(AttrFileSize.Int64(counter.n))
+		}
+		endSpan(span, err)
+	}()
 	ctx = e.withEnv(ctx)
 	stream, err := e.client.filesystem.WriteFile(ctx)
 	if err != nil {

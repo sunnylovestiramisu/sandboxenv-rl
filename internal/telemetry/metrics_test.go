@@ -440,3 +440,27 @@ func TestEnvironmentsCacheTTL(t *testing.T) {
 		t.Errorf("DefaultEnvironmentsCacheTTL = %s, want at least 60s (longer than a usual scrape interval)", DefaultEnvironmentsCacheTTL)
 	}
 }
+
+// The guest registry serves its one family with every exit class, and
+// records an exit in its class.
+func TestGuestMetrics(t *testing.T) {
+	m := NewGuestMetrics()
+	m.ObserveProcess(1500*time.Millisecond, "nonzero")
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mfs) != 1 || mfs[0].GetName() != MetricGuestProcessDurationSeconds {
+		t.Fatalf("guest families = %v, want only %s", mfs, MetricGuestProcessDurationSeconds)
+	}
+	classes := map[string]uint64{}
+	for _, metric := range mfs[0].GetMetric() {
+		classes[metric.GetLabel()[0].GetValue()] = metric.GetHistogram().GetSampleCount()
+	}
+	want := map[string]uint64{"zero": 0, "nonzero": 1, "signal": 0, "timeout": 0}
+	if !reflect.DeepEqual(classes, want) {
+		t.Errorf("exit_class counts = %v, want %v", classes, want)
+	}
+	var nilM *GuestMetrics
+	nilM.ObserveProcess(time.Second, "zero")
+}

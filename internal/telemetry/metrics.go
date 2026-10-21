@@ -409,3 +409,58 @@ func (c *environmentsCollector) refresh(src EnvironmentSource) {
 	c.fetched = time.Now()
 	c.refreshing = false
 }
+
+// MetricGuestProcessDurationSeconds is the one family ate-env-guest serves.
+const MetricGuestProcessDurationSeconds = "ate_env_guest_process_duration_seconds"
+
+// GuestDefinitions lists the families ate-env-guest serves with
+// --enable-metrics, in documentation order.
+var GuestDefinitions = []Definition{
+	{
+		Name: MetricGuestProcessDurationSeconds,
+		Type: TypeHistogram,
+		Help: "Seconds from a process starting in the environment to its exit, by exit_class: zero, nonzero, signal (killed by a signal) or timeout (killed by the process timeout). " +
+			"The command is never a label.",
+		Labels:  []string{"exit_class"},
+		Buckets: SecondsBuckets,
+	},
+}
+
+// GuestMetrics holds the ate-env-guest collectors on a private registry. A
+// nil *GuestMetrics records nothing.
+type GuestMetrics struct {
+	registry        *prometheus.Registry
+	processDuration *prometheus.HistogramVec
+}
+
+// NewGuestMetrics creates the ate-env-guest family on a new private registry,
+// with a series per exit class so all four show before the first exit.
+func NewGuestMetrics() *GuestMetrics {
+	d := GuestDefinitions[0]
+	m := &GuestMetrics{
+		registry:        prometheus.NewRegistry(),
+		processDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: d.Name, Help: d.Help, Buckets: d.Buckets}, d.Labels),
+	}
+	m.registry.MustRegister(m.processDuration)
+	// The exit classes of guest/process (ExitClassZero and siblings).
+	for _, c := range []string{"zero", "nonzero", "signal", "timeout"} {
+		m.processDuration.WithLabelValues(c)
+	}
+	return m
+}
+
+// Registry returns the private registry.
+func (m *GuestMetrics) Registry() *prometheus.Registry { return m.registry }
+
+// Handler serves the registry in the Prometheus exposition format.
+func (m *GuestMetrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+// ObserveProcess records one process exit; it fits guest.Config.OnProcessExit.
+func (m *GuestMetrics) ObserveProcess(d time.Duration, exitClass string) {
+	if m == nil {
+		return
+	}
+	m.processDuration.WithLabelValues(exitClass).Observe(d.Seconds())
+}
