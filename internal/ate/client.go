@@ -36,6 +36,7 @@ import (
 	"sync"
 
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -105,6 +106,13 @@ type Options struct {
 	// plane requires authentication. The file is re-read on each RPC so
 	// rotated tokens are picked up.
 	BearerTokenFile string
+
+	// EnableTracing adds the OpenTelemetry gRPC client handler to the
+	// control-plane and guest connections, so the W3C trace context of each
+	// call's ctx travels to ateapi and the guest and the calls show as
+	// client spans. It uses the global tracer provider and propagator (see
+	// telemetry.SetupOTel). Off, the connections are as before.
+	EnableTracing bool
 }
 
 // Client manages environments on a Substrate cluster.
@@ -138,6 +146,7 @@ func New(opts Options) (*Client, error) {
 	if opts.BearerTokenFile != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: opts.BearerTokenFile}))
 	}
+	dialOpts = append(dialOpts, opts.TracingDialOptions()...)
 	conn, err := grpc.NewClient(opts.ControlAddr, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("ate: dialing control plane: %w", err)
@@ -159,6 +168,20 @@ func (c *Client) Close() error {
 	c.guestPool = nil
 	c.mu.Unlock()
 	return c.conn.Close()
+}
+
+// TracingEnabled reports whether the client was created with EnableTracing.
+func (c *Client) TracingEnabled() bool { return c.opts.EnableTracing }
+
+// TracingDialOptions returns the dial options that add the OpenTelemetry
+// client handler when EnableTracing is set, and none otherwise. Other
+// connections to Substrate (the API server's own guest connections) use it
+// to trace the same way.
+func (o Options) TracingDialOptions() []grpc.DialOption {
+	if !o.EnableTracing {
+		return nil
+	}
+	return []grpc.DialOption{grpc.WithStatsHandler(otelgrpc.NewClientHandler())}
 }
 
 // DialGuest dials the guest daemon inside actor id in atespace via the atenet router.
@@ -184,8 +207,7 @@ func (c *Client) DialGuest(atespace, id string) (*grpc.ClientConn, error) {
 	}
 
 	targetActor := atespace + "/" + id
-	conn, err := grpc.NewClient(
-		c.opts.RouterAddr,
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			ctx = metadata.AppendToOutgoingContext(ctx, TargetActorHeader, targetActor)
@@ -195,7 +217,9 @@ func (c *Client) DialGuest(atespace, id string) (*grpc.ClientConn, error) {
 			ctx = metadata.AppendToOutgoingContext(ctx, TargetActorHeader, targetActor)
 			return streamer(ctx, desc, cc, method, opts...)
 		}),
-	)
+	}
+	dialOpts = append(dialOpts, c.opts.TracingDialOptions()...)
+	conn, err := grpc.NewClient(c.opts.RouterAddr, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("ate: dialing guest %s: %w", key, err)
 	}
@@ -292,6 +316,30 @@ func (c *Client) Get(ctx context.Context, atespace, id string) (*ateapipb.Actor,
 		return nil, fmt.Errorf("ate: getting %q: %w", id, wrapGRPCError(err))
 	}
 	return actor, nil
+}
+
+// List returns every actor in atespace, following the control plane's
+// pagination. If atespace is empty, DefaultAtespace is used.
+func (c *Client) List(ctx context.Context, atespace string) ([]*ateapipb.Actor, error) {
+	if atespace == "" {
+		atespace = DefaultAtespace
+	}
+	var actors []*ateapipb.Actor
+	token := ""
+	for {
+		resp, err := c.control.ListActors(ctx, &ateapipb.ListActorsRequest{
+			Atespace: atespace,
+			Options:  &ateapipb.ListOptions{PageToken: token},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ate: listing actors in %q: %w", atespace, wrapGRPCError(err))
+		}
+		actors = append(actors, resp.GetActors()...)
+		token = resp.GetNextPageToken()
+		if token == "" {
+			return actors, nil
+		}
+	}
 }
 
 // Suspend checkpoints and stops the actor with ID in atespace.

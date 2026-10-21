@@ -31,9 +31,14 @@ import (
 	"github.com/agent-substrate/env/internal/ate"
 	"github.com/agent-substrate/env/internal/mcp"
 	"github.com/agent-substrate/env/internal/portproxy"
+	"github.com/agent-substrate/env/internal/telemetry"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 )
+
+// serviceName is the OpenTelemetry service.name of the API server's spans.
+const serviceName = "ate-env-api"
 
 func main() {
 	var (
@@ -48,8 +53,23 @@ func main() {
 		tokenFile         = flag.String("ateapi-token-file", "", "file with a bearer token for the control plane, e.g. a projected ServiceAccount token with the ateapi audience")
 		wakeBudget        = flag.Duration("wake-budget", apiservice.DefaultWakeBudget, "how long a guest call or a port-proxy request waits for a suspended environment to wake before failing; cold image pulls and cross-region snapshot reads exceed the router's own parking budget")
 		wakeRunningBudget = flag.Duration("wake-running-budget", apiservice.DefaultWakeRunningBudget, "how long a guest call waits when the environment is already RUNNING but the router still answers Unavailable (guest not yet listening vs. path down)")
+		enableTracing     = flag.Bool("enable-tracing", false, "export OpenTelemetry traces over OTLP/gRPC, configured by OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_INSECURE; incoming W3C trace context is continued and passed on to ateapi and the guests")
+		metricsAddr       = flag.String("metrics-listen-addr", ":9090", "address to serve Prometheus metrics on, at /metrics, on a listener of its own; empty disables metrics")
 	)
 	flag.Parse()
+
+	if *enableTracing {
+		_, shutdown, err := telemetry.SetupOTel(context.Background(), serviceName)
+		if err != nil {
+			log.Fatalf("--enable-tracing: %v", err)
+		}
+		defer shutdown()
+		log.Printf("tracing enabled (OTLP endpoint %q)", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	var metrics *telemetry.Metrics
+	if *metricsAddr != "" {
+		metrics = telemetry.NewMetrics()
+	}
 
 	client, err := ate.New(ate.Options{
 		ControlAddr:     *ateapi,
@@ -57,6 +77,7 @@ func main() {
 		HostSuffix:      *hostSuffix,
 		SkipVerify:      *skipVerify,
 		BearerTokenFile: *tokenFile,
+		EnableTracing:   *enableTracing,
 	})
 	if err != nil {
 		log.Fatalf("creating env client: %v", err)
@@ -77,12 +98,38 @@ func main() {
 	apisvc := apiservice.New(client, *atenet, *hostSuffix)
 	apisvc.WakeBudget = *wakeBudget
 	apisvc.WakeRunningBudget = *wakeRunningBudget
+	apisvc.Metrics = metrics
 	defer apisvc.Close()
 
-	grpcServer := grpc.NewServer()
+	var serverOpts []grpc.ServerOption
+	if *enableTracing {
+		serverOpts = append(serverOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	if metrics != nil {
+		serverOpts = append(serverOpts,
+			grpc.ChainUnaryInterceptor(metrics.UnaryServerInterceptor()),
+			grpc.ChainStreamInterceptor(metrics.StreamServerInterceptor()))
+	}
+	grpcServer := grpc.NewServer(serverOpts...)
 	ateenvv1alpha.RegisterEnvironmentServiceServer(grpcServer, apisvc)
 	ateenvv1alpha.RegisterProcessServiceServer(grpcServer, apisvc)
 	ateenvv1alpha.RegisterFileSystemServiceServer(grpcServer, apisvc)
+
+	var metricsSrv *http.Server
+	if metrics != nil {
+		metrics.InitMethods(grpcServer.GetServiceInfo())
+		metrics.InitAtespace(ate.DefaultAtespace)
+		metrics.SetEnvironmentSource(apisvc.EnvironmentCounts)
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("GET /metrics", metrics.Handler())
+		metricsSrv = &http.Server{Addr: *metricsAddr, Handler: metricsMux}
+		go func() {
+			log.Printf("metrics listening on %s", *metricsAddr)
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("metrics server error: %v", err)
+			}
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +182,9 @@ func main() {
 		<-ctx.Done()
 		grpcServer.GracefulStop()
 		_ = srv.Shutdown(context.Background())
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(context.Background())
+		}
 	}()
 
 	log.Printf("ate-env-api listening on %s (ateapi %s, atenet %s, atenet CONNECT %q)", *listen, *ateapi, *atenet, *atenetConn)
