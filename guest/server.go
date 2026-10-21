@@ -19,6 +19,7 @@ package guest
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/agent-substrate/env/guest/filesystem"
 	"github.com/agent-substrate/env/guest/process"
@@ -44,6 +45,12 @@ type Config struct {
 	EnableProcess bool
 	// EnableFileSystem indicates whether the FileSystemService gRPC service is enabled.
 	EnableFileSystem bool
+	// ServerOptions are added to the gRPC server, e.g. the OpenTelemetry
+	// stats handler when the guest runs with --enable-tracing.
+	ServerOptions []grpc.ServerOption
+	// OnProcessExit, if set, is called once per process after it exits with
+	// its run time and exit class (process.ExitClassZero and siblings).
+	OnProcessExit func(d time.Duration, exitClass string)
 }
 
 // DefaultConfig returns the default configuration with all services enabled.
@@ -74,7 +81,7 @@ func FormatEnabledServices(cfg Config) string {
 func NewServer(cfg Config) (*grpc.Server, func(), error) {
 	var cleanups []func()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(cfg.ServerOptions...)
 	reflection.Register(grpcServer)
 
 	if cfg.EnableProcess {
@@ -82,6 +89,7 @@ func NewServer(cfg Config) (*grpc.Server, func(), error) {
 		if cfg.Workspace != "" {
 			trackerCfg.Workspace = cfg.Workspace
 		}
+		trackerCfg.OnExit = cfg.OnProcessExit
 		tracker, err := process.NewTracker(trackerCfg)
 		if err != nil {
 			return nil, nil, fmt.Errorf("initializing process tracker: %w", err)

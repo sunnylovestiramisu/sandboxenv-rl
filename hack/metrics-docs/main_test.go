@@ -35,7 +35,7 @@ func TestMetricsDocIsFresh(t *testing.T) {
 	if !bytes.Equal(buf.Bytes(), committed) {
 		t.Error("docs/metrics.md is stale; run: go run ./hack/metrics-docs > docs/metrics.md")
 	}
-	for _, d := range telemetry.Definitions {
+	for _, d := range append(telemetry.Definitions, telemetry.GuestDefinitions...) {
 		if !strings.Contains(buf.String(), "`"+d.Name+"`") {
 			t.Errorf("rendered doc lacks %s", d.Name)
 		}
