@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>RL Sandbox Observability – __RUN_ID__</title>
+<script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+<style>
+:root{--app-background:#fcfcfb;--app-foreground:#1f1f1e;--app-card:#fff;--app-border:#e4e3df;--app-primary:#1a73e8;--app-muted-foreground:#5f5e5a}
+@media (prefers-color-scheme:dark){:root{--app-background:#1a1a19;--app-foreground:#f1f1ef;--app-card:#232322;--app-border:#3a3a38;--app-primary:#8ab4f8;--app-muted-foreground:#b5b4ad}}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.tab{padding:6px 12px;border-radius:8px;font-size:13px;border:1px solid transparent;cursor:pointer;color:var(--app-muted-foreground)}
+.tab.on{background:var(--app-card);border-color:var(--app-border);color:var(--app-foreground);font-weight:600}
+.card{background:var(--app-card);border:1px solid var(--app-border);border-radius:12px;padding:14px}
+.tag{font-size:10px;padding:1px 5px;border-radius:4px;border:1px solid var(--app-border);color:var(--app-muted-foreground);margin-left:6px;vertical-align:middle}
+.sub{color:var(--app-muted-foreground);font-size:12px}
+svg text{fill:var(--app-muted-foreground);font-size:10px}
+.axis line,.axis path{stroke:var(--app-border)}
+.lg{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-size:11px;color:var(--app-muted-foreground)}
+.lg i{width:11px;height:9px;border-radius:2px;display:inline-block}
+#tip{position:fixed;pointer-events:none;background:var(--app-card);border:1px solid var(--app-border);color:var(--app-foreground);font-size:11px;padding:5px 7px;border-radius:6px;display:none;z-index:10;max-width:280px}
+table td,table th{padding:3px 6px;text-align:left}
+</style>
+</head>
+<body class="bg-[var(--app-background)] text-[var(--app-foreground)] antialiased">
+<header class="sticky top-0 z-[5] bg-[var(--app-background)] border-b border-[var(--app-border)] px-4 py-3 flex flex-wrap items-center gap-3">
+  <div class="font-semibold">RL Sandbox Observability</div>
+  <div class="sub" id="hdr"></div>
+  <span class="ml-auto sub" id="join"></span>
+</header>
+<nav id="tabs" class="px-4 pt-3 flex flex-wrap gap-1"></nav>
+<main id="main" class="p-4 max-w-[1400px] mx-auto"></main>
+<div id="tip"></div>
+<footer class="px-4 pb-5 sub">M = measured (SDK <code>rl_sandbox.*</code> events, Substrate records) · D = derived. Built by tools/rl_obs from __GENERATED__.</footer>
+<script>
+const DATA = __RUN_JSON__;
+const M = DATA.meta, K = DATA.kpis;
+const C={warm:'#1baf7a',snapshot:'#2a78d6',cold:'#eb6834',timeout:'#e34948',failed:'#9b2c2c',unknown:'#8a8985',idle:'rgba(128,128,128,.12)',
+  sdk:'#9085e9',boot:'#e34948',download:'#2a78d6',unpack:'#eb6834',restore:'#1baf7a',acquire:'#eb6834',exec:'#2a78d6',other:'#4a3aa7',
+  engine:'#4a3aa7',trainer_step:'#2a78d6',weight_sync:'#eda100',prefetch:'#1baf7a'};
+const CODE_NAMES=['none','warm','snapshot','cold','timeout','failed','unknown'];
+const NS='http://www.w3.org/2000/svg';
+function el(t,a={},p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
+function svg(p,w,h){const s=el('svg',{viewBox:`0 0 ${w} ${h}`,width:'100%'});p.appendChild(s);return s}
+const tip=document.getElementById('tip');
+function hover(n,html){n.addEventListener('mousemove',e=>{tip.style.display='block';tip.innerHTML=html;tip.style.left=Math.min(e.clientX+12,innerWidth-290)+'px';tip.style.top=(e.clientY+12)+'px'});n.addEventListener('mouseleave',()=>tip.style.display='none')}
+function h(x){const d=document.createElement('div');d.innerHTML=x.trim();return d.firstChild}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const pct=x=>x==null?'–':(100*x).toFixed(1)+'%';
+const fs=x=>x==null?'–':x<1?(x*1000).toFixed(0)+' ms':x<120?x.toFixed(1)+' s':(x/60).toFixed(1)+' min';
+const mins=s=>(s/60).toFixed(1)+'m';
+function card(p,title,sub,tag){const c=h(`<section class="card"><div class="font-semibold text-sm">${title}${tag?`<span class="tag">${tag}</span>`:''}</div>${sub?`<div class="sub mb-2">${sub}</div>`:''}<div class="body"></div></section>`);p.appendChild(c);return c.querySelector('.body')}
+function legend(p,items){const d=document.createElement('div');d.className='mb-1';d.innerHTML=items.map(([n,c])=>`<span class="lg"><i style="background:${c}"></i>${n}</span>`).join('');p.appendChild(d)}
+function axisX(s,x0,x1,y,ticks,fmt,sc){const g=el('g',{class:'axis'},s);el('line',{x1:x0,x2:x1,y1:y,y2:y},g);ticks.forEach(t=>{const x=sc(t);el('line',{x1:x,x2:x,y1:y,y2:y+3},g);el('text',{x,y:y+13,'text-anchor':'middle'},g).textContent=fmt(t)})}
+function axisY(s,x,y0,y1,ticks,fmt,sc){const g=el('g',{class:'axis'},s);el('line',{x1:x,x2:x,y1:y0,y2:y1},g);ticks.forEach(t=>{const y=sc(t);el('line',{x1:x-3,x2:x,y1:y,y2:y},g);el('text',{x:x-5,y:y+3,'text-anchor':'end'},g).textContent=fmt(t)})}
+function niceTicks(mx,n=5){if(!mx)return[0];const st=Math.pow(10,Math.floor(Math.log10(mx/n)));const m=[1,2,5,10].find(m=>mx/(st*m)<=n)||10;const out=[];for(let v=0;v<=mx+1e-9;v+=st*m)out.push(+v.toFixed(6));return out}
+function timeTicks(){const d=M.duration_s, step=[30,60,120,300,600,900,1800,3600].find(s=>d/s<=8)||3600;const t=[];for(let v=0;v<=d;v+=step)t.push(v);return t}
+function kpis(p,items){const g=h('<div class="grid gap-3" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))"></div>');items.forEach(([v,l,n,t,bad])=>g.appendChild(h(`<div class="card"><div class="text-2xl font-semibold ${bad?'text-red-500':''}">${v}</div><div class="text-xs">${l}<span class="tag">${t}</span></div><div class="sub">${n||''}</div></div>`)));p.appendChild(g)}
+function grid(cols){const g=h(`<div class="grid gap-3 mt-3" style="grid-template-columns:${cols}"></div>`);main.appendChild(g);return g}
+function empty(b,msg){b.appendChild(h(`<div class="sub py-6 text-center">${msg}</div>`))}
+
+function heatmap(body,rows,colorOf,label,o){const W=1000,lh=o.lh||7,top=6,left=90,H=top+rows.length*lh+24,s=svg(body,W,H),nb=rows[0]?.length||1,cw=(W-left-10)/nb;
+  rows.forEach((r,i)=>{if(i%o.every===0)el('text',{x:left-6,y:top+i*lh+lh-1,'text-anchor':'end'},s).textContent=label(i);
+    r.forEach((v,j)=>{const c=el('rect',{x:left+j*cw,y:top+i*lh,width:Math.max(.5,cw-.6),height:lh-.8,fill:colorOf(v),rx:1},s);if(v!==null&&v!==0)hover(c,o.tip(i,j,v))})});
+  axisX(s,left,W-10,top+rows.length*lh+2,timeTicks(),mins,t=>left+t/M.bin_s*cw)}
+function stacked(body,data,keys,colors,o){const W=1000,H=o.h||210,l=50,t=8,bH=H-t-24,n=data.length,bw=(W-l-10)/n;
+  const tot=data.map(d=>d?keys.reduce((a,k)=>a+(d[k]||0),0):0),mx=(Math.max(...tot)||1)*1.08,y=v=>t+bH-(v/mx)*bH,s=svg(body,W,H);
+  axisY(s,l,t,t+bH,niceTicks(mx),o.yf,y);
+  data.forEach((d,i)=>{if(!d)return;let acc=0;keys.forEach(k=>{const v=d[k]||0;const r=el('rect',{x:l+i*bw+.5,y:y(acc+v),width:Math.max(.5,bw-1),height:Math.max(0,y(acc)-y(acc+v)),fill:colors[k]},s);acc+=v;hover(r,o.tip(i,d))})});
+  axisX(s,l,W-10,t+bH,o.xt,o.xf,o.xs)}
+
+const VIEWS=[['overview','Run overview'],['sandboxes','Sandboxes'],['breakdown','Acquire breakdown'],['timeline','Timeline'],['placement','Placement & cache'],['traj','Trajectories']];
+const tabs=document.getElementById('tabs'),main=document.getElementById('main');
+document.getElementById('hdr').innerHTML=`run <b>${esc(M.run_id)}</b> · backend <b>${esc(M.backend)}</b> · atespace ${esc(M.atespace)} · ${M.n_workers} workers · ${M.n_trajectories} trajectories · ${M.n_batches} batches · ${fs(M.duration_s)}`;
+document.getElementById('join').textContent=M.join.rate==null?'no Substrate records joined':`Substrate join ${pct(M.join.rate)} (${M.join.matched}/${M.join.eligible})`;
+VIEWS.forEach(([id,n])=>{const b=h(`<button class="tab" data-v="${id}">${n}</button>`);b.onclick=()=>show(id);tabs.appendChild(b)});
+function show(id){[...tabs.children].forEach(b=>b.classList.toggle('on',b.dataset.v===id));main.innerHTML='';R[id]();history.replaceState(null,'','#'+id)}
+const binX={xt:timeTicks().map(t=>t/M.bin_s),xf:v=>mins(v*M.bin_s),xs:null};
+const R={};
+
+R.overview=()=>{const mix=K.mix||{};
+  kpis(main,[[pct(K.wait_share),'rollout time waiting for a sandbox','Σ effective acquire / Σ trajectory time','D'],
+    [fs(K.acq_p50),'effective acquire p50',`p90 ${fs(K.acq_p90)} · p99 ${fs(K.acq_p99)} (SDK wait + lazy resume)`,'D'],
+    [`${(100*(mix.warm||0)).toFixed(0)} / ${(100*(mix.snapshot||0)).toFixed(0)} / ${(100*(mix.cold||0)).toFixed(1)}%`,'warm / snapshot / cold',`unknown ${pct(mix.unknown)}`,'M'],
+    [pct(K.timeout_share),'acquire timeouts','rl_sandbox.acquire.timeout','M',K.timeout_share>0],
+    [pct(K.infra_failed_share),'infra-failed trajectories','acquire failures + step infra errors','M',K.infra_failed_share>0],
+    [pct(K.cache_hit),'image-cache hit (joined restores)',`miss = oci_unpack > 1 s`,'D'],
+    [fs(K.step_p50),'step time p50','engine + trainer + sync per batch','M']]);
+  const g=grid('1fr 1fr');let b=card(g,'Where a trajectory spends time (median per batch)','Acquire = SDK wait + resume (restore record); exec = tool time; other = model turns, overhead, sibling wait.','D');
+  const tb=DATA.trajectories.per_batch;if(!tb.length)empty(b,'no completed trajectories');else{legend(b,[['acquire',C.acquire],['tool / exec',C.exec],['other (model, overhead)',C.other]]);
+  stacked(b,tb,['acquire','exec','other'],C,{h:220,yf:v=>fs(v),xt:tb.map((_,i)=>i),xf:i=>'b'+tb[i]?.batch,xs:i=>50+(i+.5)*(950-10)/tb.length,tip:(i,d)=>`batch ${d.batch} (n=${d.n})<br>acquire ${fs(d.acquire)} · exec ${fs(d.exec)} · other ${fs(d.other)}`})}
+  b=card(g,'Errors','Acquire timeouts/failures and step infrastructure errors, by type','M');
+  if(!DATA.errors.length)empty(b,'no errors');else b.appendChild(h(`<div class="grid gap-1 text-xs">${DATA.errors.map(([n,k])=>`<div class="flex items-center gap-2"><div class="w-72 sub">${esc(n)}</div><div style="width:${Math.min(400,k*8)}px;height:10px;background:${C.timeout};border-radius:2px"></div><div>${k}</div></div>`).join('')}</div>`));
+};
+R.sandboxes=()=>{const S=DATA.sandboxes,c=K.counts||{},n=M.n_trajectories||1;
+  kpis(main,[[pct((c.warm||0)/n),'warm','resumed pre-warmed actor','M'],[pct((c.snapshot||0)/n),'snapshot restore','golden snapshot','M'],[pct((c.cold||0)/n),'cold start','boot from image','M'],[pct((c.timeout||0)/n),'acquire timeout','exact, from events','M',c.timeout>0],[fs(K.acq_p50),'effective acquire p50','p99 '+fs(K.acq_p99),'D'],[fs(K.hold_p50),'sandbox hold p50','ready → released','M'],[pct(K.acq_share_of_hold),'acquire share of hold','Σ acquire / Σ hold','D']]);
+  const g=grid('1fr');let b=card(g,'Acquire source by worker over time','One row per rollout worker; color = worst outcome of acquires started in the bin.','M');
+  legend(b,[['warm',C.warm],['snapshot',C.snapshot],['cold',C.cold],['timeout',C.timeout],['failed',C.failed],['unknown',C.unknown]]);
+  if(!S.workers.length)empty(b,'no worker ids (harness did not set rl.worker_id)');else heatmap(b,S.heat,v=>v?C[CODE_NAMES[v]]:C.idle,i=>S.workers[i],{every:Math.max(1,Math.ceil(S.workers.length/12)),lh:Math.max(4,Math.min(10,Math.floor(600/S.workers.length))),tip:(i,j,v)=>`${esc(S.workers[i])} · ${mins(j*M.bin_s)}<br>${CODE_NAMES[v]}`});
+  const g2=grid('1fr 1fr');b=card(g2,'Acquire outcome over time','All workers, per bin','M');legend(b,[['warm',C.warm],['snapshot',C.snapshot],['cold',C.cold],['unknown',C.unknown],['timeout',C.timeout],['failed',C.failed]]);
+  stacked(b,S.outcome.map(o=>Object.keys(o).length?o:null),['warm','snapshot','cold','unknown','timeout','failed'],C,{h:200,yf:v=>v,...binX,xs:v=>50+v*(950-10)/M.n_bins,tip:(i,d)=>`${mins(i*M.bin_s)}<br>`+Object.entries(d).map(([k,v])=>`${k} ${v}`).join(' · ')});
+  b=card(g2,'Effective acquire time by source','log-scale x (10 ms – 1000 s), √-scale y','D');legend(b,[['warm',C.warm],['snapshot',C.snapshot],['cold',C.cold],['unknown',C.unknown],['timeout',C.timeout]]);
+  const E=S.hist.edges,W=1000,H=200,l=50,t=8,bH=H-t-24,s=svg(b,W,H),bw=(W-l-10)/(E.length-1),all=Object.values(S.hist.counts).flat(),mx=Math.max(1,...all),y=v=>t+bH-Math.sqrt(v/mx)*bH;
+  axisY(s,l,t,t+bH,[0,Math.round(mx/4),mx],v=>v,y);Object.entries(S.hist.counts).forEach(([k,cs])=>cs.forEach((v,i)=>{if(!v)return;const r=el('rect',{x:l+i*bw,y:y(v),width:bw-1,height:t+bH-y(v),fill:C[k],opacity:.85},s);hover(r,`${k}: ${v}<br>${fs(10**E[i])}–${fs(10**E[i+1])}`)}));
+  axisX(s,l,W-10,t+bH,[-2,-1,0,1,2,3],v=>fs(10**v),v=>l+(v+2)/.1*bw);
+};
+R.breakdown=()=>{const B=DATA.breakdown,g=grid('1fr');let b=card(g,'Where non-warm acquire time goes (Substrate drill-down)','Mean per bin over acquires joined to a Substrate restore record (ate.actor.uid / name). Phases overlap; bars stack them for scale. Boots from the image leave no restore record; their resume time (from actor state changes) is shown as one segment.','M');
+  legend(b,[['SDK wait',C.sdk],['download',C.download],['oci_unpack',C.unpack],['ateom_restore',C.restore],['boot from image (no phases)',C.boot]]);
+  if(!B.bins.some(x=>x))empty(b,'no joined non-warm acquires');else stacked(b,B.bins,['sdk','download','unpack','restore','boot'],C,{h:240,yf:v=>fs(v),...binX,xs:v=>50+v*(950-10)/M.n_bins,tip:(i,d)=>`${mins(i*M.bin_s)} · n=${d.n} (${d.n_boot||0} boots)<br>sdk ${fs(d.sdk)} · download ${fs(d.download)}<br>unpack ${fs(d.unpack)} · restore ${fs(d.restore)} · boot ${fs(d.boot)}`});
+  const g2=grid('1fr');b=card(g2,'Steady state (image cached), p50','What a good restore costs','M');const st=B.steady;
+  b.appendChild(h(`<div class="text-xs grid gap-1">${[['SDK wait',st.sdk,C.sdk],['download',st.download,C.download],['oci_unpack',st.unpack,C.unpack],['ateom_restore',st.restore,C.restore]].map(([n,v,c])=>`<div class="flex items-center gap-2"><div class="w-28 sub">${n}</div><div style="width:${v?Math.max(4,(Math.log10(v*1000+1)/4)*380):0}px;height:12px;background:${c};border-radius:2px"></div><div>${fs(v)}</div></div>`).join('')}<div class="sub mt-1">restore total p50 ${fs(st.total)}</div></div>`));
+};
+R.timeline=()=>{const T=DATA.timeline,g=grid('1fr'),b=card(g,'Run timeline','Harness phases from rl_sandbox.phase; sandbox lanes from acquire / warm events and joined restore records.','M/D');
+  const lanes=['engine','trainer_step','weight_sync','prefetch','warm requested','acquires','warm hits','image pulls (misses)'],W=1000,l=150,LH=32,H=lanes.length*LH+30,s=svg(b,W,H),xs=t=>l+t/M.duration_s*(W-l-10);
+  lanes.forEach((n,i)=>{el('text',{x:l-8,y:i*LH+19,'text-anchor':'end'},s).textContent=n;el('line',{x1:l,x2:W-10,y1:i*LH+LH,y2:i*LH+LH,stroke:'var(--app-border)'},s)});
+  T.phases.forEach(p=>{const i=['engine','trainer_step','weight_sync','prefetch'].indexOf(p.phase);if(i<0)return;const r=el('rect',{x:xs(p.start),y:i*LH+7,width:Math.max(2,xs(p.start+p.dur)-xs(p.start)),height:LH-14,fill:C[p.phase],rx:3},s);hover(r,`${p.phase} batch ${p.batch??'–'}<br>${fs(p.dur)} at ${mins(p.start)}`)});
+  const bar=(lane,arr,color)=>{const mx=Math.max(1,...arr),bw=(W-l-10)/arr.length;arr.forEach((v,i)=>{if(!v)return;const hh=v/mx*(LH-10);const r=el('rect',{x:l+i*bw,y:lane*LH+LH-5-hh,width:Math.max(.5,bw-1),height:hh,fill:color,opacity:.8},s);hover(r,`${lanes[lane]}: ${v} at ${mins(i*M.bin_s)}`)})};
+  bar(4,T.warm_requested,C.sdk);bar(5,T.acquires,C.snapshot);bar(6,T.warm_hits,C.warm);bar(7,T.misses,C.cold);
+  axisX(s,l,W-10,H-22,timeTicks(),mins,xs);
+};
+R.placement=()=>{const P=DATA.placement;kpis(main,[[pct(K.cache_hit),'image-cache hit','joined restores','D'],[P.pulls_per_new_image??'–','pulls per missed image','distinct (node, image) misses / images','D'],[P.pulls_total,'image pulls','distinct (node, image)','D'],[esc(P.worst_node||'–'),'worst node',P.worst_ratio==null?'':'hit '+pct(P.worst_ratio),'D',P.worst_ratio!=null&&P.worst_ratio<.7]]);
+  const g=grid('1fr');let b=card(g,'Image-cache hit ratio by node over time','Node from the restore record; green = hit, red = miss (oci_unpack > 1 s).','D');
+  if(!P.nodes.length)empty(b,'no node information on joined restore records');else heatmap(b,P.rows,v=>v==null?C.idle:`hsl(${Math.round(v*130)},65%,48%)`,i=>P.nodes[i],{every:Math.max(1,Math.ceil(P.nodes.length/16)),lh:10,tip:(i,j,v)=>`${esc(P.nodes[i])} · ${mins(j*M.bin_s)}<br>hit ${pct(v)}`});
+  b=card(grid('1fr'),'OCI unpack p50','cache miss vs hit','M');b.appendChild(h(`<div class="text-xs grid gap-2">${[['miss',P.unpack_p50_miss,C.cold],['hit',P.unpack_p50_hit,C.warm]].map(([n,v,c])=>`<div class="flex items-center gap-2"><div class="w-16 sub">${n}</div><div style="width:${v?Math.max(4,Math.log10(v*1000+1)/4*400):0}px;height:14px;background:${c};border-radius:2px"></div><div>${fs(v)}</div></div>`).join('')}</div>`));
+};
+R.traj=()=>{const T=DATA.trajectories,g=grid('1fr 1fr');let b=card(g,'Trajectory latency per batch','p50 / p90 / p99 / max total time','M');
+  const tb=T.per_batch;if(!tb.length)empty(b,'no completed trajectories');else{const W=1000,H=200,l=50,t=8,bH=H-t-24,s=svg(b,W,H),mx=Math.max(...tb.map(d=>d.max))*1.08,y=v=>t+bH-v/mx*bH,xs=i=>l+(tb.length>1?i*(W-l-20)/(tb.length-1):(W-l)/2);
+    axisY(s,l,t,t+bH,niceTicks(mx),v=>fs(v),y);[['p50',C.warm],['p90',C.snapshot],['p99',C.weight_sync],['max',C.timeout]].forEach(([k,c])=>el('path',{d:tb.map((d,i)=>(i?'L':'M')+xs(i)+','+y(d[k])).join(''),fill:'none',stroke:c,'stroke-width':1.8},s));
+    axisX(s,l,W-10,t+bH,tb.map((_,i)=>i),i=>'b'+tb[i]?.batch,xs);legend(b,[['p50',C.warm],['p90',C.snapshot],['p99',C.weight_sync],['max',C.timeout]])}
+  b=card(g,'Slowest trajectories','total = acquire start → release','M');
+  b.appendChild(h(`<table class="w-full text-xs"><tr class="sub"><th>trajectory</th><th>batch</th><th>total</th><th>acquire</th><th>exec</th><th>source</th><th>node</th></tr>${T.slowest.map(r=>`<tr class="border-t border-[var(--app-border)]"><td>${esc(r.id)}</td><td>${esc(r.batch)}</td><td>${fs(r.total)}</td><td>${fs(r.acquire)}</td><td>${fs(r.exec)}</td><td style="color:${C[r.source]||''}">${esc(r.source)}</td><td>${esc(r.node||'')}</td></tr>`).join('')}</table>`));
+};
+show((location.hash||'#overview').slice(1).replace(/[^a-z]/g,'')in R?(location.hash||'#overview').slice(1):'overview');
+</script>
+</body>
+</html>
