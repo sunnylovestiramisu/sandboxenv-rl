@@ -36,6 +36,7 @@ import (
 	"sync"
 
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -134,7 +135,12 @@ func New(opts Options) (*Client, error) {
 		creds = credentials.NewTLS(&tls.Config{InsecureSkipVerify: opts.SkipVerify})
 	}
 
-	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	dialOpts := []grpc.DialOption{
+		grpc.WithTransportCredentials(creds),
+		// Propagate the caller's trace context (and record client spans when a
+		// tracer provider is installed) on every control-plane RPC.
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	}
 	if opts.BearerTokenFile != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(fileTokenCreds{path: opts.BearerTokenFile}))
 	}
@@ -187,6 +193,7 @@ func (c *Client) DialGuest(atespace, id string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(
 		c.opts.RouterAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			ctx = metadata.AppendToOutgoingContext(ctx, TargetActorHeader, targetActor)
 			return invoker(ctx, method, req, reply, cc, opts...)

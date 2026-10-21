@@ -624,3 +624,18 @@ func TestWorkerPoolNameMustFitALabelValue(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildManifestsOTLPEndpoint(t *testing.T) {
+	cfg := testManifestConfig()
+	container := buildAPIDeployment(cfg).Spec.Template.Spec.Containers[0]
+	if len(container.Env) != 0 {
+		t.Errorf("api env without --otlp-endpoint = %+v, want none", container.Env)
+	}
+
+	cfg.otlpEndpoint = "http://collector.otel:4317"
+	container = buildAPIDeployment(cfg).Spec.Template.Spec.Containers[0]
+	want := []corev1.EnvVar{{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://collector.otel:4317"}}
+	if len(container.Env) != 1 || container.Env[0] != want[0] {
+		t.Errorf("api env = %+v, want %+v", container.Env, want)
+	}
+}

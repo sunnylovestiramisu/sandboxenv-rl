@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/env/internal/ate"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -496,6 +497,11 @@ func (s *Server) guestConn(ctx context.Context, atespace, id string) (*grpc.Clie
 	conn, err := grpc.NewClient(
 		s.routerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// Carry the caller's trace context to the router. Its wake-on-request
+		// path continues an incoming traceparent into ResumeActor, so the
+		// restore a guest call triggers joins the caller's (e.g. SDK episode's)
+		// trace instead of starting a new one.
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 			ctx = metadata.AppendToOutgoingContext(ctx, ate.TargetActorHeader, targetActor)
 			return invoker(ctx, method, req, reply, cc, opts...)

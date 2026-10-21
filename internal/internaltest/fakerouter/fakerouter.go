@@ -39,6 +39,10 @@ type Router struct {
 	// running. Non-running actors get a 503.
 	Running func(id string) bool
 
+	// Seen, if set, is called with every request the router receives, before
+	// routing, e.g. to inspect the headers a client sent.
+	Seen func(req *http.Request)
+
 	mu     sync.Mutex
 	guests map[string]http.Handler
 	ports  map[portKey]http.Handler
@@ -71,6 +75,9 @@ func (r *Router) Register(id string, h http.Handler) {
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r.Seen != nil {
+		r.Seen(req)
+	}
 	id, ok := actorID(req)
 	if !ok {
 		http.Error(w, "invalid actor reference", http.StatusNotFound)

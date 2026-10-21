@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -47,6 +48,7 @@ type Server struct {
 	mu        sync.Mutex
 	actors    map[string]*ateapipb.Actor
 	atespaces map[string]*ateapipb.Atespace
+	lastMD    metadata.MD
 	// DenyCreateAtespace makes CreateAtespace fail with PermissionDenied, as
 	// Substrate does for an identity allowed to use but not create atespaces.
 	DenyCreateAtespace bool
@@ -221,9 +223,18 @@ func clone(a *ateapipb.Actor) *ateapipb.Actor {
 	return proto.Clone(a).(*ateapipb.Actor)
 }
 
+// LastIncomingMetadata returns the gRPC metadata of the most recent GetActor
+// call, e.g. to check that trace context was propagated.
+func (s *Server) LastIncomingMetadata() metadata.MD {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastMD.Copy()
+}
+
 func (s *Server) GetActor(ctx context.Context, req *ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastMD, _ = metadata.FromIncomingContext(ctx)
 	a, err := s.get(req.GetActor())
 	if err != nil {
 		return nil, err

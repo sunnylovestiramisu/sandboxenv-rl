@@ -31,7 +31,9 @@ import (
 	"github.com/agent-substrate/env/internal/ate"
 	"github.com/agent-substrate/env/internal/mcp"
 	"github.com/agent-substrate/env/internal/portproxy"
+	"github.com/agent-substrate/env/internal/telemetry"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 )
 
@@ -50,6 +52,22 @@ func main() {
 		wakeRunningBudget = flag.Duration("wake-running-budget", apiservice.DefaultWakeRunningBudget, "how long a guest call waits when the environment is already RUNNING but the router still answers Unavailable (guest not yet listening vs. path down)")
 	)
 	flag.Parse()
+
+	// Tracing first, so the control-plane connection is created with the
+	// propagator in place. Configured from the OTEL_* environment.
+	tracing, err := telemetry.InitTracing(context.Background(), "ate-env-api")
+	if err != nil {
+		log.Printf("tracing disabled: %v", err)
+	} else if tracing.Exporting {
+		log.Printf("exporting traces over OTLP")
+	}
+	defer func() {
+		if tracing != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = tracing.Shutdown(ctx)
+		}
+	}()
 
 	client, err := ate.New(ate.Options{
 		ControlAddr:     *ateapi,
@@ -79,7 +97,10 @@ func main() {
 	apisvc.WakeRunningBudget = *wakeRunningBudget
 	defer apisvc.Close()
 
-	grpcServer := grpc.NewServer()
+	// The stats handler continues the caller's trace (W3C traceparent from the
+	// SDK) and records a server span per RPC; outgoing calls to ateapi and the
+	// router carry it on through the ate client's client handler.
+	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	ateenvv1alpha.RegisterEnvironmentServiceServer(grpcServer, apisvc)
 	ateenvv1alpha.RegisterProcessServiceServer(grpcServer, apisvc)
 	ateenvv1alpha.RegisterFileSystemServiceServer(grpcServer, apisvc)

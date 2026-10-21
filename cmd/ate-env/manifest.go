@@ -93,6 +93,9 @@ type manifestConfig struct {
 	apiImage    string
 	apiReplicas int32
 	apiPort     int32
+	// otlpEndpoint, if set, is the OTLP/gRPC collector ate-env-api exports
+	// its trace spans to (OTEL_EXPORTER_OTLP_ENDPOINT).
+	otlpEndpoint string
 }
 
 func (c *manifestConfig) resolveImages() error {
@@ -297,6 +300,7 @@ the "template" subcommand: ate-env manifest template`,
 	cmd.Flags().StringVar(&mCfg.apiImage, "api-image", defaultAPIImage, imageDefaultHelp("digest-pinned ate-env-api image for the API service", defaultAPIImage))
 	cmd.Flags().Int32Var(&mCfg.apiReplicas, "api-replicas", 1, "number of API service replicas")
 	cmd.Flags().Int32Var(&mCfg.apiPort, "api-port", 7777, "port the ate-env-api service listens on")
+	cmd.Flags().StringVar(&mCfg.otlpEndpoint, "otlp-endpoint", "", "OTLP/gRPC collector ate-env-api exports trace spans to, e.g. http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317 on GKE; empty disables export (trace context is propagated to Substrate either way)")
 	cmd.Flags().StringVar(&mCfg.workerPool, "workerpool", "", "WorkerPool name (defaults to <template>-workerpool)")
 	cmd.Flags().Int32Var(&mCfg.replicas, "replicas", 5, "number of pre-warmed worker pods")
 
@@ -673,6 +677,10 @@ func buildAPIDeployment(cfg manifestConfig) *appsv1.Deployment {
 	labels := map[string]string{"app": apiName}
 	replicas := cfg.apiReplicas
 	tokenExpiration := int64(7200)
+	var env []corev1.EnvVar
+	if cfg.otlpEndpoint != "" {
+		env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: cfg.otlpEndpoint})
+	}
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -700,6 +708,7 @@ func buildAPIDeployment(cfg manifestConfig) *appsv1.Deployment {
 							"-listen", fmt.Sprintf("0.0.0.0:%d", cfg.apiPort),
 							"-ateapi-token-file=/var/run/secrets/ateapi/token",
 						},
+						Env:   env,
 						Ports: []corev1.ContainerPort{{ContainerPort: cfg.apiPort}},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "ateapi-token",
