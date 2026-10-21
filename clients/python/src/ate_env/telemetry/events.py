@@ -252,6 +252,10 @@ class Recorder:
         for k, v in attrs.items():
             if v is not None:
                 record[k] = v
+        ids = _trace_ids()
+        if ids is not None:
+            record.setdefault("trace_id", ids[0])
+            record.setdefault("span_id", ids[1])
         try:
             self.sink.write(record)
         except Exception:
@@ -262,6 +266,12 @@ class Recorder:
 
     def close(self) -> None:
         self.sink.close()
+
+
+def _trace_ids() -> tuple[str, str] | None:
+    from . import otel  # local import keeps the optional dependency optional
+
+    return otel.current_trace_ids()
 
 
 _recorder: Recorder | None = None

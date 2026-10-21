@@ -73,22 +73,52 @@ _current: contextvars.ContextVar[EpisodeContext | None] = contextvars.ContextVar
 )
 
 
+_FIELD_NAMES = frozenset(f.name for f in fields(EpisodeContext))
+
+
 def current_episode() -> EpisodeContext | None:
-    """Return the episode context active in the calling context, if any."""
-    return _current.get()
+    """Return the episode context active in the calling context, if any.
+
+    Falls back to ``rl.*`` entries in OpenTelemetry baggage (e.g. set by a
+    harness process upstream) when no context was set in this process.
+    """
+    ctx = _current.get()
+    if ctx is not None:
+        return ctx
+    from . import otel  # local import: keeps this module free of optional deps
+
+    found = {k: v for k, v in otel.baggage_fields().items() if k in _FIELD_NAMES}
+    if not found:
+        return None
+    if "attempt" in found:
+        try:
+            found["attempt"] = int(found["attempt"])
+        except (TypeError, ValueError):
+            found.pop("attempt")
+    return EpisodeContext(**found)
 
 
 @contextmanager
-def episode(ctx: EpisodeContext | None = None, **fields_: Any) -> Iterator[EpisodeContext]:
+def episode(ctx: EpisodeContext | None = None, *, trace: bool = False,
+            **fields_: Any) -> Iterator[EpisodeContext]:
     """Scope an episode context; nested scopes override only the fields they set.
 
-    Accepts an ``EpisodeContext`` and/or keyword fields (keywords win).
+    Accepts an ``EpisodeContext`` and/or keyword fields (keywords win). With
+    ``trace=True`` and OpenTelemetry tracing active, the scope is also an
+    ``rl_sandbox.episode`` span, so the episode's acquire, steps and the
+    backend RPCs form one trace.
     """
     new = EpisodeContext(**fields_) if fields_ else None
     base = current_episode() or EpisodeContext()
     effective = base.merged(ctx).merged(new)
     token = _current.set(effective)
     try:
-        yield effective
+        if trace:
+            from . import otel
+
+            with otel.span("rl_sandbox.episode", effective.attrs()):
+                yield effective
+        else:
+            yield effective
     finally:
         _current.reset(token)

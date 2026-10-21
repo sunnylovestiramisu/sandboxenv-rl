@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import time
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from typing import Any
 
 from .backend.base import BackendDriver
 from .errors import CommandExecutionError, CommandTimeoutError
@@ -71,7 +73,8 @@ class SandboxHandle:
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
         t0 = time.monotonic()
         try:
-            res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
+            with self._span("exec"):
+                res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
         except BaseException as e:
             self._record_step("exec", t0, exc=e)
             raise
@@ -102,7 +105,8 @@ class SandboxHandle:
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
         t0 = time.monotonic()
         try:
-            res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
+            with self._span("exec"):
+                res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
         except BaseException as e:
             self._record_step("exec", t0, exc=e)
             raise
@@ -125,7 +129,8 @@ class SandboxHandle:
         """Write file content directly into sandbox filesystem."""
         t0 = time.monotonic()
         try:
-            self.runtime.write_file(path, content)
+            with self._span("write_file"):
+                self.runtime.write_file(path, content)
         except BaseException as e:
             self._record_step("write_file", t0, exc=e)
             raise
@@ -135,7 +140,8 @@ class SandboxHandle:
         """Asynchronously write file content directly into sandbox filesystem."""
         t0 = time.monotonic()
         try:
-            await self.runtime.write_file_async(path, content)
+            with self._span("write_file"):
+                await self.runtime.write_file_async(path, content)
         except BaseException as e:
             self._record_step("write_file", t0, exc=e)
             raise
@@ -145,7 +151,8 @@ class SandboxHandle:
         """Read binary file content from sandbox filesystem."""
         t0 = time.monotonic()
         try:
-            data = self.runtime.read_file_bytes(path)
+            with self._span("read_file"):
+                data = self.runtime.read_file_bytes(path)
         except BaseException as e:
             self._record_step("read_file", t0, exc=e)
             raise
@@ -156,7 +163,8 @@ class SandboxHandle:
         """Asynchronously read binary file content from sandbox filesystem."""
         t0 = time.monotonic()
         try:
-            data = await self.runtime.read_file_bytes_async(path)
+            with self._span("read_file"):
+                data = await self.runtime.read_file_bytes_async(path)
         except BaseException as e:
             self._record_step("read_file", t0, exc=e)
             raise
@@ -241,6 +249,9 @@ class SandboxHandle:
             else:
                 self.runtime.close()
             self._record_release(recycled=True, t0=t0, exc=err)
+
+    def _span(self, kind: str) -> AbstractContextManager[Any]:
+        return self.telemetry.span(kind) if self.telemetry is not None else nullcontext()
 
     def _record_step(self, kind: str, t0: float, **kw) -> None:
         if self.telemetry is not None:

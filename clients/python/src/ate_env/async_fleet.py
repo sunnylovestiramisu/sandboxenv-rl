@@ -179,18 +179,20 @@ class AsyncSandboxFleet:
                                  fleet_run_id=self._fleet.run_id, timeout_s=to_s)
 
         try:
-            if hasattr(self.backend, "acquire_async"):
-                raw_inst = await self.backend.acquire_async(
-                    template_id, self._fleet.run_id, timeout_s=to_s, rootfs_image=rootfs_image
-                )
-            else:
-                raw_inst = await asyncio.to_thread(
-                    self.backend.acquire,
-                    template_id,
-                    self._fleet.run_id,
-                    timeout_s=to_s,
-                    rootfs_image=rootfs_image,
-                )
+            with tracker.scope():
+                if hasattr(self.backend, "acquire_async"):
+                    raw_inst = await self.backend.acquire_async(
+                        template_id, self._fleet.run_id, timeout_s=to_s, rootfs_image=rootfs_image
+                    )
+                else:
+                    raw_inst = await asyncio.to_thread(
+                        self.backend.acquire,
+                        template_id,
+                        self._fleet.run_id,
+                        timeout_s=to_s,
+                        rootfs_image=rootfs_image,
+                    )
+                tracker.annotate(raw_inst)
         except Exception as e:
             tracker.failed(e)
             raise

@@ -24,6 +24,7 @@ import grpc.aio
 from ._gen.ateenv.v1alpha import env_pb2, env_pb2_grpc, guest_pb2_grpc
 from .env import Env
 from .errors import map_rpc_error
+from .telemetry import otel
 from .types import EnvironmentInfo, _environment_info_from_pb
 
 __all__ = ["Client", "DEFAULT_ATESPACE"]
@@ -99,6 +100,72 @@ def _auth_interceptors(token: str) -> list[grpc.aio.ClientInterceptor]:
     ]
 
 
+class _BaseTraceContextInterceptor:
+    """Propagates the caller's OpenTelemetry context to ate-env-api.
+
+    Adds W3C ``traceparent`` / ``tracestate`` / ``baggage`` metadata to every
+    call so the server (and Substrate behind it) continue the caller's trace.
+    Installed only when the OpenTelemetry API is importable; a no-op without a
+    provider.
+    """
+
+    @staticmethod
+    def _inject(details: grpc.aio.ClientCallDetails) -> _ClientCallDetails:
+        md = otel.inject(list(details.metadata or []))
+        return _ClientCallDetails(
+            details.method,
+            details.timeout,
+            md,
+            details.credentials,
+            details.wait_for_ready,
+        )
+
+
+class _UnaryUnaryTraceInterceptor(_BaseTraceContextInterceptor, grpc.aio.UnaryUnaryClientInterceptor):
+    """Also wraps each unary call in a CLIENT span named after the RPC."""
+
+    @staticmethod
+    def _span_attrs(method: str | bytes) -> tuple[str, dict[str, str]]:
+        name = method.decode() if isinstance(method, bytes) else str(method)
+        service, _, rpc = name.lstrip("/").rpartition("/")
+        return name.lstrip("/"), {"rpc.system": "grpc", "rpc.service": service, "rpc.method": rpc}
+
+    async def intercept_unary_unary(self, continuation, client_call_details, request):
+        if not otel.tracing_active():
+            return await continuation(self._inject(client_call_details), request)
+        name, attrs = self._span_attrs(client_call_details.method)
+        with otel.span(name, attrs, kind="client"):
+            call = await continuation(self._inject(client_call_details), request)
+            # Await the response inside the span so its duration and status are right.
+            await call
+            return call
+
+
+class _UnaryStreamTraceInterceptor(_BaseTraceContextInterceptor, grpc.aio.UnaryStreamClientInterceptor):
+    async def intercept_unary_stream(self, continuation, client_call_details, request):
+        return await continuation(self._inject(client_call_details), request)
+
+
+class _StreamUnaryTraceInterceptor(_BaseTraceContextInterceptor, grpc.aio.StreamUnaryClientInterceptor):
+    async def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
+        return await continuation(self._inject(client_call_details), request_iterator)
+
+
+class _StreamStreamTraceInterceptor(_BaseTraceContextInterceptor, grpc.aio.StreamStreamClientInterceptor):
+    async def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+        return await continuation(self._inject(client_call_details), request_iterator)
+
+
+def _trace_interceptors() -> list[grpc.aio.ClientInterceptor]:
+    # One instance per call shape, for the same reason as _auth_interceptors.
+    return [
+        _UnaryUnaryTraceInterceptor(),
+        _UnaryStreamTraceInterceptor(),
+        _StreamUnaryTraceInterceptor(),
+        _StreamStreamTraceInterceptor(),
+    ]
+
+
 class Client:
     """Manages environments against an ate-env-api endpoint over gRPC.
 
@@ -125,7 +192,8 @@ class Client:
 
         endpoint accepts a host:port or an http(s):// URL, matching the Go
         client. Pass channel to supply a caller-owned grpc.aio.Channel
-        instead; the client then never closes it.
+        instead; the client then never closes it (and, to propagate trace
+        context, the caller adds ``_trace_interceptors()`` to it).
         """
         self.endpoint = endpoint
         self._auth_token = auth_token or None
@@ -135,9 +203,13 @@ class Client:
         else:
             if not endpoint:
                 raise ValueError("ate_env: endpoint is required when channel is not given")
-            interceptors = _auth_interceptors(auth_token) if auth_token else None
+            interceptors: list[grpc.aio.ClientInterceptor] = []
+            if otel.AVAILABLE:
+                interceptors.extend(_trace_interceptors())
+            if auth_token:
+                interceptors.extend(_auth_interceptors(auth_token))
             self._channel = grpc.aio.insecure_channel(
-                _normalize_target(endpoint), interceptors=interceptors
+                _normalize_target(endpoint), interceptors=interceptors or None
             )
             self._owns_channel = True
         self._environments = env_pb2_grpc.EnvironmentServiceStub(self._channel)

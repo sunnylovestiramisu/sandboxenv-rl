@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from . import otel
 from .context import EpisodeContext, current_episode
 from .events import (
     ACQUIRE_FAILED,
@@ -78,6 +79,10 @@ def _round(x: float) -> float:
     return round(x, 6)
 
 
+def _active(recorder: Recorder) -> bool:
+    return recorder.enabled or otel.tracing_active() or otel.metrics_active()
+
+
 @dataclass
 class HandleTelemetry:
     """Per-sandbox telemetry state carried by a SandboxHandle."""
@@ -88,6 +93,13 @@ class HandleTelemetry:
     acquired_at: float = field(default_factory=time.monotonic)
     steps: int = 0
     released: bool = False
+
+    def span(self, kind: str) -> AbstractContextManager[Any]:
+        """OpenTelemetry span around one step (no-op when tracing is inactive)."""
+        if not otel.tracing_active():
+            return nullcontext()
+        return otel.span(f"rl_sandbox.{kind}", {**(self.ctx.attrs() if self.ctx else {}),
+                                                  **self.attrs, "step.kind": kind})
 
     def step(self, kind: str, t0: float, *, result: Any = None,
              exc: BaseException | None = None, **extra: Any) -> None:
@@ -111,12 +123,18 @@ class HandleTelemetry:
             attrs["error.type"] = type(exc).__name__
         attrs.update(extra)
         self.recorder.emit(STEP_COMPLETED, ctx=self.ctx, **self.attrs, **attrs)
+        otel.record_stage("step", attrs["exec_s"], {
+            **self.attrs, "step.kind": kind,
+            "outcome": "error" if exc is not None else ("timeout" if attrs.get("timed_out") else "ok"),
+        })
 
     def release(self, *, recycled: bool, t0: float,
                 exc: BaseException | None = None) -> None:
         if self.released:
             return
         self.released = True
+        otel.record_stage("release", time.monotonic() - t0,
+                          {**self.attrs, "outcome": "error" if exc else "ok"})
         self.recorder.emit(
             RELEASED, ctx=self.ctx, **self.attrs,
             hold_s=_round(t0 - self.acquired_at),
@@ -133,7 +151,8 @@ class AcquireTracker:
     def __init__(self, *, backend: Any, task: Task, template_id: str,
                  fleet_run_id: str, timeout_s: float | None) -> None:
         self.recorder = get_recorder()
-        self.enabled = self.recorder.enabled
+        self.enabled = _active(self.recorder)
+        self._span: Any = None
         if not self.enabled:
             return
         self.ctx = current_episode()
@@ -147,6 +166,32 @@ class AcquireTracker:
         }
         self.recorder.emit(ACQUIRE_STARTED, ctx=self.ctx, timeout_s=timeout_s, **self.base)
 
+    @contextmanager
+    def scope(self) -> Iterator[None]:
+        """Make the acquire span current around the backend call.
+
+        Backend RPCs made inside (including on the SDK's background loop) become
+        children of this span and carry its trace context to the server.
+        """
+        if not self.enabled or not otel.tracing_active():
+            yield
+            return
+        attrs = {**(self.ctx.attrs() if self.ctx else {}), **self.base}
+        with otel.span("rl_sandbox.acquire", attrs) as s:
+            self._span = s
+            yield
+
+    def annotate(self, raw: RawSandboxInstance) -> None:
+        """Add the backend's result to the acquire span (call inside ``scope()``)."""
+        if self._span is None:
+            return
+        meta = raw.metadata or {}
+        otel.set_span_attributes(self._span, {
+            "rl_sandbox.sandbox.id": raw.instance_id,
+            "acquire_path": meta.get(META_ACQUIRE_PATH),
+            **(meta.get(META_TELEMETRY_ATTRS) or {}),
+        })
+
     def ready(self, raw: RawSandboxInstance) -> HandleTelemetry | None:
         if not self.enabled:
             return None
@@ -155,11 +200,10 @@ class AcquireTracker:
         attrs = dict(self.base)
         attrs["rl_sandbox.sandbox.id"] = raw.instance_id
         attrs.update(meta.get(META_TELEMETRY_ATTRS) or {})
-        self.recorder.emit(
-            ACQUIRE_READY, ctx=self.ctx, **attrs,
-            wait_s=_round(now - self.t0),
-            acquire_path=meta.get(META_ACQUIRE_PATH),
-        )
+        wait_s = _round(now - self.t0)
+        path = meta.get(META_ACQUIRE_PATH)
+        self.recorder.emit(ACQUIRE_READY, ctx=self.ctx, **attrs, wait_s=wait_s, acquire_path=path)
+        otel.record_stage("acquire", wait_s, {**attrs, "acquire_path": path, "outcome": "ok"})
         return HandleTelemetry(recorder=self.recorder, ctx=self.ctx, attrs=attrs, acquired_at=now)
 
     def failed(self, exc: BaseException, raw: RawSandboxInstance | None = None) -> None:
@@ -169,10 +213,13 @@ class AcquireTracker:
         if raw is not None:
             attrs["rl_sandbox.sandbox.id"] = raw.instance_id
             attrs.update((raw.metadata or {}).get(META_TELEMETRY_ATTRS) or {})
-        event = ACQUIRE_TIMEOUT if is_timeout(exc) else ACQUIRE_FAILED
-        self.recorder.emit(event, ctx=self.ctx, **attrs,
-                           wait_s=_round(time.monotonic() - self.t0),
+        timeout = is_timeout(exc)
+        event = ACQUIRE_TIMEOUT if timeout else ACQUIRE_FAILED
+        wait_s = _round(time.monotonic() - self.t0)
+        self.recorder.emit(event, ctx=self.ctx, **attrs, wait_s=wait_s,
                            **{"error.type": type(exc).__name__})
+        otel.record_stage("acquire", wait_s,
+                          {**attrs, "outcome": "timeout" if timeout else "error"})
 
 
 @contextmanager
@@ -180,7 +227,7 @@ def track_warm(*, backend: Any, template_id: str, image: str | None,
                replicas: int, wait: bool) -> Iterator[None]:
     """Emit warm.target before warming a pool and warm.ready after it."""
     rec = get_recorder()
-    if not rec.enabled:
+    if not _active(rec):
         yield
         return
     attrs = {
@@ -194,10 +241,12 @@ def track_warm(*, backend: Any, template_id: str, image: str | None,
     t0 = time.monotonic()
     error: str | None = None
     try:
-        yield
+        with otel.span("rl_sandbox.warm", attrs):
+            yield
     except BaseException as e:
         error = type(e).__name__
         raise
     finally:
-        rec.emit(WARM_READY, **attrs, duration_s=_round(time.monotonic() - t0),
-                 **{"error.type": error})
+        duration = _round(time.monotonic() - t0)
+        rec.emit(WARM_READY, **attrs, duration_s=duration, **{"error.type": error})
+        otel.record_stage("warm", duration, {**attrs, "outcome": "error" if error else "ok"})

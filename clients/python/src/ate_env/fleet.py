@@ -225,9 +225,11 @@ class SandboxFleet:
         tracker = AcquireTracker(backend=self.backend, task=task_obj, template_id=template_id,
                                  fleet_run_id=self.run_id, timeout_s=to_s)
         try:
-            raw_inst = self.backend.acquire(
-                template_id, self.run_id, timeout_s=to_s, rootfs_image=rootfs_image
-            )
+            with tracker.scope():
+                raw_inst = self.backend.acquire(
+                    template_id, self.run_id, timeout_s=to_s, rootfs_image=rootfs_image
+                )
+                tracker.annotate(raw_inst)
         except Exception as e:
             tracker.failed(e)
             raise
