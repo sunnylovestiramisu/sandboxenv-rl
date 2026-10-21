@@ -21,6 +21,7 @@ from typing import Any
 from .backend.base import BackendDriver
 from .errors import CommandExecutionError, CommandTimeoutError
 from .runtime.base import RuntimeGuestHook
+from .telemetry import metrics
 from .telemetry.tracing import (
     CLIENT_SPAN_PREFIX,
     executable_attr,
@@ -111,7 +112,7 @@ class SandboxHandle:
         Returns ExecResult.
         """
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        with self._exec_span(command) as span:
+        with self._exec_span(command) as span, metrics.timed("exec"):
             res = self.runtime.exec(command, cwd=cwd, env=env, timeout_s=to_s)
             self._exec_result_attrs(span, res, check)
         if check and res.timed_out:
@@ -138,7 +139,7 @@ class SandboxHandle:
     ) -> ExecResult:
         """Asynchronously execute command inside the sandbox."""
         to_s = self.default_timeout_s if timeout_s is None else timeout_s
-        with self._exec_span(command) as span:
+        with self._exec_span(command) as span, metrics.timed("exec"):
             res = await self.runtime.exec_async(command, cwd=cwd, env=env, timeout_s=to_s)
             self._exec_result_attrs(span, res, check)
         if check and res.timed_out:

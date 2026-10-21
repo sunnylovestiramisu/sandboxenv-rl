@@ -26,7 +26,18 @@ class BackendDriver(ABC):
     
     Governs fleet provisioning, template creation, warm-pool sizing,
     instance claims, snapshotting, and run isolation / reaping.
+
+    ``observer`` (an ``ate_env.observability.Observer``, set by the fleet)
+    receives claim and warm-replica counts under the ``backend_name`` label.
     """
+
+    backend_name: str = "-"
+    observer: Any = None
+
+    def _observe(self, event: str, *args: Any) -> None:
+        obs = self.observer
+        if obs is not None:
+            getattr(obs, event)(self.backend_name, *args)
 
     @abstractmethod
     def preflight(self) -> None:

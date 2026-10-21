@@ -44,6 +44,10 @@ tracing = [
     "opentelemetry-sdk>=1.43",
     "opentelemetry-exporter-otlp-proto-grpc>=1.43",
 ]
+# Prometheus series (ate_env.observability, ate_env.telemetry.metrics).
+metrics = [
+    "prometheus-client>=0.20",
+]
 
 [project.urls]
 Homepage = "https://github.com/agent-substrate/env"

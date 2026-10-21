@@ -17,11 +17,13 @@ from __future__ import annotations
 import collections
 import contextvars
 import logging
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .handle import SandboxHandle
+from .observability import null_observer, repo_family
 from .types import Task
 
 logger = logging.getLogger("ate_env.strategies")
@@ -29,15 +31,31 @@ logger = logging.getLogger("ate_env.strategies")
 
 def process_parallel(fleet: Any, tasks: list[Task], process_fn: Callable[[Task, SandboxHandle], Any],
                      concurrency: int) -> list[Any]:
-    """Execute acquire -> process_fn -> release across tasks up to concurrency."""
+    """Execute acquire -> process_fn -> release across tasks up to concurrency.
+
+    process_fn runs in the fleet observer's ``process`` phase; each task's
+    acquire+process+release time is reported with ``task_done``.
+    """
     results: list[Any] = [None] * len(tasks)
+    obs = getattr(fleet, "observer", None) or null_observer()
+    backend = getattr(fleet, "backend_label", "-")
 
     def _execute_single(task: Task) -> Any:
-        handle = fleet.acquire(task)
+        family = repo_family(task)
+        start = time.monotonic()
+        status = "ok"
         try:
-            return process_fn(task, handle)
+            handle = fleet.acquire(task)
+            try:
+                with obs.phase("process", backend=backend, family=family):
+                    return process_fn(task, handle)
+            finally:
+                fleet.release(handle)
+        except BaseException:
+            status = "error"
+            raise
         finally:
-            fleet.release(handle)
+            obs.task_done(backend, family, status, time.monotonic() - start)
 
     if concurrency <= 1:
         for i, t in enumerate(tasks):

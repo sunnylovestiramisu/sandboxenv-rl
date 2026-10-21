@@ -27,6 +27,8 @@ from .base import BackendDriver
 class MockBackendDriver(BackendDriver):
     """In-memory mock backend driver for hermetic unit testing and PoC simulation."""
 
+    backend_name = "mock"
+
     def __init__(self, fail_preflight: bool = False, fail_acquire: bool = False):
         self.fail_preflight = fail_preflight
         self.fail_acquire = fail_acquire
@@ -52,11 +54,15 @@ class MockBackendDriver(BackendDriver):
         run_id: str | None = None,
         rootfs_image: str | None = None,
     ) -> None:
+        key = template_id if rootfs_image is None else (template_id, rootfs_image)
+        self._observe("warm_add", replicas - self.warm_pools.get(key, 0))
         self.warm_pools[template_id] = replicas
         if rootfs_image is not None:
             self.warm_pools[(template_id, rootfs_image)] = replicas
 
     def unwarm_pool(self, template_id: str, rootfs_image: str | None = None) -> None:
+        key = template_id if rootfs_image is None else (template_id, rootfs_image)
+        self._observe("warm_remove", self.warm_pools.get(key, 0))
         self.warm_pools[template_id] = 0
         if rootfs_image is not None:
             self.warm_pools.pop((template_id, rootfs_image), None)
@@ -69,6 +75,7 @@ class MockBackendDriver(BackendDriver):
         rootfs_image: str | None = None,
     ) -> RawSandboxInstance:
         if self.fail_acquire:
+            self._observe("claim", "error")
             raise SandboxStartError("Mock acquire failed: capacity exhausted")
 
         inst_id = f"mock-sb-{uuid.uuid4().hex[:8]}"
@@ -84,6 +91,7 @@ class MockBackendDriver(BackendDriver):
             rootfs_image=rootfs_image,
         )
         self.instances[inst_id] = inst
+        self._observe("claim", "ok")
         return inst
 
     def release(self, instance_id: str, recycle: bool = False) -> None:

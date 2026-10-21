@@ -28,6 +28,7 @@ from ._gen.ateenv.v1alpha import env_pb2, env_pb2_grpc, guest_pb2_grpc
 from .config import TracerConfig
 from .env import Env
 from .errors import map_rpc_error
+from .telemetry import metrics
 from .telemetry.tracing import (
     CLIENT_SPAN_PREFIX,
     _trace_interceptors,
@@ -258,7 +259,11 @@ class Client:
     async def suspend(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> None:
         """Checkpoint and stop the environment."""
         req = env_pb2.SuspendEnvironmentRequest(id=id, atespace=atespace)
-        with self._rpc_span("suspend_environment", "SuspendEnvironment", lambda: {"ate.actor.name": id, "ate.atespace": atespace}):
+        with (
+            self._rpc_span("suspend_environment", "SuspendEnvironment",
+                           lambda: {"ate.actor.name": id, "ate.atespace": atespace}),
+            metrics.timed("suspend"),
+        ):
             try:
                 await self._environments.SuspendEnvironment(req, metadata=self._auth_metadata())
             except grpc.RpcError as e:

@@ -326,26 +326,62 @@ results = await asyncio.gather(
 )
 ```
 
-### Trace calls with OpenTelemetry (optional)
+### Observability
 
-The client can emit OpenTelemetry spans and send the W3C trace context to
-`ate-env-api`. This lets you see whether time goes to the client, the API
-server or Substrate. Tracing is off by default and needs the `tracing` extra:
+Three layers, all off the hot path when disabled. The base install has
+no telemetry dependency; the optional layers need extras:
 
 ```bash
-pip install "./clients/python[tracing]"
+pip install './clients/python[tracing,metrics]'
 ```
 
-Turn it on with `TracerConfig`, either on a `Client` or with
-`FleetConfig.tracing` for a fleet:
+**Run report** (always on, no dependency). After `fleet.run(...)`,
+`fleet.report` is a `RunReport` with per-phase count, total and max
+(`preflight`, `plan`, `ensure_template`, `warm_pool`, `acquire`,
+`process`, `recycle`, `release`, `reap`, `teardown`), claims, task
+outcomes and warm replicas:
 
 ```python
-from ate_env import Client, FleetConfig, SandboxFleet, TracerConfig
+fleet = SandboxFleet(FleetConfig(backend="mock", strategy="naive"))
+fleet.load_tasks(tasks)
+fleet.run(process_fn)
+print(fleet.report.summary())          # table, same shape as agent-sandbox-rl
+fleet.report.to_dict()                 # JSON-ready
+fleet.report.write(os.environ["REPORT_DIR"])   # <strategy>_<n>tasks_<stamp>.txt/.json
+```
 
-client = Client("localhost:7777", tracer_config=TracerConfig(enable_tracing=True))
+`AsyncSandboxFleet.run` fills `fleet.report` the same way.
 
-fleet = SandboxFleet(FleetConfig(tracing=TracerConfig(enable_tracing=True)))
-# A plain dict also works: FleetConfig(tracing={"enable_tracing": True})
+**Prometheus** (`metrics` extra; `ObservabilityConfig.enable_metrics`,
+on by default and a logged no-op without the extra). The fleet records
+`atefleet_phase_latency_seconds`, `atefleet_task_latency_seconds`,
+`atefleet_run_latency_seconds`, `atefleet_claims_total`,
+`atefleet_tasks_total` and `atefleet_warm_replicas`, and the client
+records `ate_env_client_{acquire,exec,suspend,wake,release}_seconds`.
+Collectors register on the first metrics-enabled `Observer`, never at
+import. Labels are bounded to `phase`, `backend` (`substrate` or `mock`),
+`family` (the task's repo family, see `ate_env.observability.repo_family`),
+`strategy` and `status` (`ok` or `error`); environment ids, run ids,
+commands, paths and image tags never become labels. Expose them with:
+
+```python
+from ate_env.observability import serve_metrics
+serve_metrics(9095)                    # /metrics on the default registry
+```
+
+**Tracing** (`tracing` extra; off by default). The client emits
+OpenTelemetry spans and sends the W3C trace context to `ate-env-api`, so
+you can see whether time goes to the client, the API server or Substrate.
+Either fleet switch turns on tracing for the whole fleet, under one
+service name:
+
+```python
+from ate_env import Client, FleetConfig, ObservabilityConfig, TracerConfig
+
+FleetConfig(observability=ObservabilityConfig(enable_tracing=True))   # service "ate-env-fleet"
+FleetConfig(tracing=TracerConfig(enable_tracing=True))                # service "ate-env-client"
+FleetConfig(tracing={"enable_tracing": True})                         # a plain dict also works
+Client("localhost:7777", tracer_config=TracerConfig(enable_tracing=True))  # client only
 ```
 
 `TracerConfig` fields:
@@ -355,7 +391,21 @@ fleet = SandboxFleet(FleetConfig(tracing=TracerConfig(enable_tracing=True)))
 | `enable_tracing` | `False` | Emit spans and propagate the trace context. |
 | `trace_service_name` | `"ate-env-client"` | OTel resource `service.name` of the client's own OTLP provider (case 2 below). Spans are always named `ate_env_client.<op>`. |
 
-When tracing is on:
+One `fleet.run(...)` is one trace:
+
+```
+atefleet.run
+  atefleet.acquire
+    ate_env_client.acquire
+      ate_env_client.create_environment
+  atefleet.process
+    ate_env_client.exec
+  atefleet.release
+    ate_env_client.release
+      ate_env_client.delete_environment
+  atefleet.teardown
+    ate_env_client.reap
+```
 
 - **Spans.** `Client`, `SandboxHandle` and the Substrate backend emit
   `ate_env_client.<op>` spans, for example `create_environment`, `acquire`,
@@ -365,8 +415,10 @@ When tracing is on:
   image tags. A command that fails with `check=True` marks its `exec` span
   as an error.
 - **Propagation.** Every gRPC call on a channel the client creates carries
-  `traceparent` / `tracestate`. Baggage is never sent. A channel you pass
-  with `Client(channel=...)` is left as is.
+  the W3C `traceparent` / `tracestate` (never baggage), so `ate-env-api`
+  can continue the trace. A caller-owned `Client(channel=...)` gets spans
+  but not the header: add `ate_env.telemetry.TraceContextInterceptor`
+  subclasses to your channel yourself.
 - **Nesting.** Client spans nest under the caller's current span, including
   across the fleet's worker threads and background event loop.
 

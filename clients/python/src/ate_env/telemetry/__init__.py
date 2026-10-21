@@ -14,10 +14,12 @@
 
 """Optional telemetry for the ate_env client.
 
-Tracing needs the ``tracing`` extra. Nothing here imports OpenTelemetry at
-import time; without the extra every call is a no-op.
+Tracing needs the ``tracing`` extra and client metrics the ``metrics`` extra.
+Nothing here imports OpenTelemetry or prometheus_client at import time;
+without the extras every call is a no-op.
 """
 
+from .metrics import enable_client_metrics
 from .tracing import (
     CLIENT_SPAN_PREFIX,
     TraceContextInterceptor,
@@ -32,6 +34,7 @@ __all__ = [
     "TraceContextInterceptor",
     "TracerManager",
     "create_tracer_manager",
+    "enable_client_metrics",
     "initialize_tracer",
     "inject_metadata",
 ]

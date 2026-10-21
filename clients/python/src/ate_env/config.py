@@ -106,6 +106,39 @@ class TracerConfig:
         return cls(**data)
 
 
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    """Fleet observability: the always-on RunReport plus optional layers.
+
+    enable_metrics registers the ``atefleet_*`` and ``ate_env_client_*``
+    Prometheus series (a logged no-op without the ``metrics`` extra);
+    enable_tracing emits ``atefleet.<phase>`` spans and turns on client
+    tracing under trace_service_name (needs the ``tracing`` extra).
+    Unknown fields are rejected.
+    """
+
+    enable_metrics: bool = True
+    enable_tracing: bool = False
+    trace_service_name: str = "ate-env-fleet"
+
+    def __init__(self, **kwargs: Any):
+        _init_fields(self, kwargs)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        for name in ("enable_metrics", "enable_tracing"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValidationError(f"{name} must be a bool, got {getattr(self, name)!r}")
+        if not isinstance(self.trace_service_name, str) or not self.trace_service_name:
+            raise ValidationError(
+                f"trace_service_name must be a non-empty str, got {self.trace_service_name!r}"
+            )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ObservabilityConfig:
+        return cls(**data)
+
+
 def _nested(cls: Any, name: str, value: Any) -> Any:
     """Accept a config dataclass or a plain dict for a nested FleetConfig field."""
     if value is None:
@@ -153,6 +186,7 @@ class FleetConfig:
 
     # Telemetry
     tracing: TracerConfig = field(default_factory=TracerConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def __init__(self, **kwargs: Any):
         _init_fields(self, kwargs)
@@ -205,16 +239,20 @@ class FleetConfig:
             object.__setattr__(self, "auth_token", SecretStr(str(self.auth_token)))
 
         object.__setattr__(self, "tracing", _nested(TracerConfig, "tracing", self.tracing))
+        object.__setattr__(
+            self, "observability", _nested(ObservabilityConfig, "observability", self.observability)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize configuration to dict, keeping auth_token as SecretStr for safe round-tripping.
 
-        Nested configs (``tracing``) become plain dicts, which from_dict accepts.
+        Nested configs (``tracing``, ``observability``) become plain dicts,
+        which from_dict accepts.
         """
         res: dict[str, Any] = {}
         for f in fields(self):
             val = getattr(self, f.name)
-            if isinstance(val, TracerConfig):
+            if isinstance(val, (TracerConfig, ObservabilityConfig)):
                 val = asdict(val)
             res[f.name] = val
         return res
