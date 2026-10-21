@@ -24,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -37,6 +38,14 @@ var Propagator propagation.TextMapPropagator = propagation.TraceContext{}
 
 type otelInstrumenter struct {
 	tracer trace.Tracer
+}
+
+// NewOTelInstrumenter returns an Instrumenter whose spans come from tp, for
+// callers that own their tracer provider (tests, or a binary that set up its
+// own exporter). The instrumentation scope is serviceName with '-' replaced
+// by '_'.
+func NewOTelInstrumenter(tp trace.TracerProvider, serviceName string) Instrumenter {
+	return newOTelInstrumenter(tp, serviceName)
 }
 
 // newOTelInstrumenter returns an Instrumenter whose spans come from tp, with
@@ -91,6 +100,20 @@ func Untraced(ctx context.Context) context.Context {
 		Remote:  true,
 		// TraceFlags zero: not sampled.
 	}))
+}
+
+func (o *otelInstrumenter) RecordSpan(ctx context.Context, name string, start, end time.Time, attrs map[string]string, errMsg string) {
+	opts := []trace.SpanStartOption{trace.WithTimestamp(start)}
+	if len(attrs) > 0 {
+		opts = append(opts, trace.WithAttributes(stringAttrs(attrs)...))
+	}
+	_, span := o.tracer.Start(ctx, name, opts...)
+	if errMsg != "" {
+		span.SetStatus(codes.Error, errMsg)
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End(trace.WithTimestamp(end))
 }
 
 func stringAttrs(attrs map[string]string) []attribute.KeyValue {

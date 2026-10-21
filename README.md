@@ -446,6 +446,12 @@ For complete runnable Go programs:
 
 For using environments from a framework, see [integrations/nemo-gym](integrations/nemo-gym/README.md): a NeMo Gym sandbox provider registered through the `nemo_gym.sandbox_providers` entry point.
 
+## Observability
+
+Run reports, Prometheus metrics and OpenTelemetry traces across the Python client, ate-env-api,
+the guest and the Go client, all off by default except the run report: see
+[docs/observability.md](docs/observability.md) and the metric reference [docs/metrics.md](docs/metrics.md).
+
 ## Cleanup
 
 ```bash

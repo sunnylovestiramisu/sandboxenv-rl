@@ -21,7 +21,10 @@
 // and no collector is registered until SetupOTel or NewMetrics is called.
 package telemetry
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Instrumenter is the tracing surface the servers use. Spans continue
 // whatever span ctx carries; across gRPC the otelgrpc stats handlers put the
@@ -39,6 +42,13 @@ type Instrumenter interface {
 	// ({"traceparent": "...", "tracestate": "..."}), or "" when there is
 	// none.
 	TraceContext(ctx context.Context) string
+	// RecordSpan records a span that already happened: named name, a child
+	// of the span in ctx, from start to end, with attrs as string
+	// attributes. An empty errMsg sets the status to Ok, any other value to
+	// Error with errMsg as the description. It is for callers that learn of
+	// an operation only when it has finished, such as the benchmark event
+	// recorder.
+	RecordSpan(ctx context.Context, name string, start, end time.Time, attrs map[string]string, errMsg string)
 }
 
 type noopInstrumenter struct{}
@@ -55,3 +65,6 @@ func (noopInstrumenter) AddEvent(context.Context, string, map[string]string) {}
 func (noopInstrumenter) IsRecording(context.Context) bool { return false }
 
 func (noopInstrumenter) TraceContext(context.Context) string { return "" }
+
+func (noopInstrumenter) RecordSpan(context.Context, string, time.Time, time.Time, map[string]string, string) {
+}

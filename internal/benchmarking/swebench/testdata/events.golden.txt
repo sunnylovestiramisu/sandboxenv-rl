@@ -1,0 +1,13 @@
+{"ts":"2026-10-21T12:00:01.2Z","run":"swe-golden","event":"create","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":1200.5,"ok":true}
+{"ts":"2026-10-21T12:00:03.4Z","run":"swe-golden","event":"ttfi","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":3400,"ok":true,"attempts":2}
+{"ts":"2026-10-21T12:00:03.4Z","run":"swe-golden","event":"step","name":"checkout","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":2200.25,"ok":true,"exit":0}
+{"ts":"2026-10-21T12:00:09Z","run":"swe-golden","event":"step","name":"grade","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":5600,"ok":true,"exit":1,"reward":0,"tail":"FAILED tests/test_a.py::test_b\nunresolved\n"}
+{"ts":"2026-10-21T12:00:09Z","run":"swe-golden","event":"task","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":7800,"ok":true,"reward":0}
+{"ts":"2026-10-21T12:00:09.1Z","run":"swe-golden","event":"step","name":"build","env":"swe-golden-django-2-1","instance":"django__django-2","step":1,"task":1,"dur_ms":90,"ok":false,"exit":2,"err":"exit 2, expected 0","tail":"make: *** [all] Error 2"}
+{"ts":"2026-10-21T12:00:09.1Z","run":"swe-golden","event":"task","env":"swe-golden-django-2-1","instance":"django__django-2","step":1,"task":1,"dur_ms":4000,"ok":false}
+{"ts":"2026-10-21T12:00:09.2Z","run":"swe-golden","event":"step_barrier","step":1,"dur_ms":8000,"ok":false,"count":2}
+{"ts":"2026-10-21T12:00:09.7Z","run":"swe-golden","event":"suspend","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":1,"dur_ms":500,"ok":true}
+{"ts":"2026-10-21T12:00:09.8Z","run":"swe-golden","event":"park","name":"suspend","step":1,"dur_ms":600,"ok":true,"count":2}
+{"ts":"2026-10-21T12:00:12Z","run":"swe-golden","event":"wake","env":"swe-golden-astropy-1-0","instance":"astropy__astropy-1","step":2,"dur_ms":2100,"ok":true,"attempts":1}
+{"ts":"2026-10-21T12:00:13Z","run":"swe-golden","event":"delete","env":"swe-golden-django-2-1","instance":"django__django-2","step":2,"task":1,"dur_ms":300,"ok":false,"err":"rpc error: code = Unavailable desc = connection refused"}
+{"ts":"2026-10-21T12:00:14Z","run":"swe-golden","event":"run","name":"steps","dur_ms":14000,"ok":false,"count":2}

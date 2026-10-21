@@ -1,0 +1,135 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Test fixture, not a production deployment: an OpenTelemetry collector for the
+# telemetry acceptance runs (docs/observability.md, "Acceptance collector").
+#
+#   * receives OTLP (gRPC :4317, HTTP :4318) from the trainer and ate-env-api
+#   * scrapes ate-env-api's Prometheus endpoint (METRICS_TARGET below)
+#   * writes spans and metrics as OTLP/JSON lines to /data (read them with
+#     `kubectl -n ate-env-telemetry exec deploy/otel-collector -c files -- cat /data/spans.jsonl`)
+#   * logs spans with the debug exporter
+#   * optionally forwards spans to another OTLP endpoint (FORWARD_ENDPOINT, e.g.
+#     the GKE managed collector, so Cloud Trace shows the same traces)
+#
+# Edit METRICS_TARGET / FORWARD_ENDPOINT, then:
+#   kubectl create ns ate-env-telemetry
+#   kubectl -n ate-env-telemetry apply -f tests/telemetry/otel-collector.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: ate-env-api
+              scrape_interval: 15s
+              static_configs:
+                - targets: ["${env:METRICS_TARGET}"]
+    processors:
+      batch: {}
+    exporters:
+      debug:
+        verbosity: detailed
+      file/spans:
+        path: /data/spans.jsonl
+      file/metrics:
+        path: /data/metrics.jsonl
+      otlp/forward:
+        endpoint: ${env:FORWARD_ENDPOINT}
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug, file/spans, otlp/forward]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [batch]
+          exporters: [file/metrics]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.138.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: METRICS_TARGET
+              # ate-env-api deployed by `ate-env manifest --metrics-port 9090`
+              value: ate-env-api.ate-env.svc.cluster.local:9090
+            # Managed OpenTelemetry for GKE; with it not enabled, drop
+            # otlp/forward from the traces pipeline instead.
+            - name: FORWARD_ENDPOINT
+              value: opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: conf, mountPath: /conf}
+            - {name: data, mountPath: /data}
+        # The collector image has no shell; this container lets `kubectl exec`
+        # and `kubectl cp` read the exported files.
+        - name: files
+          image: busybox:1.37
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: conf
+          configMap:
+            name: otel-collector
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+    - {name: otlp-http, port: 4318, targetPort: 4318}

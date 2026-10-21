@@ -13,8 +13,13 @@
 # limitations under the License.
 
 
-"""Summarize a grpo_substrate_train.py OUT file: per-event p50/p95/max and per-step totals.
+"""Summarize a grpo_substrate_train.py run: per-event p50/p95/max and per-step totals.
 usage: python report.py /tmp/grpo-substrate-<RUN_ID>.jsonl
+       python report.py $REPORT_DIR/grpo_<n>tasks_<YYYYMMDD-HHMMSS>.json
+
+The first form reads the OUT event records. They stay for one release; the
+run report that REPORT_DIR receives (the second form, the same RunReport the
+fleet writes) replaces them.
 """
 import json
 import statistics
@@ -26,7 +31,28 @@ def pct(xs, q):
     return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))]
 
 
-recs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+def print_run_report(rep):
+    """Print a RunReport JSON (RunReport.to_dict) as the fleet's summary table."""
+    print(f"run report: strategy={rep['strategy']}  total {rep['total_s']:.2f}s")
+    print(f"{'phase':18} {'n':>6} {'total s':>9} {'mean s':>8} {'max s':>8}")
+    for name, p in rep["phases"].items():
+        n = p["count"]
+        print(f"{name:18} {n:6d} {p['total_s']:9.2f} {p['total_s'] / max(n, 1):8.2f} {p['max_s']:8.2f}")
+    print(f"claims={rep['claims']}  tasks={rep['tasks_ok']}ok/{rep['tasks_err']}err  "
+          f"warm_replicas total={rep['warm_replicas_total']} peak={rep['warm_replicas_peak']}")
+
+
+with open(sys.argv[1]) as _f:
+    _text = _f.read()
+try:
+    _whole = json.loads(_text)
+except json.JSONDecodeError:
+    _whole = None
+if isinstance(_whole, dict) and "phases" in _whole and "strategy" in _whole:
+    print_run_report(_whole)
+    sys.exit(0)
+
+recs = [json.loads(l) for l in _text.splitlines() if l.strip()]
 by = {}
 for r in recs:
     by.setdefault(r["ev"], []).append(r)

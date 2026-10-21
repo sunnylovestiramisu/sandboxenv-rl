@@ -21,9 +21,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -210,4 +212,24 @@ func TestUntraced(t *testing.T) {
 	if !strings.HasSuffix(carrier["traceparent"], "-00") {
 		t.Errorf("traceparent %q, want the unsampled flag 00", carrier["traceparent"])
 	}
+}
+
+func TestRecordSpan(t *testing.T) {
+	rec, tp := newRecorder()
+	inst := NewOTelInstrumenter(tp, "swebench-loader")
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	end := start.Add(1500 * time.Millisecond)
+	inst.RecordSpan(context.Background(), "create", start, end, map[string]string{"run": "r1"}, "")
+	inst.RecordSpan(context.Background(), "delete", start, end, nil, "boom")
+	spans := rec.Ended()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2", len(spans))
+	}
+	if s := spans[0]; s.Name() != "create" || !s.StartTime().Equal(start) || !s.EndTime().Equal(end) || s.Status().Code != codes.Ok {
+		t.Errorf("create span = %s %v..%v %v", s.Name(), s.StartTime(), s.EndTime(), s.Status())
+	}
+	if s := spans[1]; s.Status().Code != codes.Error || s.Status().Description != "boom" {
+		t.Errorf("delete span status = %v, want Error boom", s.Status())
+	}
+	NewNoOp().RecordSpan(context.Background(), "create", start, end, nil, "")
 }
