@@ -254,26 +254,30 @@ class AsyncVeRLTrainerWorker:
         self, data_proto: DataProto, eval_results: list[dict[str, Any]]
     ) -> dict[str, Any]:
         self.step += 1
-        # Masked rollouts (infrastructure failures) carry no reward signal.
-        scored = [r for r in eval_results if r["status"] == "scored"]
-        rewards = torch.tensor([r["reward"] for r in scored], dtype=torch.float32)
-
+        # Masked rollouts (infrastructure failures) carry no reward signal: they
+        # get advantage 0 and mask False, so the outputs stay aligned with the
+        # DataProto rows (one entry per candidate, in order).
+        mask = torch.tensor([r["status"] == "scored" for r in eval_results], dtype=torch.bool)
+        rewards = torch.tensor([float(r["reward"] or 0.0) for r in eval_results], dtype=torch.float32)
+        scored = rewards[mask]
+        adv = torch.zeros_like(rewards)
         if len(scored) >= 2:
-            mean = rewards.mean()
-            adv = (rewards - mean) / (rewards.std(unbiased=False) + 1e-6)
+            mean = scored.mean()
+            adv[mask] = (scored - mean) / (scored.std(unbiased=False) + 1e-6)
         else:
-            mean = rewards.mean() if len(scored) else torch.tensor(0.0)
-            adv = torch.zeros_like(rewards)
+            mean = scored.mean() if len(scored) else torch.tensor(0.0)
 
         print(
-            f"[Trainer Worker] Step {self.step}: scored={len(scored)}/{len(eval_results)} "
-            f"mean_reward={mean.item():.2f} adv={[round(a, 3) for a in adv.tolist()]}"
+            f"[Trainer Worker] Step {self.step}: scored={int(mask.sum())}/{len(eval_results)} "
+            f"mean_reward={mean.item():.2f} adv={[round(a, 3) for a in adv.tolist()]} "
+            f"mask={mask.tolist()}"
         )
         return {
             "step": self.step,
             "mean_reward": float(mean.item()),
             "advantages": adv.tolist(),
-            "num_masked": len(eval_results) - len(scored),
+            "mask": mask.tolist(),
+            "num_masked": len(eval_results) - int(mask.sum()),
         }
 
 
@@ -294,7 +298,12 @@ class AsyncEvaluationPoolActor:
         await self.fleet.setup([to_task(task_dict)])
 
     async def acquire(self, task_dict: dict[str, Any], count: int) -> dict[str, Any]:
-        """Claim ``count`` sandboxes now and hold them under a lease id."""
+        """Claim ``count`` sandboxes now and hold them under a lease id.
+
+        ``acquire_s`` is the claim (the create or warm-pool RPCs) only: an
+        environment becomes ready on its first guest call, so its wake time
+        lands in the first evaluation command, not here.
+        """
         t0 = time.monotonic()
         handles = await self.fleet.acquire_batch([to_task(task_dict)] * count)
         lease_id = uuid.uuid4().hex
@@ -433,7 +442,8 @@ async def main_async(args: argparse.Namespace) -> None:
             t_ready = time.monotonic() - t_iter
             print(
                 f"[Orchestrator] {len(candidates)} candidates + sandboxes ready in {t_ready:.2f}s "
-                f"(acquire took {lease['acquire_s']:.2f}s, overlapped with decoding)"
+                f"(sandbox claim took {lease['acquire_s']:.2f}s, overlapped with decoding; "
+                "readiness happens on the first command)"
             )
 
             # 3. Grade all candidates concurrently.

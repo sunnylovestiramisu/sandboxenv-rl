@@ -377,6 +377,13 @@ new = fleet.add_tasks(next_batch)                    # Task objects or dicts
 fleet.warm_images(sorted({t.image for t in new}), wait=False)
 ```
 
+### RL rollouts and benchmark adapters
+
+[USER_GUIDE.md](USER_GUIDE.md) covers what is specific to RL: overlapping
+sandbox claims with policy decoding (`AsyncSandboxFleet.acquire_batch`), and
+grading candidates with `ate_env.adapters` (`SweBenchAdapter`). The VeRL
+example in [`examples/verl_swebench`](../../examples/verl_swebench) uses both.
+
 ### Observability
 
 Three layers, all off the hot path when disabled. The base install has

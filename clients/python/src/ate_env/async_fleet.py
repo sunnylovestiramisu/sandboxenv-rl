@@ -259,8 +259,10 @@ class AsyncSandboxFleet:
         if not errors:
             return list(results)  # type: ignore[arg-type]
         acquired = [r for r in results if isinstance(r, SandboxHandle)]
+        # Through self.release, so these releases are in the run report and
+        # the release-phase metrics like any other.
         released = await asyncio.gather(
-            *(h.release_async() for h in acquired), return_exceptions=True
+            *(self.release(h) for h in acquired), return_exceptions=True
         )
         for h, rel in zip(acquired, released):
             if isinstance(rel, BaseException):

@@ -113,7 +113,7 @@ kubectl create configmap sandbox-sdk-pkg --from-file=pkg.tar.gz.b64=/tmp/pkg.tar
 
 export VERL_WORKER_IMAGE=<registry>/verl-worker:<tag>   # python3 + ray + torch
 export SWEBENCH_IMAGE=<registry>/sweb.eval.x86_64.pytest-dev_1776_pytest-5221:latest
-export SWEBENCH_TEMPLATE=<actor-template-for-that-image>
+export SWEBENCH_TEMPLATE=<actor-template-for-that-image>   # optional; empty uses default-template
 envsubst < examples/verl_swebench/ray-job.async-verl.yaml | kubectl apply -f -
 ```
 

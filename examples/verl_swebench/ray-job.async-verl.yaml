@@ -17,7 +17,9 @@
 # Render with envsubst before applying (see README.md):
 #   VERL_WORKER_IMAGE  Ray worker image with python3, ray and torch installed.
 #   SWEBENCH_IMAGE     SWE-bench eval image for the instance (rootfs of the sandbox).
-#   SWEBENCH_TEMPLATE  Substrate ActorTemplate built from SWEBENCH_IMAGE.
+#   SWEBENCH_TEMPLATE  Optional: a Substrate ActorTemplate built from SWEBENCH_IMAGE.
+#                      Empty: the fleet uses default-template with SWEBENCH_IMAGE
+#                      as the sandbox's rootfs image.
 #
 # The policy (sampler/trainer) is simulated, so this job requests no GPUs. To run
 # a real VeRL policy, add a GPU worker group and pass --sampler-gpus/--trainer-gpus.
@@ -60,11 +62,22 @@ spec:
               set -e
               mkdir -p /workspace/site-packages
               base64 -d /etc/pkg/pkg.tar.gz.b64 | tar -xz -C /workspace
-              # TODO: bake these pins into VERL_WORKER_IMAGE instead of installing per pod.
-              pip install --no-cache-dir --target=/workspace/site-packages \
-                'numpy==1.26.4' 'grpcio>=1.84' 'protobuf>=7.35'
-              printf 'import pkgutil\n__path__ = pkgutil.extend_path(__path__, __name__)\n' \
-                > /workspace/site-packages/google/__init__.py
+              # The install needs PyPI access. For a cluster without internet
+              # egress, bake these pins into VERL_WORKER_IMAGE: the install is
+              # then skipped.
+              if python3 - <<'PY' 2>/dev/null
+              from importlib.metadata import version
+              v = lambda p: tuple(int(x) for x in version(p).split(".")[:2])
+              assert version("numpy") == "1.26.4" and v("grpcio") >= (1, 84) and v("protobuf") >= (7, 35)
+              PY
+              then
+                echo "VERL_WORKER_IMAGE has the pinned packages; skipping pip install"
+              else
+                pip install --no-cache-dir --target=/workspace/site-packages \
+                  'numpy==1.26.4' 'grpcio>=1.84' 'protobuf>=7.35'
+                printf 'import pkgutil\n__path__ = pkgutil.extend_path(__path__, __name__)\n' \
+                  > /workspace/site-packages/google/__init__.py
+              fi
             volumeMounts:
             - name: workspace
               mountPath: /workspace
@@ -85,6 +98,7 @@ spec:
               value: "c2"
             - name: SWEBENCH_IMAGE
               value: "${SWEBENCH_IMAGE}"
+            # Optional; empty uses default-template with SWEBENCH_IMAGE as rootfs.
             - name: SWEBENCH_TEMPLATE
               value: "${SWEBENCH_TEMPLATE}"
             ports:

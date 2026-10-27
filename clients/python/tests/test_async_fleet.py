@@ -166,3 +166,33 @@ async def test_acquire_batch_releases_acquired_handles_on_partial_failure():
     # The two sandboxes that were acquired must not leak.
     assert fleet.backend.instances == {}
     fleet.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_batch_partial_failure_releases_through_the_fleet():
+    """The cleanup releases go through fleet.release, so the report and metrics see them."""
+    from ate_env.errors import SandboxStartError
+
+    fleet = AsyncSandboxFleet(FleetConfig(backend="mock"))
+    tasks = [Task(id=f"t-{i}", image="img-1") for i in range(3)]
+    real_acquire, real_release = fleet.acquire, fleet.release
+    released: list[str] = []
+
+    async def flaky_acquire(task, timeout_s=None):
+        if task.id == "t-1":
+            raise SandboxStartError("boom")
+        return await real_acquire(task, timeout_s=timeout_s)
+
+    async def recording_release(handle):
+        released.append(handle.task.id)
+        await real_release(handle)
+
+    fleet.acquire = flaky_acquire  # type: ignore[method-assign]
+    fleet.release = recording_release  # type: ignore[method-assign]
+    with fleet.observer.run("naive") as report:
+        with pytest.raises(SandboxStartError):
+            await fleet.acquire_batch(tasks)
+    assert sorted(released) == ["t-0", "t-2"]
+    assert report.phases["release"][0] == 2
+    assert fleet.backend.instances == {}
+    fleet.close()
