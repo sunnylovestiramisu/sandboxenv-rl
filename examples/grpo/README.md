@@ -125,9 +125,26 @@ cluster A comes from the newer build and the larger machines.
 Same names as the original (`MODEL, MAX_STEPS, REWARD_SANDBOXES, NUM_GENERATIONS,
 MAX_COMPLETION, SUSPEND_MODE, DATASET_SLICE, ROLLOUT_LEN, EPISODE_LEDGER, BF16`) plus
 `ATE_ENV_ENDPOINT, ATE_TEMPLATE, ATE_ATESPACE, RUN_ID, EXEC_TIMEOUT, WAKE_RETRIES, WAKE_TIMEOUT,
-OUT, SMOKE`. Actors are named `RUN_ID-<n>`; a crashed run is swept with
+OUT, SMOKE` and the telemetry knobs `REPORT_DIR, ENABLE_TRACING, METRICS_PORT`. Actors are named `RUN_ID-<n>`; a crashed run is swept with
 `kubectl-ate get actors -a ate-env | awk '/^RUN_ID-/{print $1}' | xargs -n1 kubectl-ate delete actor -a ate-env`
 (suspend first for any still RUNNING).
+
+## Run report, metrics and traces
+
+The script records its phases (`acquire` = create + boot, `process` = one reward eval, `suspend`,
+`wake`, `recycle`, `release`, `teardown`) with the client's `Observer`, so a GRPO run produces the
+same run report as a fleet run, plus the optional layers (see
+[docs/observability.md](../../docs/observability.md)):
+
+```bash
+REPORT_DIR=/tmp/reports SMOKE=1 python grpo_substrate_train.py   # grpo_<n>tasks_<stamp>.txt and .json
+python report.py /tmp/reports/grpo_*tasks_*.json                  # same table, from the JSON
+# spans (pip install 'ate-env-client[tracing]') and Prometheus (pip install 'ate-env-client[metrics]')
+ENABLE_TRACING=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 METRICS_PORT=9095 python grpo_substrate_train.py
+```
+
+The summary is printed at exit whether or not `REPORT_DIR` is set. `OUT` keeps receiving the
+per-event JSONL that `report.py` reads, for one more release.
 
 ## Two clusters, one training loop (MC-1 on the harness side)
 

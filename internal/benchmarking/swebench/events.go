@@ -15,10 +15,16 @@
 package swebench
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Event names. Every timed operation of a run is one of these.
@@ -71,20 +77,57 @@ type Event struct {
 }
 
 // Recorder writes events as JSON lines. It is safe for concurrent use.
+//
+// With a tracer (WithTracer), every event is also one span. An
+// event is written when its operation finishes, with the finish time and the
+// duration, so the span is recorded after the fact: it starts at Time minus
+// DurMS and ends at Time. The span is named after Event.Event (a fixed
+// vocabulary, never an id), carries run, env, instance, step and task as
+// attributes, and has status Ok when the event is ok and Error otherwise.
+// The JSONL is the same with or without a tracer.
 type Recorder struct {
 	mu  sync.Mutex
 	w   io.Writer
 	enc *json.Encoder
 	n   int
 	err error
+
+	tracer trace.Tracer // nil: no spans
+	parent context.Context
+}
+
+// RecorderOption configures a Recorder.
+type RecorderOption func(*Recorder)
+
+// WithTracer makes the Recorder record one span per event on tracer. The
+// default is no tracer, which records none.
+func WithTracer(tracer trace.Tracer) RecorderOption {
+	return func(r *Recorder) {
+		r.tracer = tracer
+	}
+}
+
+// WithParent makes the event spans children of the span in ctx, so a whole
+// run lands in one trace. The default is a span-less context: every event
+// span is a root.
+func WithParent(ctx context.Context) RecorderOption {
+	return func(r *Recorder) {
+		if ctx != nil {
+			r.parent = ctx
+		}
+	}
 }
 
 // NewRecorder writes to w; a nil w discards events.
-func NewRecorder(w io.Writer) *Recorder {
+func NewRecorder(w io.Writer, opts ...RecorderOption) *Recorder {
 	if w == nil {
 		w = io.Discard
 	}
-	return &Recorder{w: w, enc: json.NewEncoder(w)}
+	r := &Recorder{w: w, enc: json.NewEncoder(w), parent: context.Background()}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Record writes one event, stamping the time if unset.
@@ -93,11 +136,54 @@ func (r *Recorder) Record(e Event) {
 		e.Time = time.Now()
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.enc.Encode(e); err != nil && r.err == nil {
 		r.err = err
 	}
 	r.n++
+	r.mu.Unlock()
+	if r.tracer != nil {
+		r.span(e)
+	}
+}
+
+// span records e as a span that ran for DurMS up to e.Time.
+func (r *Recorder) span(e Event) {
+	end := e.Time
+	start := end.Add(-time.Duration(e.DurMS * float64(time.Millisecond)))
+	attrs := []attribute.KeyValue{attribute.String("run", e.RunID)}
+	set := func(k, v string) {
+		if v != "" {
+			attrs = append(attrs, attribute.String(k, v))
+		}
+	}
+	set("env", e.Env)
+	set("instance", e.Instance)
+	set("step", strconv.Itoa(e.Step))
+	set("task", strconv.Itoa(e.Task))
+	set("name", e.Name)
+	if e.Attempts > 0 {
+		set("attempts", strconv.Itoa(e.Attempts))
+	}
+	if e.Count > 0 {
+		set("count", strconv.Itoa(e.Count))
+	}
+	if e.Exit != nil {
+		set("exit", strconv.Itoa(*e.Exit))
+	}
+	if e.Reward != nil {
+		set("reward", strconv.Itoa(*e.Reward))
+	}
+	_, span := r.tracer.Start(r.parent, e.Event, trace.WithTimestamp(start), trace.WithAttributes(attrs...))
+	if e.OK {
+		span.SetStatus(codes.Ok, "")
+	} else {
+		msg := e.Err
+		if msg == "" {
+			msg = "not ok"
+		}
+		span.SetStatus(codes.Error, msg)
+	}
+	span.End(trace.WithTimestamp(end))
 }
 
 // Len is the number of events written so far.

@@ -669,6 +669,12 @@ curl -X POST localhost:7777/v1alpha/envs/dev1/mcp \
      }'
 ```
 
+## Observability
+
+Run reports, Prometheus metrics and OpenTelemetry traces across the Python client, ate-env-api,
+the guest and the Go client, all off by default except the run report: see
+[docs/observability.md](docs/observability.md) and the metric reference [docs/metrics.md](docs/metrics.md).
+
 ## Security
 
 The trust boundaries and their known gaps are in [docs/security/threat-model.md](docs/security/threat-model.md).

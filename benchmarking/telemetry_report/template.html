@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>ate_env telemetry – __TITLE__</title>
+<style>
+:root{--bg:#fcfcfb;--fg:#1f1f1e;--card:#fff;--border:#e4e3df;--primary:#1a73e8;--muted:#5f5e5a}
+@media (prefers-color-scheme:dark){:root{--bg:#1a1a19;--fg:#f1f1ef;--card:#232322;--border:#3a3a38;--primary:#8ab4f8;--muted:#b5b4ad}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:13px}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header b{font-size:15px}
+nav{padding:10px 16px 0;display:flex;gap:4px;flex-wrap:wrap}
+main{padding:16px;max-width:1400px;margin:0 auto;display:grid;gap:14px}
+.tab{padding:6px 12px;border-radius:8px;border:1px solid transparent;cursor:pointer;color:var(--muted);background:none;font:inherit}
+.tab.on{background:var(--card);border-color:var(--border);color:var(--fg);font-weight:600}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;overflow:auto}
+.card h3{margin:0 0 2px;font-size:13px}
+.sub{color:var(--muted);font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px}
+.kpi .v{font-size:22px;font-weight:600;margin-top:4px}
+table{border-collapse:collapse;width:100%}
+td,th{padding:4px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{color:var(--muted);font-weight:500}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer} tr.click:hover{background:rgba(128,128,128,.08)}
+.bar{height:10px;border-radius:3px;background:var(--primary);display:inline-block;vertical-align:middle}
+.err{color:#d93025}
+svg text{fill:var(--muted);font-size:10px}
+.lg{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-size:11px;color:var(--muted)}
+.lg i{width:11px;height:9px;border-radius:2px;display:inline-block}
+#tip{position:fixed;pointer-events:none;background:var(--card);border:1px solid var(--border);font-size:11px;padding:6px 8px;border-radius:6px;display:none;z-index:10;max-width:360px;white-space:pre-wrap}
+input{font:inherit;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg)}
+footer{padding:0 16px 20px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header><b>ate_env telemetry</b><span class="sub" id="hdr"></span></header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+<div id="tip"></div>
+<footer>Sources: RunReport JSON (REPORT_DIR), OpenTelemetry spans (OTLP/JSON), Prometheus scrapes. Built by benchmarking/telemetry_report at __GENERATED__.</footer>
+<script>
+const D = __RUN_JSON__;
+const NS='http://www.w3.org/2000/svg';
+const PAL=['#1a73e8','#eb6834','#1baf7a','#9085e9','#eda100','#e34948','#2a9d8f','#8a8985','#4a3aa7','#d16ba5'];
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fs=x=>x==null?'–':x<0.001?(x*1e6).toFixed(0)+' µs':x<1?(x*1000).toFixed(1)+' ms':x<120?x.toFixed(2)+' s':(x/60).toFixed(1)+' min';
+const fn=x=>x==null?'–':Number.isInteger(x)?x.toLocaleString():x.toFixed(2);
+const main=document.getElementById('main'), tip=document.getElementById('tip');
+function el(t,a={},p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
+function h(html){const d=document.createElement('div');d.innerHTML=html.trim();return d.firstElementChild}
+function hover(n,txt){n.addEventListener('mousemove',e=>{tip.style.display='block';tip.textContent=txt;tip.style.left=Math.min(e.clientX+12,innerWidth-370)+'px';tip.style.top=(e.clientY+12)+'px'});n.addEventListener('mouseleave',()=>tip.style.display='none')}
+function card(title,sub){const c=h(`<section class="card"><h3>${title}</h3>${sub?`<div class="sub" style="margin-bottom:8px">${sub}</div>`:''}<div class="body"></div></section>`);main.appendChild(c);return c.querySelector('.body')}
+function table(p,cols,rows,onclick){const t=h(`<table><thead><tr>${cols.map(c=>`<th class="${c.n?'n':''}">${c.t}</th>`).join('')}</tr></thead><tbody></tbody></table>`);const tb=t.querySelector('tbody');
+  rows.forEach(r=>{const tr=document.createElement('tr');if(onclick){tr.className='click';tr.onclick=()=>onclick(r)}tr.innerHTML=cols.map(c=>`<td class="${c.n?'n':''}">${c.f?c.f(r):esc(r[c.k])}</td>`).join('');tb.appendChild(tr)});p.appendChild(t);return t}
+const svcColor={};(D.spans.services||[]).forEach((s,i)=>svcColor[s]=PAL[i%PAL.length]);
+const color=s=>svcColor[s]||'#8a8985';
+function legend(p){const d=document.createElement('div');d.style.margin='0 0 6px';(D.spans.services||[]).forEach(s=>d.insertAdjacentHTML('beforeend',`<span class="lg"><i style="background:${color(s)}"></i>${esc(s)}</span>`));p.appendChild(d)}
+
+const R=D.report, S=D.spans, M=D.metrics;
+document.getElementById('hdr').textContent=`${D.meta.title} · ${D.meta.inputs.reports} run report(s) · ${fn(D.meta.inputs.spans)} spans · ${D.meta.inputs.metric_files} scrape(s)`;
+
+const TABS={
+ Overview(){
+  const run=R.runs||[];const sum=k=>run.reduce((a,r)=>a+(r[k]||0),0);
+  const k=document.createElement('div');k.className='kpis';main.appendChild(k);
+  const kp=(l,v,s)=>k.insertAdjacentHTML('beforeend',`<div class="kpi"><div class="sub">${l}</div><div class="v">${v}</div>${s?`<div class="sub">${s}</div>`:''}</div>`);
+  if(run.length){kp('Runs',run.length,[...new Set(run.map(r=>r.strategy))].join(', '));kp('Wall time',fs(sum('total_s')));kp('Tasks ok / err',`${sum('tasks_ok')} / <span class="${sum('tasks_err')?'err':''}">${sum('tasks_err')}</span>`);kp('Claims',fn(sum('claims')));kp('Warm replicas peak',fn(Math.max(0,...run.map(r=>r.warm_replicas_peak||0))))}
+  if(S.n){kp('Traces',fn(S.n_traces),`${fn(S.n)} spans`);kp('Cross-service traces',fn(S.multi_service_traces),S.n_traces?`${(100*S.multi_service_traces/S.n_traces).toFixed(0)}% of traces`:'');kp('Orphan roots',fn(S.orphan_roots),'parent not exported')}
+  if(R.phases&&R.phases.length){const b=card('Where the time went','RunReport phases summed over runs (same table shape as agent-sandbox-rl).');const mx=Math.max(...R.phases.map(p=>p.total_s))||1;
+   table(b,[{t:'Phase',k:'name'},{t:'Count',n:1,f:r=>fn(r.count)},{t:'Total',n:1,f:r=>fs(r.total_s)},{t:'Mean',n:1,f:r=>fs(r.mean_s)},{t:'Max',n:1,f:r=>fs(r.max_s)},{t:'',f:r=>`<span class="bar" style="width:${(300*r.total_s/mx).toFixed(0)}px"></span>`}],R.phases)}
+  if(run.length){const b=card('Runs');table(b,[{t:'File',k:'_file'},{t:'Strategy',k:'strategy'},{t:'Total',n:1,f:r=>fs(r.total_s)},{t:'Ok',n:1,k:'tasks_ok'},{t:'Err',n:1,k:'tasks_err'},{t:'Claims',n:1,k:'claims'},{t:'Warm total',n:1,k:'warm_replicas_total'},{t:'Warm peak',n:1,k:'warm_replicas_peak'},{t:'Environment',f:r=>esc(JSON.stringify(r.environment||{})).slice(0,120)}],run)}
+  if(S.n){const b=card('Traces reaching each service','How many traces contain at least one span from the service: the client trace continues into ate-env-api (and ateapi when Substrate exports to the same collector).');
+   const rows=Object.entries(S.traces_by_service).map(([s,n])=>({s,n}));const mx=Math.max(...rows.map(r=>r.n));
+   table(b,[{t:'Service',f:r=>`<span class="lg"><i style="background:${color(r.s)}"></i>${esc(r.s)}</span>`},{t:'Traces',n:1,f:r=>fn(r.n)},{t:'',f:r=>`<span class="bar" style="background:${color(r.s)};width:${(300*r.n/mx).toFixed(0)}px"></span>`}],rows)}
+ },
+ Timeline(){
+  if(!S.timeline||!S.timeline.length){card('Timeline','No caller-side spans (fleet phases, client calls, benchmark events).');return}
+  const b=card('Caller timeline','Every caller-side span (ate_env_fleet.* phases, Python and Go client calls, swebench-loader events; not the ate-env servers) on one time axis, one lane per span name. Hover for duration.');
+  const names=[...new Set(S.timeline.map(s=>s.name))].sort();const W=1300,L=230,lh=18,H=names.length*lh+30;const T=Math.max(...S.timeline.map(s=>s.o+s.dur))||1;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,width:'100%'},b);
+  names.forEach((n,i)=>{el('text',{x:4,y:i*lh+13},svg).textContent=n;el('line',{x1:L,x2:W,y1:i*lh+lh,y2:i*lh+lh,stroke:'var(--border)'},svg)});
+  S.timeline.forEach(s=>{const i=names.indexOf(s.name);const r=el('rect',{x:L+(W-L)*s.o/T,y:i*lh+3,width:Math.max(1,(W-L)*s.dur/T),height:lh-6,rx:2,fill:s.error?'#e34948':color(s.service),opacity:.75},svg);hover(r,`${s.name}\n${fs(s.dur)} at +${fs(s.o)}`)});
+  for(let i=0;i<=10;i++){const x=L+(W-L)*i/10;el('text',{x:x-10,y:H-4},svg).textContent=fs(T*i/10)}
+ },
+ Traces(){
+  if(!S.n){card('Traces','No spans loaded (pass --spans).');return}
+  const b=card('Traces','Click a trace to open its waterfall. Sorted by start time; waterfalls are embedded for the traces with the most services, then longest.');
+  const f=h('<input placeholder="filter by root span or service" style="width:320px;margin-bottom:8px">');b.appendChild(f);
+  const wrap=document.createElement('div');b.appendChild(wrap);const wf=card('Waterfall','');
+  const render=()=>{wrap.innerHTML='';const q=f.value.toLowerCase();const rows=S.traces.filter(t=>!q||t.root.toLowerCase().includes(q)||t.services.join(' ').toLowerCase().includes(q)).slice(0,300);
+   table(wrap,[{t:'Trace',f:r=>`<code>${r.trace_id.slice(0,16)}</code>${S.waterfalls[r.trace_id]?'':' <span class="sub">(no waterfall)</span>'}`},{t:'Root',f:r=>esc(r.root)},{t:'Services',f:r=>r.services.map(s=>`<span class="lg"><i style="background:${color(s)}"></i>${esc(s)}</span>`).join('')},{t:'Spans',n:1,k:'n'},{t:'Duration',n:1,f:r=>fs(r.dur)},{t:'',f:r=>r.error?'<span class="err">error</span>':''}],rows,r=>waterfall(wf,r))};
+  f.oninput=render;render();
+  const first=S.traces.find(t=>S.waterfalls[t.trace_id]&&t.services.length>1)||S.traces.find(t=>S.waterfalls[t.trace_id]);if(first)waterfall(wf,first);
+ },
+ Latency(){
+  if(S.latency&&S.latency.length){const b=card('Span latency','Per (service, span name), from exported spans.');
+   table(b,[{t:'Service',f:r=>`<span class="lg"><i style="background:${color(r.service)}"></i>${esc(r.service)}</span>`},{t:'Span',f:r=>esc(r.name)},{t:'Count',n:1,f:r=>fn(r.n)},{t:'Errors',n:1,f:r=>r.errors?`<span class="err">${r.errors}</span>`:'0'},{t:'p50',n:1,f:r=>fs(r.p50)},{t:'p90',n:1,f:r=>fs(r.p90)},{t:'p99',n:1,f:r=>fs(r.p99)},{t:'Max',n:1,f:r=>fs(r.max)},{t:'Total',n:1,f:r=>fs(r.sum)}],S.latency)}
+  else card('Span latency','No spans loaded.');
+ },
+ Metrics(){
+  if(!M.files||!M.files.length){card('Prometheus','No scrapes loaded (pass --metrics).');return}
+  const hs=M.histograms||{};
+  Object.keys(hs).sort().forEach(fam=>{const b=card(fam,'Quantiles estimated from buckets (linear within a bucket, as PromQL histogram_quantile).');
+   table(b,[{t:'Labels',f:r=>`<code>${esc(r.labels)}</code>`},{t:'Count',n:1,f:r=>fn(r.count)},{t:'Mean',n:1,f:r=>fs(r.mean)},{t:'p50',n:1,f:r=>fs(r.p50)},{t:'p90',n:1,f:r=>fs(r.p90)},{t:'p99',n:1,f:r=>fs(r.p99)}],hs[fam])});
+  const cs=M.counters||{};
+  Object.keys(cs).sort().forEach(fam=>{const rows=Object.entries(cs[fam]).map(([l,v])=>({l,v})).sort((a,b)=>b.v-a.v);const b=card(fam,'Counter');table(b,[{t:'Labels',f:r=>`<code>${esc(r.l)}</code>`},{t:'Value',n:1,f:r=>fn(r.v)}],rows)});
+  const gs=M.gauges||{};
+  Object.keys(gs).sort().forEach(fam=>{const rows=Object.entries(gs[fam]).map(([l,v])=>({l,v}));const b=card(fam,'Gauge');table(b,[{t:'Labels',f:r=>`<code>${esc(r.l)}</code>`},{t:'Value',n:1,f:r=>fn(r.v)}],rows)});
+  card('Scrapes',M.files.map(esc).join(' · '));
+ },
+};
+
+function waterfall(p,t){
+ p.innerHTML='';const rows=S.waterfalls[t.trace_id];
+ p.parentElement.querySelector('h3').textContent=`Waterfall · ${t.root} · ${t.trace_id}`;
+ if(!rows){p.textContent='Waterfall not embedded for this trace.';return}
+ legend(p);
+ const W=1300,L=420,lh=17,H=rows.length*lh+24,T=Math.max(...rows.map(r=>r.o+r.dur))||1e-6;
+ const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,width:'100%'},p);
+ rows.forEach((r,i)=>{const y=i*lh;
+  el('text',{x:4+r.depth*12,y:y+12},svg).textContent=(r.name.length>52?r.name.slice(0,50)+'…':r.name);
+  const g=el('rect',{x:L+(W-L-60)*r.o/T,y:y+3,width:Math.max(1.5,(W-L-60)*r.dur/T),height:lh-6,rx:2,fill:r.error?'#e34948':color(r.service)},svg);
+  el('text',{x:L+(W-L-60)*(r.o+r.dur)/T+4,y:y+12},svg).textContent=fs(r.dur);
+  hover(g,`${r.name}\nservice: ${r.service}\nduration: ${fs(r.dur)}  start: +${fs(r.o)}\n`+Object.entries(r.attrs).map(([k,v])=>`${k}: ${v}`).join('\n'))});
+}
+
+const nav=document.getElementById('tabs');let cur='Overview';
+function show(n){cur=n;main.innerHTML='';[...nav.children].forEach(b=>b.classList.toggle('on',b.textContent===n));TABS[n]()}
+Object.keys(TABS).forEach(n=>{const b=document.createElement('button');b.className='tab';b.textContent=n;b.onclick=()=>show(n);nav.appendChild(b)});
+show(cur);
+</script>
+</body>
+</html>

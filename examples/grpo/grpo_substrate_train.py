@@ -49,9 +49,17 @@ Substrate-specific:
   OUT (/tmp/grpo-substrate-<RUN_ID>.jsonl)  per-step timing records
   SMOKE (0|1)  1 = no model: create fleet, one eval, suspend, wake, delete, exit
   STATE_MB (0)  MiB of touched memory held by a detached process in each actor (realistic working set)
+Telemetry (docs/observability.md):
+  REPORT_DIR (unset)  write the run report there at exit, <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.txt
+                      and .json (strategy "grpo"); the summary is printed either way
+  ENABLE_TRACING (0|1)  ate_env_fleet.* phase spans with the client's spans under them, over OTLP
+                        (OTEL_EXPORTER_OTLP_ENDPOINT); needs ate-env-client[tracing]
+  METRICS_PORT (0)  serve the ate_env_fleet_* and ate_env_client_* Prometheus series on this port;
+                    needs ate-env-client[metrics]
 """
 
 import asyncio
+import contextvars
 import json
 import sys
 import os
@@ -84,6 +92,9 @@ WAKE_TIMEOUT = float(os.environ.get("WAKE_TIMEOUT", "120"))
 OUT = os.environ.get("OUT", f"/tmp/grpo-substrate-{RUN_ID}.jsonl")
 SMOKE = os.environ.get("SMOKE", "0") == "1"
 STATE_MB = int(os.environ.get("STATE_MB", "0"))  # resident-memory ballast per actor (0 = none)
+REPORT_DIR = os.environ.get("REPORT_DIR", "")
+ENABLE_TRACING = os.environ.get("ENABLE_TRACING", "0") == "1"
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "0"))
 
 # ---------------- Substrate adapter ----------------------------------------
 # ate_env is asyncio; TRL's reward function is sync and already fans out on a
@@ -91,9 +102,46 @@ STATE_MB = int(os.environ.get("STATE_MB", "0"))  # resident-memory ballast per a
 # every coroutine is submitted to it (grpc.aio objects must be created and
 # used on the same loop).
 from ate_env import Client
+from ate_env.config import ObservabilityConfig, TracerConfig
 from ate_env.errors import EnvError
+from ate_env.loop_runner import LoopRunner
+from ate_env.observability import Observer, serve_metrics
 
 _out_lock = threading.Lock()
+
+# ---------------- telemetry ---------------------------------------------------
+# The always-on RunReport, plus Prometheus series and spans when asked for.
+# Phases use the fleet's vocabulary: acquire (create + boot), process (one
+# reward eval), suspend, wake, recycle, release (delete), teardown.
+BACKEND = "substrate"
+OBS = Observer(ObservabilityConfig(enable_metrics=METRICS_PORT > 0, enable_tracing=ENABLE_TRACING))
+if METRICS_PORT:
+    serve_metrics(METRICS_PORT)
+_run_scope = OBS.run("grpo", backend=BACKEND)
+_run_scope.__enter__()
+
+
+def _submit(pool, fn, *args):
+    """pool.submit that carries the caller's context, so worker-thread phase
+    spans nest under the run span."""
+    return pool.submit(contextvars.copy_context().run, fn, *args)
+
+
+def _map(pool, fn, items):
+    return [f.result() for f in [_submit(pool, fn, x) for x in items]]
+
+
+def _finish_report():
+    """End the run scope once; print the report and write it to REPORT_DIR."""
+    global _run_scope
+    if _run_scope is None:
+        return
+    _run_scope.__exit__(None, None, None)
+    _run_scope = None
+    print(OBS.report.summary())
+    if REPORT_DIR:
+        base = OBS.report.write(REPORT_DIR)  # n = reward evals run
+        print(f"run report -> {base}.txt / .json")
 
 
 def record(**kv):
@@ -109,27 +157,32 @@ class SubstrateFleet:
         self.endpoint = endpoint
         self.template = template
         self.atespace = atespace
-        self.loop = asyncio.new_event_loop()
-        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        # LoopRunner attaches the caller's trace context inside each coroutine.
+        self.runner = LoopRunner(name=f"grpo-{name}")
         self.client = self._run(self._mk(endpoint))
 
     async def _mk(self, endpoint):
+        if ENABLE_TRACING:
+            return Client(endpoint, tracer_config=TracerConfig(
+                enable_tracing=True, trace_service_name=OBS.config.trace_service_name))
         return Client(endpoint)
 
     def _rec(self, **kv):
         record(cluster=self.name, **kv)
 
     def _run(self, coro, timeout=None):
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+        return self.runner.run(coro, timeout)
 
     # -- lifecycle --
     def create(self, name):
         t0 = time.time()
-        env = self._run(self.client.create(name, atespace=self.atespace, template_name=self.template), 120)
-        # creation registers the actor; the first command boots it (golden restore).
-        self.wake(env, why="boot")  # first command = golden restore
-        if STATE_MB:
-            self.add_ballast(env, STATE_MB)
+        with OBS.phase("acquire", backend=BACKEND):
+            env = self._run(self.client.create(name, atespace=self.atespace, template_name=self.template), 120)
+            # creation registers the actor; the first command boots it (golden restore).
+            self.wake(env, why="boot")  # first command = golden restore
+            if STATE_MB:
+                self.add_ballast(env, STATE_MB)
+        OBS.claim(BACKEND)
         self._rec(ev="create", actor=name, wall=time.time() - t0, state_mb=STATE_MB)
         return env
 
@@ -179,12 +232,14 @@ class SubstrateFleet:
 
     def suspend(self, env):
         t0 = time.time()
-        self._run(self.client.suspend(env.id, atespace=self.atespace), 600)
+        with OBS.phase("suspend", backend=BACKEND):
+            self._run(self.client.suspend(env.id, atespace=self.atespace), 600)
         self._rec(ev="suspend", actor=env.id, wall=time.time() - t0)
 
     def delete(self, env):
         try:
-            self._run(self.client.delete(env.id, atespace=self.atespace), 600)
+            with OBS.phase("release", backend=BACKEND):
+                self._run(self.client.delete(env.id, atespace=self.atespace), 600)
         except EnvError as e:
             print(f"  delete {env.id}: {e}")
 
@@ -278,7 +333,7 @@ def _claim_one(label):
 
 t_fleet = time.time()
 with ThreadPoolExecutor(max_workers=REWARD_SANDBOXES) as _p:
-    sandboxes = list(_p.map(_claim_one, range(REWARD_SANDBOXES)))
+    sandboxes = _map(_p, _claim_one, range(REWARD_SANDBOXES))
 print(f"  fleet of {len(sandboxes)} ready in {time.time() - t_fleet:.1f}s")
 free: "queue.Queue" = queue.Queue()
 for sb in sandboxes:
@@ -351,8 +406,14 @@ def run_in_sandbox(code: str, tests: list, tag: str) -> float:
             program = prelude + program
         name = f"/tmp/eval_{tag}.py"
         t0 = time.time()
-        fleet.write(sb, code_file, code)
-        r = fleet.write_run(sb, name, program)
+        try:
+            with OBS.phase("process", backend=BACKEND):
+                fleet.write(sb, code_file, code)
+                r = fleet.write_run(sb, name, program)
+        except Exception:
+            OBS.task_done(BACKEND, "-", "error", time.time() - t0)
+            raise
+        OBS.task_done(BACKEND, "-", "ok", time.time() - t0)
         m = re.search(r"__RESULT__ (\d+) (\d+)", r.stdout or "")
         lm = re.search(r"__LEDGER__ (\d+) (\d+)", r.stdout or "")
         if lm:
@@ -395,7 +456,8 @@ def _suspend_one(sb):
 
 def _resume_one(sb):
     try:
-        fleet.wake(sb, why="resume")
+        with OBS.phase("wake", backend=BACKEND):
+            fleet.wake(sb, why="resume")
     except Exception as e:
         print(f"  resume {sb.id} failed: {e}")
         record(ev="resume_failed", actor=sb.id, err=str(e)[:300])
@@ -413,9 +475,10 @@ def sandbox_reward(prompts, completions, test_list=None, **kwargs):
 
     if ROLLOUT_LEN and tag > 1 and (tag - 1) % ROLLOUT_LEN == 0:
         t0 = time.time()
-        list(pool.map(fleet.delete, sandboxes))
-        with ThreadPoolExecutor(max_workers=REWARD_SANDBOXES) as p:
-            sandboxes = list(p.map(_claim_one, range(REWARD_SANDBOXES)))
+        with OBS.phase("recycle", backend=BACKEND):
+            _map(pool, fleet.delete, sandboxes)
+            with ThreadPoolExecutor(max_workers=REWARD_SANDBOXES) as p:
+                sandboxes = _map(p, _claim_one, range(REWARD_SANDBOXES))
         _eval_counts.clear()  # fresh actors, fresh ledgers
         _comm_fails.clear()
         free = queue.Queue()
@@ -427,14 +490,14 @@ def sandbox_reward(prompts, completions, test_list=None, **kwargs):
 
     if fleet_suspended:
         t0 = time.time()
-        list(pool.map(_resume_one, sandboxes))
+        _map(pool, _resume_one, sandboxes)
         fleet_suspended = False
         step_rec["resume_wall"] = time.time() - t0
         print(f"[step {tag}] resumed {len(sandboxes)} actors in {time.time() - t0:.1f}s")
 
     t0 = time.time()
     codes = [extract_code(c) for c in completions]
-    futs = [pool.submit(run_in_sandbox, c, t, f"{tag}_{i}") for i, (c, t) in enumerate(zip(codes, test_list))]
+    futs = [_submit(pool, run_in_sandbox, c, t, f"{tag}_{i}") for i, (c, t) in enumerate(zip(codes, test_list))]
     rewards = [f.result() for f in futs]
     step_rec["eval_wall"] = time.time() - t0
     step_rec["n_evals"] = len(rewards)
@@ -443,7 +506,7 @@ def sandbox_reward(prompts, completions, test_list=None, **kwargs):
 
     if SUSPEND_MODE == "per_step":
         t0 = time.time()
-        list(pool.map(_suspend_one, sandboxes))
+        _map(pool, _suspend_one, sandboxes)
         fleet_suspended = True
         step_rec["suspend_wall"] = time.time() - t0
         print(f"[step {tag}] suspended fleet in {time.time() - t0:.1f}s")
@@ -454,9 +517,11 @@ def sandbox_reward(prompts, completions, test_list=None, **kwargs):
 def _cleanup():
     print("deleting reward actors...")
     t0 = time.time()
-    list(pool.map(fleet.delete, sandboxes))
+    with OBS.phase("teardown", backend=BACKEND):
+        _map(pool, fleet.delete, sandboxes)
     record(ev="cleanup", n=len(sandboxes), wall=time.time() - t0)
     print(f"  deleted {len(sandboxes)} in {time.time() - t0:.1f}s")
+    _finish_report()
 
 
 # ---------------- smoke: wiring only, no model ------------------------------
@@ -467,8 +532,8 @@ if SMOKE:
         bad = "def add(a, b):\n    return a - b\n"
         r2 = run_in_sandbox(bad, ["assert add(1, 2) == 3", "assert add(0, 0) == 0"], "smoke_bad")
         print(f"smoke rewards: good={r:.2f} (expect 1.00) bad={r2:.2f} (expect 0.55)")
-        t0 = time.time(); list(pool.map(_suspend_one, sandboxes)); print(f"smoke suspend fleet: {time.time() - t0:.1f}s")
-        t0 = time.time(); list(pool.map(_resume_one, sandboxes)); print(f"smoke wake fleet:    {time.time() - t0:.1f}s")
+        t0 = time.time(); _map(pool, _suspend_one, sandboxes); print(f"smoke suspend fleet: {time.time() - t0:.1f}s")
+        t0 = time.time(); _map(pool, _resume_one, sandboxes); print(f"smoke wake fleet:    {time.time() - t0:.1f}s")
         r3 = run_in_sandbox(good, ["assert add(1, 2) == 3"], "smoke_after_wake")
         print(f"smoke after wake: {r3:.2f} (expect 1.00)")
     finally:

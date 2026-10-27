@@ -47,7 +47,15 @@ import (
 	"time"
 
 	"github.com/agent-substrate/env/internal/benchmarking/swebench"
+	"github.com/agent-substrate/env/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracingServiceName is the OpenTelemetry service.name of the loader's spans
+// and the prefix of its run span.
+const tracingServiceName = "swebench-loader"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -265,6 +273,7 @@ func runCmd(args []string) (retErr error) {
 		authTokenFile = fs.String("auth-token-file", "", "File that holds the bearer token for ate-env-api; surrounding whitespace is ignored. Without it, SUBSTRATE_ENV_AUTH_TOKEN is used when set.")
 		labels        = labelFlags{}
 		vars          = labelFlags{}
+		enableTracing = fs.Bool("enable-tracing", false, "Also export every event as an OpenTelemetry span over OTLP/gRPC, configured by OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_INSECURE, all under one swebench-loader.run span per run. The JSONL is the same either way.")
 	)
 	fs.Var(vars, "set", "KEY=VALUE for the trajectories' var function, repeatable, e.g. READ_FILE=/testbed/setup.py or COMPILE_DIR=/testbed; a workload's defaults are in its file. A key no trajectory reads is an error; each value is recorded as a set.KEY label.")
 	fs.Var(labels, "label", "KEY=VALUE recorded on the run event, repeatable: the Substrate commit, the cluster, the arm. The loader records its own flags itself (mode, width, images, trajectory, dataset, the shape flags, connections, base-template, exclude-file, instances and the timeouts); a -label with one of those keys is refused, so report -arm can trust them.")
@@ -380,7 +389,25 @@ func runCmd(args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	rec := swebench.NewRecorder(f)
+	var recOpts []swebench.RecorderOption
+	if *enableTracing {
+		shutdown, err := telemetry.SetupOTel(context.Background(), tracingServiceName)
+		if err != nil {
+			return fmt.Errorf("-enable-tracing: %w", err)
+		}
+		// Deferred before the file close below, so it runs after it: the
+		// run span ends, then the exporter flushes.
+		defer shutdown()
+		// SetupOTel installed the global provider; the scope is the service
+		// name with '-' replaced by '_', as for ate-env-api.
+		tracer := otel.Tracer(strings.ReplaceAll(tracingServiceName, "-", "_"))
+		runCtx, runSpan := tracer.Start(context.Background(), tracingServiceName+".run",
+			trace.WithAttributes(attribute.String("run", *runID), attribute.String("mode", *mode)))
+		defer runSpan.End()
+		recOpts = append(recOpts, swebench.WithTracer(tracer), swebench.WithParent(runCtx))
+		log.Info("tracing enabled", slog.String("otlp_endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")))
+	}
+	rec := swebench.NewRecorder(f, recOpts...)
 	// Events lost to a write error, or a file that does not flush, must fail
 	// the run rather than produce a report with holes.
 	defer func() {

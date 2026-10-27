@@ -667,3 +667,40 @@ def test_an_empty_or_missing_token_file_is_a_config_error(tmp_path):
         SubstrateSandboxProvider({"connection": {"auth_token_file": _token_file(tmp_path, " \n")}})
     with pytest.raises(ValueError, match="auth_token_file"):
         SubstrateSandboxProvider({"connection": {"auth_token_file": str(tmp_path / "nope")}})
+
+
+def test_provider_lifecycle_has_no_telemetry_side_effects():
+    """A provider process never constructs an Observer: a create/exec/close
+    cycle leaves prometheus_client unimported and the fleet collectors
+    unregistered, even where the metrics extra is installed."""
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(
+        """
+        import asyncio, sys
+        from ate_env import observability
+        from nemo_gym_substrate._compat import SandboxSpec
+        from nemo_gym_substrate.provider import SubstrateSandboxProvider
+        from tests.fakes import serve
+
+        async def main():
+            async with serve() as (target, _fake):
+                p = SubstrateSandboxProvider({"connection": {"api_url": target}})
+                h = await p.create(SandboxSpec(ready_timeout_s=10))
+                assert (await p.exec(h, "true")).return_code == 0
+                await p.close(h)
+                await p.aclose()
+
+        asyncio.run(main())
+        assert "prometheus_client" not in sys.modules, "provider imported prometheus_client"
+        assert observability._METRICS_READY is False and observability.PHASE_LATENCY is None
+        print("clean")
+        """
+    )
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True,
+                         text=True, timeout=60, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "clean"
