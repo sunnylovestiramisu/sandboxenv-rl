@@ -123,3 +123,24 @@ No GPUs are requested because the policy is simulated. To plug in a real policy,
 add a GPU worker group and pass `--sampler-gpus` / `--trainer-gpus`. The
 RayCluster is deleted 5 minutes after the job finishes
 (`shutdownAfterJobFinishes`).
+
+### 4. End to end with telemetry
+
+`run-telemetry-e2e.sh` runs the RayJob against an `ate-env-api` started with
+`-enable-tracing` (see `docs/observability.md`), with the acceptance collector
+from `tests/telemetry/otel-collector.yaml`, then builds the HTML run report
+(`benchmarking/telemetry_report`) from the driver log, the collector's spans and
+`ate-env-api`'s `/metrics`, and fails unless every iteration's trace reaches
+`ate-env-api`:
+
+```bash
+VERL_WORKER_IMAGE=<registry>/verl-worker:<tag> \
+SWEBENCH_IMAGE=<registry>/sweb.eval.x86_64.pytest-dev_1776_pytest-5221:latest \
+API_SERVICE=<telemetry ate-env-api service> \
+examples/verl_swebench/run-telemetry-e2e.sh
+```
+
+Each iteration is one trace: `verl.iteration` (driver) → `ate_env_fleet.acquire` /
+`ate_env_fleet.process` / `ate_env_fleet.release` (evaluator) → `ate_env_client.*` →
+`ateenv.v1alpha.*` on ate-env-api → `ateapi.Control/*`. The run report (phases,
+claims, tasks) is printed by the driver and written to `REPORT_DIR`.

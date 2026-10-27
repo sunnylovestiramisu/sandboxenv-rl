@@ -20,6 +20,11 @@
 #   SWEBENCH_TEMPLATE  Optional: a Substrate ActorTemplate built from SWEBENCH_IMAGE.
 #                      Empty: the fleet uses default-template with SWEBENCH_IMAGE
 #                      as the sandbox's rootfs image.
+#   SUBSTRATE_API_ENDPOINT  ate-env-api host:port (e.g. ate-env-api.ate-env.svc.cluster.local:7777).
+#   ENABLE_TRACING     "1" to trace (needs an OTLP collector), "" to leave tracing off.
+#   OTEL_EXPORTER_OTLP_ENDPOINT  OTLP/gRPC collector, e.g.
+#                      http://otel-collector.ate-env-telemetry.svc.cluster.local:4317
+#                      (tests/telemetry/otel-collector.yaml); unused when tracing is off.
 #
 # The policy (sampler/trainer) is simulated, so this job requests no GPUs. To run
 # a real VeRL policy, add a GPU worker group and pass --sampler-gpus/--trainer-gpus.
@@ -69,12 +74,16 @@ spec:
               from importlib.metadata import version
               v = lambda p: tuple(int(x) for x in version(p).split(".")[:2])
               assert version("numpy") == "1.26.4" and v("grpcio") >= (1, 84) and v("protobuf") >= (7, 35)
+              assert v("opentelemetry-sdk") >= (1, 43) and v("opentelemetry-exporter-otlp-proto-grpc") >= (1, 43)
+              assert v("prometheus-client") >= (0, 20)
               PY
               then
                 echo "VERL_WORKER_IMAGE has the pinned packages; skipping pip install"
               else
                 pip install --no-cache-dir --target=/workspace/site-packages \
-                  'numpy==1.26.4' 'grpcio>=1.84' 'protobuf>=7.35'
+                  'numpy==1.26.4' 'grpcio>=1.84' 'protobuf>=7.35' \
+                  'opentelemetry-sdk>=1.43,<1.46' 'opentelemetry-exporter-otlp-proto-grpc>=1.43,<1.46' \
+                  'prometheus-client>=0.20'
                 printf 'import pkgutil\n__path__ = pkgutil.extend_path(__path__, __name__)\n' \
                   > /workspace/site-packages/google/__init__.py
               fi
@@ -91,7 +100,7 @@ spec:
             - name: PYTHONPATH
               value: "/workspace/site-packages:/workspace/clients/python/src:/workspace/examples/verl_swebench"
             - name: SUBSTRATE_API_ENDPOINT
-              value: "ate-env-api.ate-env.svc.cluster.local:7777"
+              value: "${SUBSTRATE_API_ENDPOINT}"
             - name: SUBSTRATE_ATESPACE
               value: "ate-env"
             - name: SANDBOX_WORKER_FAMILY
@@ -101,6 +110,16 @@ spec:
             # Optional; empty uses default-template with SWEBENCH_IMAGE as rootfs.
             - name: SWEBENCH_TEMPLATE
               value: "${SWEBENCH_TEMPLATE}"
+            # Observability (docs/observability.md): the run report is always
+            # printed; spans go to the collector when ENABLE_TRACING=1.
+            - name: ENABLE_TRACING
+              value: "${ENABLE_TRACING}"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+            - name: REPORT_DIR
+              value: "/tmp/ate-env-reports"
             ports:
             - containerPort: 6379
               name: gcs-server
