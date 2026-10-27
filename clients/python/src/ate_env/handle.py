@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from .backend.base import BackendDriver
 from .errors import CommandExecutionError, CommandTimeoutError
@@ -65,16 +67,28 @@ class SandboxHandle:
     def _span_ids(self) -> dict[str, Any]:
         return {"ate.actor.name": self.sandbox_id, "ate_env.run_id": self.run_id or None}
 
-    def _exec_span(self, command: str | list[str]) -> Any:
+    # Claiming ate_env.first_command and starting the span happen under one
+    # lock, so with concurrent execs on a handle the marked span is the one
+    # that started first (spec P-14). Class-wide: it is held only while a span
+    # starts, and a per-instance lock would make handles unpicklable.
+    _FIRST_COMMAND_LOCK: ClassVar[threading.Lock] = threading.Lock()
+
+    @contextmanager
+    def _exec_span(self, command: str | list[str]) -> Iterator[Any]:
         if not self.tracer:
-            return nullcontext()
-        first = not self._first_command_started
-        self._first_command_started = True
-        return start_span(self.tracer, f"{CLIENT_SPAN_PREFIX}.exec", {
-            **self._span_ids(),
-            "ate_env.command.executable": executable_attr(command),
-            "ate_env.first_command": True if first else None,
-        })
+            yield None
+            return
+        stack = ExitStack()
+        with self._FIRST_COMMAND_LOCK:
+            first = not self._first_command_started
+            self._first_command_started = True
+            span = stack.enter_context(start_span(self.tracer, f"{CLIENT_SPAN_PREFIX}.exec", {
+                **self._span_ids(),
+                "ate_env.command.executable": executable_attr(command),
+                "ate_env.first_command": True if first else None,
+            }))
+        with stack:
+            yield span
 
     def _file_span(self, op: str, path: str, content: bytes | str | None = None) -> Any:
         if not self.tracer:
