@@ -98,10 +98,14 @@ everything it pulls in, the same for linux/amd64 and linux/arm64) and
 dependency, func-timeout). Base images are pinned by digest in the layer's Dockerfile. To move to another
 agent-server release, change the versions in [`layer/requirements.in`](layer/requirements.in) (the agent-server,
 `openhands-sdk` and `openhands-tools`, which the agent-server does not pin itself), run
-[`layer/lock.sh`](layer/lock.sh) (needs uv; it re-resolves for both architectures and fails if they differ),
+[`layer/lock.sh`](layer/lock.sh) (needs uv; it resolves for both architectures and fails if they differ),
 and build with `--build-arg AGENT_SERVER_VERSION=<version>`; the build checks that the installed
 agent-server, sdk and tools are that version. Change the client's `openhands-sdk` to the same version (see
 [Versions](#versions)).
+`lock.sh` starts from the committed lock, thus it keeps each pin that still meets the `.in` files and
+moves only what they now require (for a security fix, a lower bound in `requirements.in`). Its
+arguments go to `uv pip compile`: `./lock.sh --upgrade-package <name>` moves one package, and
+`./lock.sh --upgrade` moves all of them to their latest releases.
 
 ## 3. Register the base template
 
@@ -449,7 +453,11 @@ agent-server 1.55.0 from this layer, 2026-10-15:
   the earlier layer): the layer mounted read-only at `/opt/oh` in `debian:bullseye-slim` (glibc
   2.31) and `ubuntu:24.04` answered `/health` and ran a command with the key (401 without);
   `run_trajectory.py` ran `hello.json` and recorded a failed step in `--out`; `codeact_agent.py
-  --scripted` finished and its conversation was gone afterwards. The amd64 build is not yet verified.
+  --scripted` finished and its conversation was gone afterwards.
+- 2026-11-06, the security re-lock (pillow 13.0.0, pypdf 6.21.4, certifi 2026.10.23), local Docker:
+  the linux/amd64 build passed its version check; the layer mounted read-only at `/opt/oh` in
+  `debian:bullseye-slim` (glibc 2.31) answered `/health` and ran a command with the key (401
+  without). The arm64 build of this lock is not verified locally.
 
 These runs came before the Substrate v0.6.0 requirement in section 3 and before the later changes
 to this package. They do not test those changes.

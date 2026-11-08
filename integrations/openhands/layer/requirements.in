@@ -20,3 +20,16 @@ openhands-agent-server==1.55.0
 # whatever newer sdk/tools release exists, not the version the client runs.
 openhands-sdk==1.55.0
 openhands-tools==1.55.0
+# Security floors for Dependabot alerts on transitive packages that the
+# agent-server does not pin. Drop each floor when the agent-server requires
+# the fixed version. Not filelock (fixed in 4.2.1): each stable litellm from
+# 1.104 requires filelock<4.0.
+certifi>=2026.10.18
+fastmcp>=3.4.10
+fastmcp-slim>=3.4.10
+oauthlib>=4.0.1
+pillow>=13.0.0
+pyasn1>=0.6.5
+# pypdf: 6.21.4 fixes the alerts; the cap keeps the 7.0.0 major release
+# (2026-11-06) out until it passes the 7-day Dependabot wait.
+pypdf>=6.21.4,<7

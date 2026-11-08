@@ -198,6 +198,12 @@ user needs to know across them.
 
 ### Fixed
 
+- OpenHands layer: security re-lock of the agent-server dependencies for the
+  open Dependabot alerts: pillow 13.0.0, pypdf 6.21.4, pyasn1 0.6.5, certifi
+  2026.10.23, fastmcp and fastmcp-slim 3.4.11, oauthlib 4.0.1, setuptools
+  84.2.1. filelock stays at 3.32.7, because each stable litellm from 1.104
+  requires filelock<4.0. `lock.sh` now starts from the committed lock and
+  passes its arguments to `uv pip compile`.
 - swebench-loader `-park-each`: the last step deletes each environment right
   after its replay instead of suspending it (unless `-keep`). A 37,000
   environment run suspended them all, one more snapshot upload each. The

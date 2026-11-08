@@ -14,4 +14,4 @@
 
 # Build backend for the one dependency that ships only as source
 # (func-timeout, pure Python). ./lock.sh pins it with hashes.
-setuptools
+setuptools>=84.1.0
