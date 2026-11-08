@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/env/internal/apiservice"
 	"github.com/agent-substrate/env/internal/hostcheck"
 	"github.com/agent-substrate/env/internal/routertls"
+	"github.com/agent-substrate/env/internal/sidecarenv"
 	"github.com/spf13/cobra"
 	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 	atev1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
@@ -242,8 +243,13 @@ type templateConfig struct {
 	wakeupTimeout time.Duration
 	// env are extra container environment variables, each NAME=VALUE. The
 	// guest passes its environment to sidecars, so this is how a runtime
-	// layer's daemon is configured.
+	// layer's daemon is configured. Commands that the guest starts inherit
+	// them too.
 	env []string
+	// sidecarEnv are environment variables, each NAME=VALUE, that only the
+	// sidecars get: the container carries them as sidecarenv.Prefix+NAME,
+	// and the guest removes them from its own environment at start.
+	sidecarEnv []string
 }
 
 // wakeupTimeoutSeconds returns the probe timeout the template carries.
@@ -350,10 +356,44 @@ func (c *templateConfig) validateResources() error {
 	return nil
 }
 
-// validateEnv checks the --env flags before anything is built.
+// validateEnv checks the --env and --sidecar-env flags before anything is
+// built.
 func (c *templateConfig) validateEnv() error {
-	_, err := parseEnv(c.env)
+	_, err := c.containerEnv()
 	return err
+}
+
+// containerEnv returns the container env vars of --env and --sidecar-env.
+// A --sidecar-env NAME becomes sidecarenv.Prefix+NAME. A name in both flags
+// is an error, because the sidecar would get two values; so is --env with the
+// prefix, because the guest would take it from the commands it starts, and
+// --sidecar-env without --sidecar, because nothing would get it.
+func (c *templateConfig) containerEnv() ([]*ateapipb.EnvVar, error) {
+	env, err := parseEnv("--env", false, c.env)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, e := range env {
+		if strings.HasPrefix(e.GetName(), sidecarenv.Prefix) {
+			return nil, fmt.Errorf("--env %s: the prefix %s is reserved for --sidecar-env", e.GetName(), sidecarenv.Prefix)
+		}
+		names[e.GetName()] = true
+	}
+	sidecarEnv, err := parseEnv("--sidecar-env", true, c.sidecarEnv)
+	if err != nil {
+		return nil, err
+	}
+	if len(sidecarEnv) > 0 && len(c.sidecars) == 0 {
+		return nil, errors.New("--sidecar-env needs a --sidecar to give it to")
+	}
+	for _, e := range sidecarEnv {
+		if names[e.GetName()] {
+			return nil, fmt.Errorf("%s is given with both --env and --sidecar-env", e.GetName())
+		}
+		env = append(env, &ateapipb.EnvVar{Name: sidecarenv.Prefix + e.GetName(), Value: e.GetValue()})
+	}
+	return env, nil
 }
 
 func (c *templateConfig) resolveImages() error {
@@ -631,7 +671,8 @@ It prints YAML to stdout without touching the cluster.`,
 	cmd.Flags().StringVar(&tCfg.cpu, "cpu", defaultActorCPU, "CPU limit of each actor, a Kubernetes quantity such as 2 or 500m, at least 1m, rendered as whole millicores (rounded up); Substrate requires one")
 	cmd.Flags().StringVar(&tCfg.memory, "memory", defaultActorMemory, "memory limit of each actor, a Kubernetes quantity such as 4Gi, at least 1Mi, rendered as whole bytes (rounded up); Substrate requires one")
 	cmd.Flags().DurationVar(&tCfg.wakeupTimeout, "wakeup-timeout", 0, fmt.Sprintf("how long Substrate polls the guest's /readyz at each actor start and resume before it fails the actor, whole seconds from 1s to %s; 0 or unset means the default: %s with --sidecar-readyz, else Substrate's %s", maxWakeupTimeout, sidecarWakeupTimeout, substrateWakeupTimeout))
-	cmd.Flags().StringArrayVar(&tCfg.env, "env", nil, "environment variable for the actor's container as NAME=VALUE (repeatable); the guest passes it to sidecars, e.g. a layer daemon's API key")
+	cmd.Flags().StringArrayVar(&tCfg.env, "env", nil, "environment variable for the actor's container as NAME=VALUE (repeatable); the guest passes it to sidecars and to each command it starts, e.g. a layer daemon's log level; use --sidecar-env for a secret")
+	cmd.Flags().StringArrayVar(&tCfg.sidecarEnv, "sidecar-env", nil, fmt.Sprintf("environment variable that only the --sidecar processes get, as NAME=VALUE (repeatable), e.g. a layer daemon's API key; the container carries it as %sNAME and the guest strips it before it starts anything. Limits: docs/security/threat-model.md", sidecarenv.Prefix))
 
 	return cmd
 }
@@ -908,7 +949,7 @@ func orDefault(v, def string) string {
 func buildTemplate(cfg templateConfig) (*ateapipb.ActorTemplate, error) {
 	tmpl := buildActorTemplate(cfg)
 	c := tmpl.Containers[0]
-	env, err := parseEnv(cfg.env)
+	env, err := cfg.containerEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -937,6 +978,11 @@ func buildTemplate(cfg templateConfig) (*ateapipb.ActorTemplate, error) {
 	}
 	for _, u := range cfg.sidecarReadyz {
 		command = append(command, "-sidecar-readyz", u)
+	}
+	// An older guest does not know the sidecar-only prefix and would start
+	// the sidecars without those values. This flag makes it exit instead.
+	if len(cfg.sidecarEnv) > 0 {
+		command = append(command, "-"+sidecarenv.RequiredFlag)
 	}
 	c.Command = command
 	if cfg.rootfsImage == "" {
@@ -1131,21 +1177,26 @@ func buildAPIService(cfg manifestConfig) *corev1.Service {
 // envName is a POSIX environment variable name.
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// parseEnv turns NAME=VALUE flags into container env vars. PORT is the guest's
-// own and cannot be overridden; a name given twice is an error.
-func parseEnv(flags []string) ([]*ateapipb.EnvVar, error) {
+// parseEnv turns the NAME=VALUE values of flagName into env vars. PORT is the
+// guest's own and cannot be overridden; a name given twice is an error. With
+// secret, a malformed value is named by its position, not by its text, because
+// the value can be the secret itself.
+func parseEnv(flagName string, secret bool, flags []string) ([]*ateapipb.EnvVar, error) {
 	var out []*ateapipb.EnvVar
 	seen := map[string]bool{}
-	for _, f := range flags {
+	for i, f := range flags {
 		name, value, ok := strings.Cut(f, "=")
 		if !ok || !envName.MatchString(name) {
-			return nil, fmt.Errorf("--env %q: want NAME=VALUE with NAME of letters, digits and '_', not starting with a digit", f)
+			if secret {
+				return nil, fmt.Errorf("%s value %d: want NAME=VALUE with NAME of letters, digits and '_', not starting with a digit", flagName, i+1)
+			}
+			return nil, fmt.Errorf("%s %q: want NAME=VALUE with NAME of letters, digits and '_', not starting with a digit", flagName, f)
 		}
 		if name == "PORT" {
-			return nil, errors.New("--env PORT: PORT is the guest's listen port and is set by the template")
+			return nil, fmt.Errorf("%s PORT: PORT is the guest's listen port and is set by the template", flagName)
 		}
 		if seen[name] {
-			return nil, fmt.Errorf("--env %s is given twice", name)
+			return nil, fmt.Errorf("%s %s is given twice", flagName, name)
 		}
 		seen[name] = true
 		out = append(out, &ateapipb.EnvVar{Name: name, Value: value})

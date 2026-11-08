@@ -326,7 +326,7 @@ func TestRunSidecarRestartsAndStopsWithContext(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		runSidecar(ctx, []string{sh, "-c", "echo hello from sidecar; exit 3"}, logf)
+		runSidecar(ctx, []string{sh, "-c", "echo hello from sidecar; exit 3"}, nil, logf)
 		close(done)
 	}()
 	select {
@@ -357,7 +357,7 @@ func TestRunSidecarRestartsAndStopsWithContext(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan struct{})
 	go func() {
-		runSidecar(ctx2, []string{sh, "-c", "sleep 60 & wait"}, logf)
+		runSidecar(ctx2, []string{sh, "-c", "sleep 60 & wait"}, nil, logf)
 		close(done2)
 	}()
 	time.Sleep(200 * time.Millisecond)

@@ -26,6 +26,7 @@ import (
 	"github.com/agent-substrate/env/internal/apiservice"
 	"github.com/agent-substrate/env/internal/hostcheck"
 	"github.com/agent-substrate/env/internal/portproxy"
+	"github.com/agent-substrate/env/internal/sidecarenv"
 	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 	atev1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1215,6 +1216,128 @@ func TestManifestTemplateCommandEnv(t *testing.T) {
 	}
 	if out := buf.String(); !strings.Contains(out, "name: OH_SESSION_API_KEYS_0\n    value: k") {
 		t.Errorf("output lacks the --env variable:\n%s", out)
+	}
+}
+
+// --sidecar-env renders each value under sidecarenv.Prefix, which the guest
+// takes out of its own environment and gives only to the sidecars. A template
+// with --rootfs-image, and each template that ate-env-api derives for a task
+// image, keep it next to the sidecar that reads it.
+func TestBuildTemplateSidecarEnv(t *testing.T) {
+	cfg := testTemplateConfig()
+	cfg.guestImage = "example.com/guest@sha256:" + testHex64
+	cfg.sidecars = []string{"/opt/oh/python/bin/python3 -m openhands.agent_server --port 8000"}
+	cfg.env = []string{"LOG_JSON=true"}
+	cfg.sidecarEnv = []string{"OH_SESSION_API_KEYS_0=s3cret", "EMPTY="}
+	want := func(t *testing.T, what string, tmpl *ateapipb.ActorTemplate) {
+		t.Helper()
+		// The guest flag that makes an older guest exit, instead of starting
+		// the sidecars without the values, must survive the re-rooting of
+		// the guest command in a derived template.
+		if n := slices.Index(tmpl.GetContainers()[0].GetCommand(), "-"+sidecarenv.RequiredFlag); n < 1 {
+			t.Errorf("%s: command = %q, want -%s after the guest binary", what, tmpl.GetContainers()[0].GetCommand(), sidecarenv.RequiredFlag)
+		}
+		got, order := envMap(tmpl.GetContainers()[0])
+		if w := "PORT,LOG_JSON," + sidecarenv.Prefix + "OH_SESSION_API_KEYS_0," + sidecarenv.Prefix + "EMPTY"; strings.Join(order, ",") != w {
+			t.Errorf("%s: env order = %v, want %s", what, order, w)
+		}
+		if got[sidecarenv.Prefix+"OH_SESSION_API_KEYS_0"] != "s3cret" {
+			t.Errorf("%s: env = %v, want the --sidecar-env value under %s", what, got, sidecarenv.Prefix)
+		}
+		if _, ok := got["OH_SESSION_API_KEYS_0"]; ok {
+			t.Errorf("%s: env = %v, has the --sidecar-env name without the prefix", what, got)
+		}
+	}
+	base, err := buildTemplate(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, "base", base)
+	task := "example.com/task@sha256:" + testHex64
+	derived, err := apiservice.DeriveImageTemplate(base, "default-template-0123456789ab", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, "derived", derived)
+
+	cfg.rootfsImage = "docker.io/library/debian@sha256:" + testHex64
+	rootfs, err := buildTemplate(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, "--rootfs-image", rootfs)
+	derived, err = apiservice.DeriveImageTemplate(rootfs, "default-template-0123456789ab", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want(t, "derived from a --rootfs-image base", derived)
+
+	// Without --sidecar-env, the template does not carry the flag, thus an
+	// older guest still runs it.
+	cfg.sidecarEnv = nil
+	for _, rootfs := range []string{"", "docker.io/library/debian@sha256:" + testHex64} {
+		cfg.rootfsImage = rootfs
+		plain, err := buildTemplate(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(plain.GetContainers()[0].GetCommand(), "-"+sidecarenv.RequiredFlag) {
+			t.Errorf("rootfs %q without --sidecar-env: command = %q, want no -%s", rootfs, plain.GetContainers()[0].GetCommand(), sidecarenv.RequiredFlag)
+		}
+	}
+}
+
+func TestTemplateConfigRejectsBadSidecarEnv(t *testing.T) {
+	sidecar := []string{"/opt/oh/bin/server"}
+	for _, tc := range []struct {
+		name                      string
+		env, sidecarEnv, sidecars []string
+		wantErr                   string
+	}{
+		{"no equals", nil, []string{"NOEQUALS"}, sidecar, "--sidecar-env value 1"},
+		{"bad name", nil, []string{"A=1", "BAD-NAME=x"}, sidecar, "--sidecar-env value 2"},
+		{"PORT", nil, []string{"PORT=81"}, sidecar, "--sidecar-env PORT"},
+		{"twice", nil, []string{"A=1", "A=2"}, sidecar, "--sidecar-env A is given twice"},
+		{"in both flags", []string{"A=1"}, []string{"A=2"}, sidecar, "both --env and --sidecar-env"},
+		{"no sidecar", nil, []string{"A=1"}, nil, "needs a --sidecar"},
+		{"--env with the prefix", []string{sidecarenv.Prefix + "A=1"}, nil, sidecar, "reserved for --sidecar-env"},
+	} {
+		cfg := testTemplateConfig()
+		cfg.env, cfg.sidecarEnv, cfg.sidecars = tc.env, tc.sidecarEnv, tc.sidecars
+		err := cfg.validateEnv()
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: validateEnv = %v, want an error with %q", tc.name, err, tc.wantErr)
+		}
+		// A malformed --sidecar-env value can be the secret itself.
+		if err != nil && (strings.Contains(err.Error(), "NOEQUALS") || strings.Contains(err.Error(), "BAD-NAME")) {
+			t.Errorf("%s: validateEnv = %v, echoes the --sidecar-env value", tc.name, err)
+		}
+		if _, err := buildTemplate(cfg); err == nil {
+			t.Errorf("%s: buildTemplate succeeded, want an error", tc.name)
+		}
+	}
+}
+
+func TestManifestTemplateCommandSidecarEnv(t *testing.T) {
+	cmd := newManifestCommand()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"template",
+		"--guest-image=example.com/guest@sha256:aaaa",
+		"--snapshots-bucket=gs://bucket/prefix/",
+		"--sidecar=/opt/oh/bin/server",
+		"--sidecar-env=OH_SESSION_API_KEYS_0=k",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "name: "+sidecarenv.Prefix+"OH_SESSION_API_KEYS_0\n    value: k") {
+		t.Errorf("output lacks the --sidecar-env variable under %s:\n%s", sidecarenv.Prefix, out)
+	}
+	if strings.Contains(out, "name: OH_SESSION_API_KEYS_0") {
+		t.Errorf("output has the --sidecar-env variable without the prefix:\n%s", out)
 	}
 }
 

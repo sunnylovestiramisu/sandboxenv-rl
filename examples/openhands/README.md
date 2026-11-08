@@ -139,7 +139,9 @@ It also takes `BASE_IMAGE` (the glibc image the base template runs in, default a
 `WORKDIR`, `API_TOKEN` (when ate-env-api runs with `-auth-token-file`) and `KEEP=1` (leave the
 environments up for the SDK scripts); see its header. Set `SNAPSHOTS_BUCKET` only on a cluster with
 Substrate's `PerTemplateSnapshotLocation` preview gate on, to give the templates a snapshot location
-of their own; otherwise the cluster's location applies. It exits 1 if any agent-server did not answer.
+of their own; otherwise the cluster's location applies. It exits 1 if any agent-server did not
+answer, did not answer 401 to its call without the key, or if a command that ate-env-api starts in
+an environment sees the session key.
 
 Templates are immutable and the session key is in them, also in the per-image templates that
 creates derive (`<base>-<12 hex digits of the image digest>`). The demo reuses an existing base
@@ -151,6 +153,19 @@ it, with their golden snapshots, and registers it again; use it only for templat
 uses. The demo hands the session key and the API token to curl in a header file (mode 0600, removed
 on exit), not on its command line; the template registration still passes the key in an argument of
 `ate-env manifest template`.
+
+The demo registers the key with `--sidecar-env`, thus the guest gives it to the agent-server only,
+and the commands that ate-env-api starts in the environment do not inherit it. This needs a
+`GUEST_IMAGE` built with `--sidecar-env` support. The template carries the guest flag
+`-sidecar-env-required`, which an older guest does not know: it exits at start, the actor crashes,
+and the environment does not start. Without that guard, the agent-server would run without the key
+and accept each request. The demo also requires 401 for its call without the key. A base template
+registered before this change has the key in `--env`, and so has each template derived from it: each
+command in their environments gets the key. The demo prints a note when it reuses such a base; run
+it again with `RECREATE=1` (and `SESSION_KEY`, if other clients use the key) to delete them and
+register the base with `--sidecar-env`. A command that runs as the same user can still read the key
+from the agent-server's `/proc/<pid>/environ`; see the
+[threat model](../../docs/security/threat-model.md#the-openhands-agent-server).
 
 ## A fleet rollout
 

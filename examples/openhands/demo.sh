@@ -21,9 +21,11 @@
 # ate-env-api's port proxy with three routing headers plus the agent-server's
 # own X-Session-API-Key. The script registers a base template when it does not
 # exist, creates one environment per image, drives each agent-server from
-# outside (health, a command, a file download, a call without the key) and
-# deletes the environments, unless KEEP=1. It exits 1 if any agent-server did
-# not answer.
+# outside (health, a command, a file download, a call without the key),
+# checks that a command started through ate-env-api does not see the session
+# key, and deletes the environments, unless KEEP=1. It exits 1 if any
+# agent-server did not answer or did not answer 401 without the key, or if
+# any such command saw the key.
 #
 # Templates are immutable and carry the session key, and the first create from
 # each image derives a template (<base>-<12 hex digits of the image digest>)
@@ -43,8 +45,21 @@
 # removed on exit), not on its command line. The template registration still
 # passes the key in an argument of `ate-env manifest template`.
 #
+# The template carries the session key with --sidecar-env: the guest gives it
+# to the agent-server only, not to the commands that ate-env-api starts in the
+# environment. This needs a GUEST_IMAGE built with --sidecar-env support. The
+# template also carries the guest flag -sidecar-env-required, which an older
+# guest does not know: it exits at start, the actor crashes, and the
+# environment does not answer. Without that guard, the agent-server would run
+# without the key and accept each request; the demo also requires 401 for its
+# call without the key. A base template registered before with the key in --env keeps it in
+# the environment of each command, and so does each template derived from it,
+# which creates reuse by name. The script prints a note; RECREATE=1 deletes
+# them all and registers the base again.
+#
 # Required:
-#   GUEST_IMAGE       digest-pinned ate-env-guest image (with the -sidecar flags)
+#   GUEST_IMAGE       digest-pinned ate-env-guest image (with the -sidecar flags
+#                     and the sidecar-only environment of --sidecar-env)
 #   LAYER_IMAGE       digest-pinned layer image built from ../../integrations/openhands/layer/Dockerfile
 #   IMAGES            space-separated digest-pinned images to run the
 #                     agent-server in; any image with /bin/sh and glibc 2.31
@@ -124,6 +139,22 @@ for t in d.get("actorTemplates", d.get("actor_templates", [])):
 sys.exit(1)'
 }
 
+# base_key_in_env: whether the base template carries the session key as a
+# plain container variable (--env, before --sidecar-env), which each command
+# in the environment inherits.
+base_key_in_env() {
+  "${KUBECTL_ATE}" get actor-template --atespace "${ATESPACE}" -o json |
+    TEMPLATE="${TEMPLATE}" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+for t in d.get("actorTemplates", d.get("actor_templates", [])):
+    if t.get("metadata", {}).get("name", "") == os.environ["TEMPLATE"]:
+        for c in t.get("containers", []):
+            if any(e.get("name") == "OH_SESSION_API_KEYS_0" for e in c.get("env", [])):
+                sys.exit(0)
+sys.exit(1)'
+}
+
 # templates: the names of the base template and the templates derived from it.
 templates() {
   "${KUBECTL_ATE}" get actor-template --atespace "${ATESPACE}" -o json |
@@ -193,7 +224,7 @@ oh() {
 
 read -r -a images <<<"${IMAGES}"
 read -r -a settings <<<"${AGENT_SERVER_ENV:-}"
-env_flags=(--env "OH_SESSION_API_KEYS_0=${SESSION_KEY}")
+env_flags=(--sidecar-env "OH_SESSION_API_KEYS_0=${SESSION_KEY}")
 for kv in ${settings[@]+"${settings[@]}"}; do
   env_flags+=(--env "${kv}")
 done
@@ -204,6 +235,11 @@ if [ "${register}" = 0 ]; then
     echo "note: ${ATESPACE}/${TEMPLATE} has no glibc base image (no guest image volume), thus its own golden" >&2
     echo "actor crashes. Environments from task images still work. To fix the base, run again with" >&2
     echo "RECREATE=1 and the same SESSION_KEY." >&2
+  fi
+  if base_key_in_env; then
+    echo "note: ${ATESPACE}/${TEMPLATE} has the session key in --env, thus each command that ate-env-api" >&2
+    echo "starts in its environments gets the key. Run again with RECREATE=1 to register it with" >&2
+    echo "--sidecar-env, which gives the key to the agent-server only." >&2
   fi
 else
   if [ "${RECREATE:-}" = 1 ]; then
@@ -259,10 +295,24 @@ for image in "${images[@]}"; do
     python3 -c 'import json,sys; r=json.load(sys.stdin); print(r.get("stdout", r).rstrip()); print("exit:", r.get("exit_code"))'
   echo "-- file download (/etc/os-release, first line):"
   oh "${id}" "http://${API}/api/file/download?path=/etc/os-release" | head -1
-  echo "-- without the session key:"
-  curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' \
+  echo "-- without the session key (want HTTP 401):"
+  nokey=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
     -H "X-Env-Id: ${id}" -H "X-Env-Atespace: ${ATESPACE}" -H "X-Env-Port: ${PORT}" \
-    -H "@${headers}/proxy" -d '{"command": "true"}' "http://${API}/api/bash/execute_bash_command"
+    -H "@${headers}/proxy" -d '{"command": "true"}' "http://${API}/api/bash/execute_bash_command" || true)
+  echo "HTTP ${nokey}"
+  if [ "${nokey}" != 401 ]; then
+    echo "the agent-server in ${id} answered HTTP ${nokey} without the session key, want 401: it may run without a key" >&2
+    failed=$((failed + 1))
+  fi
+  echo "-- the session key in the environment of a command that ate-env-api starts (want absent):"
+  key_seen=$("${ATE_ENV}" "${id}" --api "${API}" --atespace "${ATESPACE}" shell \
+    'if env | grep -q SESSION_API_KEY; then echo present; else echo absent; fi' || echo "check failed")
+  echo "${key_seen}"
+  if [ "${key_seen}" != absent ]; then
+    echo "a command in ${id} sees the session key (${key_seen}). Causes: a base registered with the key in --env" >&2
+    echo "(register it again with RECREATE=1), or a GUEST_IMAGE without --sidecar-env support (use a newer one)" >&2
+    failed=$((failed + 1))
+  fi
 done
 
 if [ "${KEEP:-}" = 1 ]; then
@@ -274,6 +324,6 @@ else
   step "done; deleting the environments (the templates stay for reuse)"
 fi
 if [ "${failed}" -gt 0 ]; then
-  echo "${failed} of ${n} agent-servers did not answer" >&2
+  echo "${failed} check(s) failed in ${n} environment(s): an agent-server did not answer, answered without the key, or a command saw the session key" >&2
   exit 1
 fi

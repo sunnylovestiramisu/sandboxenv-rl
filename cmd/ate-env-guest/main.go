@@ -16,7 +16,8 @@
 // and exposes command execution and filesystem access over gRPC
 // (ProcessService and FileSystemService) with HTTP readiness probe support.
 // It can also start and supervise extra runtimes next to itself (-sidecar),
-// folding their readiness into /readyz (-sidecar-readyz).
+// folding their readiness into /readyz (-sidecar-readyz). Container variables
+// named with the sidecarenv.Prefix go only to those runtimes.
 package main
 
 import (
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/env/guest"
+	"github.com/agent-substrate/env/internal/sidecarenv"
 	"github.com/agent-substrate/env/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -42,6 +44,10 @@ import (
 
 func main() {
 	runIfPID1()
+	// Take the sidecar-only variables out of this process's environment
+	// before anything is started, thus the commands of the process service
+	// and their children never inherit them. Only the sidecars get them.
+	sidecarEnv := sidecarenv.Take()
 
 	listen := flag.String("listen", ":80", "address to serve the guest API on")
 	logDir := flag.String("log-dir", "", "directory for process logs (defaults to /var/log/ate-jobs or temporary dir)")
@@ -49,9 +55,13 @@ func main() {
 	var sidecars, sidecarReadyz multiFlag
 	flag.Var(&sidecars, "sidecar", "extra runtime to start next to the guest and keep running: an absolute binary path followed by its arguments, whitespace-separated (repeatable)")
 	flag.Var(&sidecarReadyz, "sidecar-readyz", "URL that must answer 2xx before /readyz reports ready, e.g. http://127.0.0.1:44772/ready (repeatable)")
+	sidecarEnvRequired := flag.Bool(sidecarenv.RequiredFlag, false, "exit unless the container has at least one "+sidecarenv.Prefix+"NAME variable for the sidecars; ate-env manifest template --sidecar-env sets it, thus a guest without sidecar-only variable support fails at flag parse instead of starting sidecars without them")
 	enableTracing := flag.Bool("enable-tracing", false, "export OpenTelemetry traces over OTLP/gRPC, configured by OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_INSECURE; continues the trace context ate-env-api sends")
 	enableMetrics := flag.Bool("enable-metrics", false, "serve Prometheus metrics (ate_env_guest_process_duration_seconds) at /metrics on the guest listener, without authentication, like the guest API on the same listener. The listener is reachable only inside the environment and through the atenet router (a request that names the environment in the ate-target-actor header); ate-env-api's port proxy refuses port 80 and ate-env manifest configures no scraper, so scrape it from inside the environment or from a client that can reach the router")
 	flag.Parse()
+	if *sidecarEnvRequired && len(sidecarEnv) == 0 {
+		log.Fatalf("-%s is set, but the container has no %sNAME variable: the sidecars would start without their sidecar-only environment", sidecarenv.RequiredFlag, sidecarenv.Prefix)
+	}
 
 	// Reject bad sidecar values before listening, so a misconfigured template
 	// fails at actor start instead of looping on a restarting sidecar.
@@ -137,10 +147,13 @@ func main() {
 		supervisors.Add(1)
 		go func() {
 			defer supervisors.Done()
-			runSidecar(ctx, argv, log.Printf)
+			runSidecar(ctx, argv, sidecarEnv, log.Printf)
 		}()
 	}
 
+	// Names only, never values: this line shows that the guest has
+	// --sidecar-env support and which variables it took.
+	log.Printf("sidecar-only variables taken from the environment, for the sidecars only: %v", sidecarenv.Names(sidecarEnv))
 	log.Printf("ate-env-guest listening on %s (gRPC services=%s, workspace=%s, logdir=%s)",
 		lis.Addr(), guest.FormatEnabledServices(cfg), cfg.Workspace, cfg.LogDir)
 	if err := srv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {

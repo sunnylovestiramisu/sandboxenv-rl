@@ -22,6 +22,7 @@ internal/
   mcp/                   # Streamable HTTP MCP server: maps shell and file tools to guest gRPC
   portproxy/             # HTTP/CONNECT reverse proxy: tunnels ports inside actors via atenet
   routertls/             # TLS config: dynamic SPIFFE client certificate and CA reload
+  sidecarenv/            # Sidecar-only env: ATE_SIDECAR_ENV_<NAME> on the container; Take strips it for the sidecars
   telemetry/             # OpenTelemetry tracing setup and Prometheus metric collectors
   tool/                  # Generic MCP tool registry
   unknownfields/         # gRPC interceptors rejecting requests with unknown protobuf fields
@@ -69,10 +70,9 @@ never to Substrate directly.
 
 ### `internal/` vs. `guest/`
 
-Put code in `internal/` if it is private to binaries in this repository (`guest/` imports
-`internal/unknownfields`; `cmd/ate-env-guest` imports `internal/telemetry`). Put in-actor services
-in `guest/`. `guest/` and `cmd/ate-env-guest` must not import `internal/ate` or
-`go.ate.dev/substrate`.
+Put code in `internal/` if only this repository's binaries use it, and in-actor services in `guest/`
+(`guest/` imports `internal/unknownfields`; `cmd/ate-env-guest` imports `internal/sidecarenv` and
+`internal/telemetry`). Neither must import `internal/ate` or `go.ate.dev/substrate`.
 
 ### New binary vs. new package
 

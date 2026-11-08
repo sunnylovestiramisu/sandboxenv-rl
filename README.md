@@ -518,6 +518,18 @@ ate-env manifest template --template layered \
   --sidecar-readyz http://127.0.0.1:44772/etc/hostname | kubectl-ate create actor-template -f -
 ```
 
+A runtime's settings are `--env NAME=VALUE` flags, which the sidecars and each command in the
+environment see. A secret that only the runtime needs, such as its API key, goes in
+`--sidecar-env NAME=VALUE`: the container carries it as `ATE_SIDECAR_ENV_NAME`, and the guest
+removes it from its own environment before it starts anything and gives `NAME` to the sidecars
+only, not to the commands that ate-env-api starts or their children. A command in the environment
+can still read it from the sidecar's `/proc/<pid>/environ`: today, at the Substrate pin, the guest,
+the sidecars and the commands run as root; after the Substrate bump that runs containers as the
+image's `USER`, they share that one user. Each viewer of the atespace reads it in the template; see
+[docs/security/threat-model.md](docs/security/threat-model.md). `--sidecar-env` needs a guest image
+with its support: the template also carries the guest flag `-sidecar-env-required`, thus an older
+guest exits at start instead of running the sidecars without the values.
+
 Layers must be self-contained: the `1.37-musl` busybox is static, while the glibc build fails
 on images with an older libc. The runnable version is
 [`examples/runtime-layers/demo.sh`](examples/runtime-layers/demo.sh).

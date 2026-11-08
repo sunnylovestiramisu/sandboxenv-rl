@@ -16,13 +16,20 @@ A runtime layer is three things:
 | the binary | an image volume on the ActorTemplate (`--layer name=image@sha256:...=/mount`) | mounts the runtime's image read-only at a path of your choice, next to the guest at `/ate` |
 | the process | a guest flag (`--sidecar '/mount/binary args...'`) | the guest starts it after it is listening, logs its output with a prefix, and restarts it with backoff if it exits |
 | its readiness | a guest flag (`--sidecar-readyz http://127.0.0.1:PORT/health`) | the guest's `/readyz`, which is the actor's wakeup probe, answers 503 until every such URL has answered 2xx once |
-| its configuration | a template flag (`--env NAME=VALUE`) | sets a variable on the container; the guest passes its environment to sidecars |
+| its configuration | a template flag (`--env NAME=VALUE`) | sets a variable on the container; the guest passes its environment to sidecars and to the commands it starts |
+| its secrets | a template flag (`--sidecar-env NAME=VALUE`) | sets `ATE_SIDECAR_ENV_NAME` on the container; the guest removes it from its own environment at start and gives `NAME` to the sidecars only; the guest flag `-sidecar-env-required` makes an older guest exit at start |
 
 The guest is the container's only process by contract, which is why it is the
 one that supervises the others. Sidecars run without a shell or `PATH` lookup,
 so the binary is an absolute path into its mount, and the rootfs image needs
 nothing for it beyond, for a binary that is not statically linked, a
-compatible C library (the OpenHands layer needs glibc 2.31 or newer). They inherit the container's user, environment and filesystem.
+compatible C library (the OpenHands layer needs glibc 2.31 or newer). They
+inherit the container's user, environment and filesystem, plus the
+`--sidecar-env` variables. The commands that ate-env-api starts do not get
+those variables, but they run as the same user as the sidecars: root today, at
+the Substrate pin; the image's `USER` after the Substrate bump that runs
+containers as it. Thus they can still read them from `/proc/<pid>/environ` of
+a sidecar or of the guest.
 
 Template derivation keeps all of it. A base with layers yields derived
 templates with the same layers and the same guest flags, so environments

@@ -76,15 +76,17 @@ const (
 )
 
 // runSidecar runs argv until ctx is done, restarting it whenever it exits.
+// The sidecar gets the guest's environment plus env, the sidecar-only
+// variables (NAME=VALUE) that main took out of the guest's environment.
 // The backoff doubles from one second to thirty while the sidecar keeps
 // failing quickly and resets once it has run for a while. Output goes to
 // logf, one line at a time, prefixed with the binary's name.
-func runSidecar(ctx context.Context, argv []string, logf func(string, ...any)) {
+func runSidecar(ctx context.Context, argv, env []string, logf func(string, ...any)) {
 	name := filepath.Base(argv[0])
 	backoff := sidecarMinBackoff
 	for {
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.Env = os.Environ()
+		cmd.Env = append(os.Environ(), env...)
 		out := &lineLogger{prefix: name, logf: logf}
 		cmd.Stdout = out
 		cmd.Stderr = out
