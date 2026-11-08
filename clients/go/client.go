@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/agent-substrate/env/internal/ate"
@@ -304,6 +305,68 @@ func (c *Client) EnsureImageTemplate(ctx context.Context, req *ateenvv1alpha.Ens
 		AttrTemplateName.String(resp.GetTemplate().GetName()),
 		AttrTemplateAtespace.String(resp.GetTemplate().GetAtespace()))
 	return resp, nil
+}
+
+// ListPlacementDomains reports the worker pools a per-environment worker
+// selector can address, as ate-env-api reads them from Substrate's workers:
+// name, namespace, the labels (the selector), nodes, workers and slots per
+// node. A nil or empty request reports every pool; with a template, only the
+// pools that template's own worker selector matches (NotFound for an unknown
+// template). PermissionDenied when ate-env-api lacks the global viewer role.
+func (c *Client) ListPlacementDomains(ctx context.Context, req *ateenvv1alpha.ListPlacementDomainsRequest) (_ []*ateenvv1alpha.PlacementDomain, err error) {
+	if req == nil {
+		req = &ateenvv1alpha.ListPlacementDomainsRequest{}
+	}
+	ctx, span := c.tracer.startRPC(ctx, opListPlacementDomains, "ListPlacementDomains",
+		AttrTemplateName.String(req.GetTemplate().GetName()),
+		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
+		AttrAtespace.String(req.GetAtespace()))
+	defer func() { endSpan(span, err) }()
+	resp, err := c.grpc.ListPlacementDomains(c.withAuth(ctx), req)
+	if err != nil {
+		return nil, fromGRPCError(err)
+	}
+	return resp.GetDomains(), nil
+}
+
+// WarmImage puts one rootfs image on every node of one placement domain
+// through ate-env-api's WarmImage and returns the coverage once the stream
+// ends. onProbe, when non-nil, sees each probe as it settles. The call lasts
+// for the server's rounds (minutes for a cold image), so give ctx a deadline
+// above the request's probe_timeout times max_rounds.
+func (c *Client) WarmImage(ctx context.Context, req *ateenvv1alpha.WarmImageRequest, onProbe func(*ateenvv1alpha.WarmProbe)) (_ *ateenvv1alpha.WarmImageCoverage, err error) {
+	ctx, span := c.tracer.startRPC(ctx, opWarmImage, "WarmImage",
+		AttrRootfsImage.String(imageRefAttr(req.GetRootfsImage())),
+		AttrTemplateName.String(req.GetTemplate().GetName()),
+		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
+		AttrAtespace.String(req.GetAtespace()))
+	defer func() { endSpan(span, err) }()
+	stream, err := c.grpc.WarmImage(c.withAuth(ctx), req)
+	if err != nil {
+		return nil, fromGRPCError(err)
+	}
+	var cov *ateenvv1alpha.WarmImageCoverage
+	for {
+		ev, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fromGRPCError(err)
+		}
+		switch e := ev.GetEvent().(type) {
+		case *ateenvv1alpha.WarmImageEvent_Probe:
+			if onProbe != nil {
+				onProbe(e.Probe)
+			}
+		case *ateenvv1alpha.WarmImageEvent_Coverage:
+			cov = e.Coverage
+		}
+	}
+	if cov == nil {
+		return nil, errors.New("ate-env: WarmImage ended without a coverage")
+	}
+	return cov, nil
 }
 
 // Env returns a handle to an environment without checking that it exists.

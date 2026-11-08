@@ -53,7 +53,7 @@ from typing import Any
 from .client import DEFAULT_ATESPACE, Client
 from .errors import NotFoundError
 from .observability import Observer
-from .types import GoldenSnapshotState, ImageStatus
+from .types import GoldenSnapshotState, ImageStatus, PlacementDomain
 
 logger = logging.getLogger("ate_env_rl.preflight")
 
@@ -71,23 +71,9 @@ _DELETE_TIMEOUT = 600.0
 # The plan
 
 
-@dataclass(frozen=True)
-class PlacementDomain:
-    """One placement domain: the labels its worker pools carry and its size.
-
-    Attributes:
-        name: the domain's name in the plan.
-        selector: the per-environment worker selector that keeps an
-            environment inside the domain.
-        nodes: how many nodes the domain has; the warmer covers each.
-        node_slots: how many environments one node runs at once, when known
-            (0: unknown); it caps the warmer's concurrency in the domain.
-    """
-
-    name: str
-    selector: Mapping[str, str]
-    nodes: int
-    node_slots: int = 0
+# A plan's domains are the API's PlacementDomain (types.py), as
+# list_placement_domains() returns them; the file carries name, selector,
+# nodes and node_slots.
 
 
 @dataclass(frozen=True)
@@ -130,7 +116,7 @@ class ImagePlacement:
             if not isinstance(slots, int) or isinstance(slots, bool) or slots < 0:
                 raise ValueError(f"image placement: domain {name!r}: node_slots must be an int >= 0")
             names.add(name)
-            domains.append(PlacementDomain(name, selector, nodes, slots))
+            domains.append(PlacementDomain(name=name, selector=selector, nodes=nodes, node_slots=slots))
         if not domains:
             raise ValueError("image placement: at least one domain is required")
         images: list[PlacementEntry] = []

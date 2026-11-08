@@ -724,6 +724,29 @@ func TestManifestAccessPolicyCommand(t *testing.T) {
 		if b["role"] != "editor" || len(members) != 1 || members[0] != want {
 			t.Errorf("binding = %v, want editor for %s", b, want)
 		}
+
+		// --global: the viewer binding at the global scope, for ListPlacementDomains.
+		cmd = newManifestCommand()
+		out.Reset()
+		cmd.SetOut(&out)
+		cmd.SetArgs(append(args, "--global"))
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		m = nil
+		if err := yaml.Unmarshal(out.Bytes(), &m); err != nil {
+			t.Fatalf("%q: %v", out.String(), err)
+		}
+		md, _ = m["metadata"].(map[string]any)
+		bindings, _ = m["bindings"].([]any)
+		if md["name"] != "default" || md["atespace"] != nil || len(bindings) != 1 {
+			t.Fatalf("global policy = %v, want metadata.name default, no atespace, one binding", m)
+		}
+		b = bindings[0].(map[string]any)
+		members, _ = b["members"].([]any)
+		if b["role"] != "viewer" || len(members) != 1 || members[0] != want {
+			t.Errorf("global binding = %v, want viewer for %s", b, want)
+		}
 	}
 }
 

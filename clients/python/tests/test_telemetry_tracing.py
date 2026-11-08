@@ -1064,3 +1064,31 @@ async def test_image_status_spans_carry_the_template_and_follow_the_rpc(spans):
     assert "ate_env.rootfs_image" in ensure.attributes
     for span in (get, ensure):
         assert span.status.status_code.name != "ERROR"
+
+
+async def test_placement_spans_carry_the_template_and_follow_the_rpc(spans):
+    """list_placement_domains and warm_image record the template and atespace
+    they were asked about, as image_status and the Go client do."""
+    server, port = await _start_fake_server()
+    client = Client(f"127.0.0.1:{port}", tracer_config=TracerConfig(enable_tracing=True))
+    image = "docker.io/library/python@sha256:" + "0123456789abcdef" * 4
+    try:
+        await client.list_placement_domains()
+        await client.list_placement_domains(template_name="default-template", template_atespace="ate-env")
+        await client.warm_image(image, nodes=1, template_name="default-template", atespace="ate-env")
+    finally:
+        await client.close()
+        await server.stop(None)
+    names = _by_name(spans.get_finished_spans())
+    plain, named = names["ate_env_client.list_placement_domains"]
+    (warm,) = names["ate_env_client.warm_image"]
+    assert plain.attributes["rpc.method"].endswith("EnvironmentService/ListPlacementDomains")
+    assert warm.attributes["rpc.method"].endswith("EnvironmentService/WarmImage")
+    assert "ate.template.name" not in plain.attributes  # unset values are not recorded
+    assert named.attributes["ate.template.name"] == "default-template"
+    assert named.attributes["ate.template.atespace"] == "ate-env"
+    assert warm.attributes["ate.template.name"] == "default-template"
+    assert warm.attributes["ate.atespace"] == "ate-env"
+    assert warm.attributes["ate_env.rootfs_image"] == image
+    for span in (plain, named, warm):
+        assert span.status.status_code.name != "ERROR"

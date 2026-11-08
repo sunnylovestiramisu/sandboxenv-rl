@@ -332,6 +332,40 @@ field; such a server refuses `LOCAL` with `InvalidArgumentError`, and
 `server_info().features` lists `suspend_mode` once a server serves it.
 Deletion is permanent.
 
+### Warm the nodes of a worker pool before a run
+
+An image's first boot on a node pulls and unpacks the image and fetches the
+golden snapshot; the boots after it restore in seconds. `warm_image()` pays
+that first boot ahead of the run, on every node of one worker pool, through
+ate-env-api: the server creates probe environments with the worker selector,
+holds them until they run, reads the node each landed on, deletes them, and
+repeats until every node has run the image. `list_placement_domains()` names
+the pools, with the selector each one answers to; `template_name=` keeps the
+pools that template's own worker selector matches, the ones a run on it can
+address:
+
+```python
+domains = await client.list_placement_domains()          # needs the global viewer role
+pool = next(d for d in domains if d.name == "pool-d0")
+coverage = await client.warm_image(
+    image, worker_selector=pool.selector, run_id="pf-0",
+    on_probe=lambda p: print(p.id, p.node or p.error),
+)
+if not coverage.complete:
+    print(f"{len(coverage.nodes)}/{coverage.wanted} nodes: {coverage.error}")
+```
+
+Pass `nodes=` when ate-env-api may not list workers (`ate-env manifest
+access-policy --global` grants it). The server's defaults apply to the knobs
+left 0: 2 probes per node, 3 rounds, a 10 minute probe timeout. Wait for the
+golden with `image_status()` first when the run relies on it. The call lasts
+for the rounds, minutes for a cold image, so give it a timeout above
+`probe_timeout x max_rounds`; `coverage.waited` is the time its rounds spent
+waiting for probe slots the server caps per node across calls. Sweep
+`coverage.undeleted_probes`, the probe environments the server could not
+delete (a probe whose resume failed ends `CRASHED`, which Substrate cannot
+delete today), with `delete()` once the control plane takes the delete.
+
 ### Handle errors
 
 All failures raise subclasses of `ate_env_rl.EnvError`:

@@ -538,6 +538,7 @@ func buildAuthSecret(namespace, name, token string) *corev1.Secret {
 
 func newManifestAccessPolicyCommand() *cobra.Command {
 	namespace := apiservice.DefaultNamespace
+	var global bool
 	cmd := &cobra.Command{
 		Use:   "access-policy",
 		Short: "Generate the Substrate access policy that lets ate-env-api manage environments",
@@ -553,13 +554,24 @@ kubectl-ate identity on a stock install), run once for each atespace:
   ate-env manifest access-policy | kubectl ate create access-policy -a ate-env -f -
 
 An atespace has one policy. If it already has one, add the binding to it with
-"kubectl ate get access-policy" and "kubectl ate update access-policy".`,
+"kubectl ate get access-policy" and "kubectl ate update access-policy".
+
+With --global the policy grants the global viewer role instead, which
+ListPlacementDomains needs to read the workers (and WarmImage to count a
+domain's nodes when the request leaves nodes 0). The global policy is one
+object for the whole control plane and it holds the owners: merge this binding
+into it with "kubectl ate get access-policy" and "kubectl ate update
+access-policy"; do not create it over an existing one.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if global {
+				return writeProtoYAML(cmd.OutOrStdout(), buildGlobalAccessPolicy(namespace), "global access policy")
+			}
 			return writeProtoYAML(cmd.OutOrStdout(), buildAccessPolicy(namespace), "access policy")
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", namespace, "Kubernetes namespace ate-env-api runs in (its ServiceAccount's namespace)")
+	cmd.Flags().BoolVar(&global, "global", false, "print the global policy binding (viewer) that lets ate-env-api list workers for ListPlacementDomains")
 	return cmd
 }
 
@@ -671,6 +683,20 @@ func buildAccessPolicy(namespace string) *ateapipb.AccessPolicy {
 		Metadata: &ateapipb.ResourceMetadata{Name: "default"},
 		Bindings: []*ateapipb.Binding{{
 			Role:    "editor",
+			Members: []string{"user:" + apiPrincipal(namespace)},
+		}},
+	}
+}
+
+// buildGlobalAccessPolicy returns the global Substrate access policy binding
+// that lets ate-env-api list workers (ListPlacementDomains, and WarmImage
+// with nodes 0): the viewer role at the global scope, whose policy has no
+// atespace.
+func buildGlobalAccessPolicy(namespace string) *ateapipb.AccessPolicy {
+	return &ateapipb.AccessPolicy{
+		Metadata: &ateapipb.ResourceMetadata{Name: "default"},
+		Bindings: []*ateapipb.Binding{{
+			Role:    "viewer",
 			Members: []string{"user:" + apiPrincipal(namespace)},
 		}},
 	}

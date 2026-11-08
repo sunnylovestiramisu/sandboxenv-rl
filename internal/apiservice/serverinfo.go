@@ -41,6 +41,11 @@ const (
 	FeaturePortProxy = "port_proxy"
 	// FeatureImageStatus: GetImageStatus and EnsureImageTemplate are served.
 	FeatureImageStatus = "image_status"
+	// FeaturePlacementDomains: ListPlacementDomains is served (whether it is
+	// allowed depends on the access policy).
+	FeaturePlacementDomains = "placement_domains"
+	// FeatureWarmImage: WarmImage is served.
+	FeatureWarmImage = "warm_image"
 )
 
 const substrateModule = "go.ate.dev/substrate"
@@ -71,7 +76,7 @@ func (s *Server) GetServerInfo(ctx context.Context, req *ateenvv1alpha.GetServer
 
 // features lists the optional features this server serves, in a fixed order.
 func (s *Server) features() []string {
-	f := []string{FeatureRootfsImage, FeaturePTY, FeatureSuspendMode, FeatureImageStatus}
+	f := []string{FeatureRootfsImage, FeaturePTY, FeatureSuspendMode, FeatureImageStatus, FeaturePlacementDomains, FeatureWarmImage}
 	if s.Info.PortProxy {
 		f = append(f, FeaturePortProxy)
 	}

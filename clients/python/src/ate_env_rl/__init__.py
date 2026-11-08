@@ -67,7 +67,6 @@ from .lookahead import LookaheadWarmer, WarmReport
 from .observability import Observer, RunReport
 from .preflight import (
     ImagePlacement,
-    PlacementDomain,
     PlacementEntry,
     PreflightCoverage,
     PreflightWarmer,
@@ -83,6 +82,7 @@ from .types import (
     FleetPlan,
     GoldenSnapshotState,
     ImageStatus,
+    PlacementDomain,
     PlacementSpec,
     PlanEntry,
     ProcessInfo,
@@ -96,6 +96,8 @@ from .types import (
     SuspendMode,
     Task,
     Template,
+    WarmImageCoverage,
+    WarmProbe,
 )
 
 __all__ = [
@@ -114,7 +116,6 @@ __all__ = [
     "PreflightWarmer",
     "PreflightCoverage",
     "ImagePlacement",
-    "PlacementDomain",
     "PlacementEntry",
     # Telemetry
     "TracerConfig",
@@ -153,6 +154,9 @@ __all__ = [
     "ProcessState",
     "GoldenSnapshotState",
     "ImageStatus",
+    "PlacementDomain",
+    "WarmImageCoverage",
+    "WarmProbe",
     "ServerInfo",
     "ShellResult",
     "Signal",

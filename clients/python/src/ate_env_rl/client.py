@@ -19,6 +19,7 @@ from __future__ import annotations
 import collections
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
 from typing import Any
 
 import grpc
@@ -27,7 +28,7 @@ import grpc.aio
 from ._gen.ateenv.v1alpha import env_pb2, env_pb2_grpc, guest_pb2_grpc
 from .config import TracerConfig
 from .env import Env
-from .errors import map_rpc_error
+from .errors import SandboxProtocolError, map_rpc_error
 from .telemetry import metrics
 from .telemetry.trace_recorder import (
     annotate_span,
@@ -47,11 +48,17 @@ from .telemetry.tracing import (
 from .types import (
     EnvironmentInfo,
     ImageStatus,
+    PlacementDomain,
     ServerInfo,
     SuspendMode,
+    WarmImageCoverage,
+    WarmProbe,
     _environment_info_from_pb,
     _image_status_from_pb,
+    _placement_domain_from_pb,
     _server_info_from_pb,
+    _warm_coverage_from_pb,
+    _warm_probe_from_pb,
 )
 
 __all__ = ["Client", "DEFAULT_ATESPACE"]
@@ -469,6 +476,121 @@ class Client:
             except grpc.RpcError as e:
                 raise map_rpc_error(e) from e
         return _image_status_from_pb(resp)
+
+    async def list_placement_domains(
+        self,
+        *,
+        template_name: str | None = None,
+        template_atespace: str | None = None,
+        atespace: str | None = None,
+    ) -> list[PlacementDomain]:
+        """The worker pools a per-environment worker selector can address.
+
+        With ``template_name`` (or an atespace alone, which names the
+        server's default template there), only the pools that template's own
+        worker selector matches: the ones a ``worker_selector`` for it can
+        address, as Substrate ANDs the two. NotFoundError for an unknown
+        template. ate-env-api reads the pools from Substrate's workers, which
+        takes the global viewer role (``ate-env manifest access-policy
+        --global``); PermissionDeniedError otherwise, template or not.
+        """
+        template = None
+        if template_name or template_atespace:
+            template = env_pb2.Template(name=template_name or "", atespace=template_atespace or "")
+        req = env_pb2.ListPlacementDomainsRequest(template=template, atespace=atespace or "")
+        with self._rpc_span(
+            "list_placement_domains",
+            "ListPlacementDomains",
+            lambda: {
+                "ate.template.name": template_name,
+                "ate.template.atespace": template_atespace,
+                "ate.atespace": atespace,
+            },
+        ):
+            try:
+                resp = await self._environments.ListPlacementDomains(
+                    req, metadata=self._auth_metadata()
+                )
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
+        return [_placement_domain_from_pb(d) for d in resp.domains]
+
+    async def warm_image(
+        self,
+        rootfs_image: str,
+        *,
+        worker_selector: Mapping[str, str] | None = None,
+        nodes: int = 0,
+        probes_per_node: int = 0,
+        max_rounds: int = 0,
+        probe_timeout: float | timedelta | None = None,
+        run_id: str = "",
+        atespace: str | None = None,
+        template_name: str | None = None,
+        template_atespace: str | None = None,
+        on_probe: Callable[[WarmProbe], None] | None = None,
+    ) -> WarmImageCoverage:
+        """Put a rootfs image on every node of one placement domain.
+
+        ate-env-api creates probe environments with ``worker_selector`` (the
+        template's own pools when None), holds each until it runs, so the
+        image layers and the golden snapshot are on its node, reads the node,
+        deletes the probes, and repeats until every node ran the image or the
+        rounds run out; no command runs in the guest. ``on_probe`` sees each
+        probe as it settles. ``nodes`` 0 counts the nodes of the workers the
+        selector matches, which takes the global viewer role; pass it
+        otherwise. The server's defaults apply to the zero knobs: 2 probes
+        per node, 3 rounds, a 10 minute probe timeout, a run id of ``warm``
+        and a random suffix (unique per call, so two calls never name a probe
+        alike). Wait for the golden (``image_status``) first when the run
+        relies on it.
+        The call lasts for the rounds: minutes for a cold image.
+        """
+        template = None
+        if template_name or template_atespace:
+            template = env_pb2.Template(name=template_name or "", atespace=template_atespace or "")
+        req = env_pb2.WarmImageRequest(
+            rootfs_image=rootfs_image,
+            template=template,
+            atespace=atespace or "",
+            nodes=nodes,
+            probes_per_node=probes_per_node,
+            max_rounds=max_rounds,
+            run_id=run_id,
+        )
+        if worker_selector:
+            req.worker_selector.update(worker_selector)
+        if probe_timeout is not None:
+            if isinstance(probe_timeout, timedelta):
+                req.probe_timeout.FromTimedelta(probe_timeout)
+            else:
+                req.probe_timeout.FromTimedelta(timedelta(seconds=probe_timeout))
+        coverage: WarmImageCoverage | None = None
+        with self._rpc_span(
+            "warm_image",
+            "WarmImage",
+            lambda: {
+                "ate_env.rootfs_image": image_ref_attr(rootfs_image),
+                "ate.template.name": template_name,
+                "ate.template.atespace": template_atespace,
+                "ate.atespace": atespace,
+            },
+        ):
+            call = self._environments.WarmImage(req, metadata=self._auth_metadata())
+            try:
+                async for ev in call:
+                    if ev.HasField("probe"):
+                        if on_probe is not None:
+                            on_probe(_warm_probe_from_pb(ev.probe))
+                    elif ev.HasField("coverage"):
+                        coverage = _warm_coverage_from_pb(ev.coverage)
+            except grpc.RpcError as e:
+                raise map_rpc_error(e) from e
+            finally:
+                call.cancel()
+        if coverage is None:
+            raise SandboxProtocolError("WarmImage ended without a coverage")
+        return coverage
 
     def env(self, id: str, *, atespace: str = DEFAULT_ATESPACE) -> Env:
         """Return a handle to an environment without checking that it exists."""

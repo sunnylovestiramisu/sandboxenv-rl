@@ -177,6 +177,63 @@ class ImageStatus:
 
 
 @dataclass(frozen=True)
+class PlacementDomain:
+    """A worker pool as a per-environment worker selector addresses it.
+
+    ``selector`` is the labels the pool's workers carry: a ``worker_selector``
+    equal to them keeps an environment in the pool. ``nodes`` and ``workers``
+    count the active ones; ``node_slots`` is the environments one node runs
+    at once, 0 when unknown.
+
+    An ``ImagePlacement`` plan's domains are this type too: the plan file
+    carries ``name``, ``selector``, ``nodes`` and ``node_slots``, thus
+    ``worker_namespace`` and ``workers`` keep their defaults there.
+    """
+
+    name: str
+    worker_namespace: str = ""
+    selector: Mapping[str, str] = field(default_factory=dict, hash=False)
+    nodes: int = 0
+    workers: int = 0
+    node_slots: int = 0
+
+
+@dataclass(frozen=True)
+class WarmProbe:
+    """One probe environment of a ``warm_image`` call: created, run, node read, deleted."""
+
+    id: str
+    node: str
+    round: int
+    duration: float  # seconds
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class WarmImageCoverage:
+    """What a ``warm_image`` call covered.
+
+    ``complete`` is True when ``nodes`` reached ``wanted``; ``error`` is the
+    last probe error when the call stopped short. ``undeleted_probes`` are the
+    probe environments the server could not delete (the delete failed after
+    its retries, or the probe ended CRASHED, which Substrate cannot delete
+    today): ids in the call's atespace, for the caller to sweep with
+    ``delete()``. ``waited`` is the time, in seconds, the rounds waited for
+    probe slots on the worker selector held by other ``warm_image`` calls.
+    """
+
+    nodes: tuple[str, ...]
+    wanted: int
+    probes: int
+    failed: int
+    rounds: int
+    complete: bool
+    error: str = ""
+    undeleted_probes: tuple[str, ...] = ()
+    waited: float = 0.0
+
+
+@dataclass(frozen=True)
 class ServerInfo:
     """Identity, version and optional features of the ate-env-api server.
 
@@ -442,3 +499,38 @@ class FleetPlan:
     @property
     def total_replicas(self) -> int:
         return sum(e.replicas for e in self.entries)
+
+
+def _placement_domain_from_pb(pb: env_pb2.PlacementDomain) -> PlacementDomain:
+    return PlacementDomain(
+        name=pb.name,
+        worker_namespace=pb.worker_namespace,
+        selector=dict(pb.selector),
+        nodes=pb.nodes,
+        workers=pb.workers,
+        node_slots=pb.node_slots,
+    )
+
+
+def _warm_probe_from_pb(pb: env_pb2.WarmProbe) -> WarmProbe:
+    return WarmProbe(
+        id=pb.id,
+        node=pb.node,
+        round=pb.round,
+        duration=pb.duration.ToTimedelta().total_seconds() if pb.HasField("duration") else 0.0,
+        error=pb.error,
+    )
+
+
+def _warm_coverage_from_pb(pb: env_pb2.WarmImageCoverage) -> WarmImageCoverage:
+    return WarmImageCoverage(
+        nodes=tuple(pb.nodes),
+        wanted=pb.wanted,
+        probes=pb.probes,
+        failed=pb.failed,
+        rounds=pb.rounds,
+        complete=pb.complete,
+        error=pb.error,
+        undeleted_probes=tuple(pb.undeleted_probes),
+        waited=pb.waited.ToTimedelta().total_seconds() if pb.HasField("waited") else 0.0,
+    )

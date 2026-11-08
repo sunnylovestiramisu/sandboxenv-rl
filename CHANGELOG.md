@@ -7,6 +7,29 @@ user needs to know across them.
 ## Unreleased
 
 ### Added
+- ate-env-api: `ListPlacementDomains` (the worker pools a worker selector can
+  address: labels, nodes, workers, slots per node, from Substrate's workers;
+  with a `template`, only the pools its worker selector matches) and
+  `WarmImage` (server-streaming: puts one `rootfs_image` on every node of one
+  domain with probe environments it creates, resumes, holds until `RUNNING`,
+  reads the node of and deletes, round after round; a probe event each, then
+  the coverage). Features `placement_domains`, `warm_image`. `ate-env
+  placement-domains`, `ate-env warm-image <image> --worker-selector k=v`;
+  `ate-env manifest access-policy --global` prints the global viewer binding
+  listing workers takes; Go client `ListPlacementDomains`, `WarmImage`; Python
+  `list_placement_domains()`, `warm_image()`, `PlacementDomain`, `WarmProbe`,
+  `WarmImageCoverage`; an `ImagePlacement` plan's domains are `PlacementDomain`
+  too, thus a plan can carry what `list_placement_domains()` returns. A
+  probe's create and resume are retried within the
+  probe's timeout on the transient failures of a loaded control plane
+  (`Unavailable`, `DeadlineExceeded`, a derived template not visible yet),
+  its delete on `Aborted`, `Unavailable` and `ResourceExhausted`; the probes
+  a call could not delete (a `CRASHED` one cannot be, today) are listed in
+  the coverage's `undeleted_probes` for a sweep, which `ate-env warm-image`
+  prints and exits non-zero on. `ate-env-api -warm-max-probes-per-node`
+  (default 2) caps the probes in flight per node of one worker selector
+  across calls; a request's `probes_per_node` above it is refused, and the
+  coverage's `waited` is the time its rounds waited for slots.
 
 - `benchmarking/swebench/run-r2e-swebench.sh`: the mixed R2E-Gym + SWE-bench
   recipe, with `make-r2e-dataset.py` (R2E-Gym `CommandAdapter` manifests),

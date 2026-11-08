@@ -306,3 +306,20 @@ async def test_probe_timeout_bounds_the_whole_probe(fake_stack):
     ic = coverage.domains[0].images[0]
     assert not ic.complete and ic.failed == 2 and "not ready after 0.3s" in ic.error
     assert fakes.environments.environments == {}
+
+
+def test_plan_domains_are_the_api_placement_domain() -> None:
+    """The plan's domains and list_placement_domains() share one type."""
+    from ate_env_rl import PlacementDomain, preflight
+
+    selector = {"ate-env/domain": "a"}
+    domain = {"name": "a", "selector": selector, "nodes": 2, "node_slots": 4}
+    image = {"image": "img@sha256:" + "0" * 64, "domains": ["a"]}
+    plan = ImagePlacement.from_dict(
+        {"schema_version": "v1", "domains": [domain], "images": [image]}
+    )
+    want = PlacementDomain(name="a", selector=selector, nodes=2, node_slots=4)
+    assert preflight.PlacementDomain is PlacementDomain
+    assert [type(d) for d in plan.domains] == [PlacementDomain]
+    assert plan.domains[0] == want
+    assert plan.domains[0].worker_namespace == "" and plan.domains[0].workers == 0

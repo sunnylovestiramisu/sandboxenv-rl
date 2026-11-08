@@ -38,13 +38,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	EnvironmentService_CreateEnvironment_FullMethodName   = "/ateenv.v1alpha.EnvironmentService/CreateEnvironment"
-	EnvironmentService_GetEnvironment_FullMethodName      = "/ateenv.v1alpha.EnvironmentService/GetEnvironment"
-	EnvironmentService_SuspendEnvironment_FullMethodName  = "/ateenv.v1alpha.EnvironmentService/SuspendEnvironment"
-	EnvironmentService_DeleteEnvironment_FullMethodName   = "/ateenv.v1alpha.EnvironmentService/DeleteEnvironment"
-	EnvironmentService_GetServerInfo_FullMethodName       = "/ateenv.v1alpha.EnvironmentService/GetServerInfo"
-	EnvironmentService_GetImageStatus_FullMethodName      = "/ateenv.v1alpha.EnvironmentService/GetImageStatus"
-	EnvironmentService_EnsureImageTemplate_FullMethodName = "/ateenv.v1alpha.EnvironmentService/EnsureImageTemplate"
+	EnvironmentService_CreateEnvironment_FullMethodName    = "/ateenv.v1alpha.EnvironmentService/CreateEnvironment"
+	EnvironmentService_GetEnvironment_FullMethodName       = "/ateenv.v1alpha.EnvironmentService/GetEnvironment"
+	EnvironmentService_SuspendEnvironment_FullMethodName   = "/ateenv.v1alpha.EnvironmentService/SuspendEnvironment"
+	EnvironmentService_DeleteEnvironment_FullMethodName    = "/ateenv.v1alpha.EnvironmentService/DeleteEnvironment"
+	EnvironmentService_GetServerInfo_FullMethodName        = "/ateenv.v1alpha.EnvironmentService/GetServerInfo"
+	EnvironmentService_GetImageStatus_FullMethodName       = "/ateenv.v1alpha.EnvironmentService/GetImageStatus"
+	EnvironmentService_EnsureImageTemplate_FullMethodName  = "/ateenv.v1alpha.EnvironmentService/EnsureImageTemplate"
+	EnvironmentService_ListPlacementDomains_FullMethodName = "/ateenv.v1alpha.EnvironmentService/ListPlacementDomains"
+	EnvironmentService_WarmImage_FullMethodName            = "/ateenv.v1alpha.EnvironmentService/WarmImage"
 )
 
 // EnvironmentServiceClient is the client API for EnvironmentService service.
@@ -76,6 +78,26 @@ type EnvironmentServiceClient interface {
 	// does. No environment is created. A template whose golden bake failed is
 	// recreated the way CreateEnvironment would.
 	EnsureImageTemplate(ctx context.Context, in *EnsureImageTemplateRequest, opts ...grpc.CallOption) (*ImageStatus, error)
+	// ListPlacementDomains reports the worker pools a caller can address with a
+	// per-environment worker selector: for each pool, the labels all its
+	// schedulable workers carry (the selector), its distinct nodes and the
+	// slots per node. With a template, only the pools that template's own
+	// worker_selector matches. Read from Substrate's workers, which takes the
+	// global viewer role (see `ate-env manifest access-policy --global`);
+	// PermissionDenied otherwise, template or not.
+	ListPlacementDomains(ctx context.Context, in *ListPlacementDomainsRequest, opts ...grpc.CallOption) (*ListPlacementDomainsResponse, error)
+	// WarmImage puts one rootfs image on every node of one placement domain, so
+	// the first environment of that image on each node boots from the node's
+	// cache: it creates probe environments with the worker selector, resumes
+	// them (a new environment is suspended until a resume places it), holds
+	// them until the control plane reports them RUNNING (the layers and the
+	// golden snapshot are on the node by then), reads each node from the actor
+	// status, deletes the probes, and repeats until every node ran the image or
+	// the rounds run out. It streams a probe event per probe and ends with the
+	// coverage. No command runs in the guest. A probe name that exists already
+	// is reported as a failed create and left alone. Wait for the image's
+	// golden (GetImageStatus) first when the run relies on it.
+	WarmImage(ctx context.Context, in *WarmImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WarmImageEvent], error)
 }
 
 type environmentServiceClient struct {
@@ -156,6 +178,35 @@ func (c *environmentServiceClient) EnsureImageTemplate(ctx context.Context, in *
 	return out, nil
 }
 
+func (c *environmentServiceClient) ListPlacementDomains(ctx context.Context, in *ListPlacementDomainsRequest, opts ...grpc.CallOption) (*ListPlacementDomainsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPlacementDomainsResponse)
+	err := c.cc.Invoke(ctx, EnvironmentService_ListPlacementDomains_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *environmentServiceClient) WarmImage(ctx context.Context, in *WarmImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WarmImageEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &EnvironmentService_ServiceDesc.Streams[0], EnvironmentService_WarmImage_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WarmImageRequest, WarmImageEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type EnvironmentService_WarmImageClient = grpc.ServerStreamingClient[WarmImageEvent]
+
 // EnvironmentServiceServer is the server API for EnvironmentService service.
 // All implementations must embed UnimplementedEnvironmentServiceServer
 // for forward compatibility.
@@ -185,6 +236,26 @@ type EnvironmentServiceServer interface {
 	// does. No environment is created. A template whose golden bake failed is
 	// recreated the way CreateEnvironment would.
 	EnsureImageTemplate(context.Context, *EnsureImageTemplateRequest) (*ImageStatus, error)
+	// ListPlacementDomains reports the worker pools a caller can address with a
+	// per-environment worker selector: for each pool, the labels all its
+	// schedulable workers carry (the selector), its distinct nodes and the
+	// slots per node. With a template, only the pools that template's own
+	// worker_selector matches. Read from Substrate's workers, which takes the
+	// global viewer role (see `ate-env manifest access-policy --global`);
+	// PermissionDenied otherwise, template or not.
+	ListPlacementDomains(context.Context, *ListPlacementDomainsRequest) (*ListPlacementDomainsResponse, error)
+	// WarmImage puts one rootfs image on every node of one placement domain, so
+	// the first environment of that image on each node boots from the node's
+	// cache: it creates probe environments with the worker selector, resumes
+	// them (a new environment is suspended until a resume places it), holds
+	// them until the control plane reports them RUNNING (the layers and the
+	// golden snapshot are on the node by then), reads each node from the actor
+	// status, deletes the probes, and repeats until every node ran the image or
+	// the rounds run out. It streams a probe event per probe and ends with the
+	// coverage. No command runs in the guest. A probe name that exists already
+	// is reported as a failed create and left alone. Wait for the image's
+	// golden (GetImageStatus) first when the run relies on it.
+	WarmImage(*WarmImageRequest, grpc.ServerStreamingServer[WarmImageEvent]) error
 	mustEmbedUnimplementedEnvironmentServiceServer()
 }
 
@@ -215,6 +286,12 @@ func (UnimplementedEnvironmentServiceServer) GetImageStatus(context.Context, *Ge
 }
 func (UnimplementedEnvironmentServiceServer) EnsureImageTemplate(context.Context, *EnsureImageTemplateRequest) (*ImageStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method EnsureImageTemplate not implemented")
+}
+func (UnimplementedEnvironmentServiceServer) ListPlacementDomains(context.Context, *ListPlacementDomainsRequest) (*ListPlacementDomainsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPlacementDomains not implemented")
+}
+func (UnimplementedEnvironmentServiceServer) WarmImage(*WarmImageRequest, grpc.ServerStreamingServer[WarmImageEvent]) error {
+	return status.Error(codes.Unimplemented, "method WarmImage not implemented")
 }
 func (UnimplementedEnvironmentServiceServer) mustEmbedUnimplementedEnvironmentServiceServer() {}
 func (UnimplementedEnvironmentServiceServer) testEmbeddedByValue()                            {}
@@ -363,6 +440,35 @@ func _EnvironmentService_EnsureImageTemplate_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _EnvironmentService_ListPlacementDomains_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPlacementDomainsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EnvironmentServiceServer).ListPlacementDomains(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EnvironmentService_ListPlacementDomains_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EnvironmentServiceServer).ListPlacementDomains(ctx, req.(*ListPlacementDomainsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _EnvironmentService_WarmImage_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WarmImageRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(EnvironmentServiceServer).WarmImage(m, &grpc.GenericServerStream[WarmImageRequest, WarmImageEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type EnvironmentService_WarmImageServer = grpc.ServerStreamingServer[WarmImageEvent]
+
 // EnvironmentService_ServiceDesc is the grpc.ServiceDesc for EnvironmentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -398,7 +504,17 @@ var EnvironmentService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "EnsureImageTemplate",
 			Handler:    _EnvironmentService_EnsureImageTemplate_Handler,
 		},
+		{
+			MethodName: "ListPlacementDomains",
+			Handler:    _EnvironmentService_ListPlacementDomains_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WarmImage",
+			Handler:       _EnvironmentService_WarmImage_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/ateenv/v1alpha/env.proto",
 }

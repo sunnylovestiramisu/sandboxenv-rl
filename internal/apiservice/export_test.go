@@ -19,10 +19,34 @@ import (
 	"time"
 )
 
+// SetWarmTimings shortens the backoff between the attempts of a WarmImage
+// probe's create, resume and delete, and the budget of its delete, for the
+// duration of t.
+func SetWarmTimings(t *testing.T, retryInitial, retryMax, deleteTimeout time.Duration) {
+	oldInitial, oldMax, oldDelete := warmRetryInitial, warmRetryMax, warmDeleteTimeout
+	warmRetryInitial, warmRetryMax, warmDeleteTimeout = retryInitial, retryMax, deleteTimeout
+	t.Cleanup(func() { warmRetryInitial, warmRetryMax, warmDeleteTimeout = oldInitial, oldMax, oldDelete })
+}
+
 // SetTemplateRecreateTimeout sets the bound of the recreate loop for the
 // duration of t.
 func SetTemplateRecreateTimeout(t *testing.T, d time.Duration) {
 	old := templateRecreateTimeout
 	templateRecreateTimeout = d
 	t.Cleanup(func() { templateRecreateTimeout = old })
+}
+
+// WarmProbesInFlight reports the probe slots WarmImage calls hold on this
+// server, over every selector, for tests that wait for a cancelled call's
+// cleanup to end.
+func (s *Server) WarmProbesInFlight() int {
+	s.warmSlots.mu.Lock()
+	defer s.warmSlots.mu.Unlock()
+	total := 0
+	for _, w := range s.warmSlots.m {
+		w.mu.Lock()
+		total += w.inflight
+		w.mu.Unlock()
+	}
+	return total
 }

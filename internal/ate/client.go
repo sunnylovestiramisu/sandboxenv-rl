@@ -314,24 +314,43 @@ type CreateOptions struct {
 	WorkerSelector map[string]string
 }
 
-// Create registers a new actor from opts and starts it. ID and Template are
-// required. Atespace is the Substrate atespace the actor and template live in.
-func (c *Client) Create(ctx context.Context, opts CreateOptions) error {
-	if opts.ID == "" {
-		return errors.New("ate: CreateOptions.ID is required")
+// check validates opts and returns the atespace with the default applied.
+func (o CreateOptions) check() (string, error) {
+	if o.ID == "" {
+		return "", errors.New("ate: CreateOptions.ID is required")
 	}
-	if opts.Template == "" {
-		return errors.New("ate: CreateOptions.Template is required")
+	if o.Template == "" {
+		return "", errors.New("ate: CreateOptions.Template is required")
 	}
-	atespace := opts.Atespace
-	if atespace == "" {
-		atespace = DefaultAtespace
+	if o.Atespace == "" {
+		return DefaultAtespace, nil
 	}
+	return o.Atespace, nil
+}
 
+// Create registers a new actor from opts and starts it, creating its
+// atespace first when it is missing. ID and Template are required. Atespace
+// is the Substrate atespace the actor and template live in.
+func (c *Client) Create(ctx context.Context, opts CreateOptions) error {
+	atespace, err := opts.check()
+	if err != nil {
+		return err
+	}
 	if err := c.EnsureAtespace(ctx, atespace); err != nil {
 		return fmt.Errorf("ate: creating %q: %w", opts.ID, err)
 	}
+	return c.CreateActor(ctx, opts)
+}
 
+// CreateActor registers a new actor from opts with one CreateActor call, in
+// an atespace the caller knows exists (EnsureAtespace): an error is that
+// call's, so a caller that retries can tell a refusal from a call cut off.
+// ID and Template are required.
+func (c *Client) CreateActor(ctx context.Context, opts CreateOptions) error {
+	atespace, err := opts.check()
+	if err != nil {
+		return err
+	}
 	actor := &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{
 			Atespace: atespace,
@@ -389,6 +408,27 @@ func (c *Client) List(ctx context.Context, atespace string) ([]*ateapipb.Actor, 
 	}
 }
 
+// ListWorkers returns every worker the control plane knows, following its
+// pagination. Workers are global: listing them takes the global viewer
+// role, and a caller without it gets PermissionDenied.
+func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
+	var workers []*ateapipb.Worker
+	token := ""
+	for {
+		resp, err := c.control.ListWorkers(ctx, &ateapipb.ListWorkersRequest{
+			Options: &ateapipb.ListOptions{PageToken: token},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ate: listing workers: %w", wrapGRPCError(err))
+		}
+		workers = append(workers, resp.GetWorkers()...)
+		token = resp.GetNextPageToken()
+		if token == "" {
+			return workers, nil
+		}
+	}
+}
+
 // Suspend checkpoints and stops the actor with ID in atespace.
 // If atespace is empty, DefaultAtespace is used.
 //
@@ -410,6 +450,23 @@ func (c *Client) Suspend(ctx context.Context, atespace, id string) error {
 // If atespace is empty, DefaultAtespace is used.
 func (c *Client) SuspendLocal(ctx context.Context, atespace, id string) error {
 	return c.suspend(ctx, atespace, id, ateapipb.DurabilityMode_DURABILITY_MODE_ASYNCHRONOUS)
+}
+
+// Resume wakes an actor through the control plane and returns it placed:
+// Substrate's ResumeActor returns once the actor is RUNNING and its template's
+// wakeup probe answered, or fails (the actor is CRASHED then). A new actor is
+// born suspended and unplaced; nothing but a resume, the router's on a guest
+// call or this one, puts it on a node. The caller's role must allow it
+// (editor of the atespace).
+func (c *Client) Resume(ctx context.Context, atespace, id string) (*ateapipb.Actor, error) {
+	if id == "" {
+		return nil, errors.New("ate: id is required")
+	}
+	resp, err := c.control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: c.ref(atespace, id)})
+	if err != nil {
+		return nil, fmt.Errorf("ate: resuming %q: %w", id, wrapGRPCError(err))
+	}
+	return resp.GetActor(), nil
 }
 
 func (c *Client) suspend(ctx context.Context, atespace, id string, mode ateapipb.DurabilityMode) error {

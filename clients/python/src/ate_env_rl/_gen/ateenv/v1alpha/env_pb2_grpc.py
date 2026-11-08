@@ -90,6 +90,16 @@ class EnvironmentServiceStub:
                 request_serializer=ateenv_dot_v1alpha_dot_env__pb2.EnsureImageTemplateRequest.SerializeToString,
                 response_deserializer=ateenv_dot_v1alpha_dot_env__pb2.ImageStatus.FromString,
                 _registered_method=True)
+        self.ListPlacementDomains = channel.unary_unary(
+                '/ateenv.v1alpha.EnvironmentService/ListPlacementDomains',
+                request_serializer=ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsRequest.SerializeToString,
+                response_deserializer=ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsResponse.FromString,
+                _registered_method=True)
+        self.WarmImage = channel.unary_stream(
+                '/ateenv.v1alpha.EnvironmentService/WarmImage',
+                request_serializer=ateenv_dot_v1alpha_dot_env__pb2.WarmImageRequest.SerializeToString,
+                response_deserializer=ateenv_dot_v1alpha_dot_env__pb2.WarmImageEvent.FromString,
+                _registered_method=True)
 
 
 class EnvironmentServiceServicer:
@@ -160,6 +170,36 @@ class EnvironmentServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListPlacementDomains(self, request, context):
+        """ListPlacementDomains reports the worker pools a caller can address with a
+        per-environment worker selector: for each pool, the labels all its
+        schedulable workers carry (the selector), its distinct nodes and the
+        slots per node. With a template, only the pools that template's own
+        worker_selector matches. Read from Substrate's workers, which takes the
+        global viewer role (see `ate-env manifest access-policy --global`);
+        PermissionDenied otherwise, template or not.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WarmImage(self, request, context):
+        """WarmImage puts one rootfs image on every node of one placement domain, so
+        the first environment of that image on each node boots from the node's
+        cache: it creates probe environments with the worker selector, resumes
+        them (a new environment is suspended until a resume places it), holds
+        them until the control plane reports them RUNNING (the layers and the
+        golden snapshot are on the node by then), reads each node from the actor
+        status, deletes the probes, and repeats until every node ran the image or
+        the rounds run out. It streams a probe event per probe and ends with the
+        coverage. No command runs in the guest. A probe name that exists already
+        is reported as a failed create and left alone. Wait for the image's
+        golden (GetImageStatus) first when the run relies on it.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_EnvironmentServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -197,6 +237,16 @@ def add_EnvironmentServiceServicer_to_server(servicer, server):
                     servicer.EnsureImageTemplate,
                     request_deserializer=ateenv_dot_v1alpha_dot_env__pb2.EnsureImageTemplateRequest.FromString,
                     response_serializer=ateenv_dot_v1alpha_dot_env__pb2.ImageStatus.SerializeToString,
+            ),
+            'ListPlacementDomains': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListPlacementDomains,
+                    request_deserializer=ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsRequest.FromString,
+                    response_serializer=ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsResponse.SerializeToString,
+            ),
+            'WarmImage': grpc.unary_stream_rpc_method_handler(
+                    servicer.WarmImage,
+                    request_deserializer=ateenv_dot_v1alpha_dot_env__pb2.WarmImageRequest.FromString,
+                    response_serializer=ateenv_dot_v1alpha_dot_env__pb2.WarmImageEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -395,6 +445,60 @@ class EnvironmentService:
             '/ateenv.v1alpha.EnvironmentService/EnsureImageTemplate',
             ateenv_dot_v1alpha_dot_env__pb2.EnsureImageTemplateRequest.SerializeToString,
             ateenv_dot_v1alpha_dot_env__pb2.ImageStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListPlacementDomains(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ateenv.v1alpha.EnvironmentService/ListPlacementDomains',
+            ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsRequest.SerializeToString,
+            ateenv_dot_v1alpha_dot_env__pb2.ListPlacementDomainsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WarmImage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ateenv.v1alpha.EnvironmentService/WarmImage',
+            ateenv_dot_v1alpha_dot_env__pb2.WarmImageRequest.SerializeToString,
+            ateenv_dot_v1alpha_dot_env__pb2.WarmImageEvent.FromString,
             options,
             channel_credentials,
             insecure,

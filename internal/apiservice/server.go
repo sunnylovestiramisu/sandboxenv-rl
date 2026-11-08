@@ -73,6 +73,14 @@ type Server struct {
 	// worker has room for the environment; see ensureAwake. Zero (the
 	// default) keeps waiting for the whole WakeBudget.
 	WakeNoCapacityGrace time.Duration
+	// WarmMaxProbesPerNode caps the WarmImage probes in flight per node of
+	// one worker selector, across calls: a round takes nodes x
+	// probes_per_node slots on its selector before it creates its probes
+	// and gives them back once they are deleted, so a pre-flight that fans
+	// out one call per image puts at most this many first boots (image
+	// unpacks) on a node at once. A request's probes_per_node above it is
+	// refused. Zero means DefaultWarmMaxProbesPerNode.
+	WarmMaxProbesPerNode int
 	// Info is the build and configuration GetServerInfo reports.
 	Info ServerInfo
 	// RouterTLS, when set, is the client TLS configuration for the router's
@@ -94,6 +102,9 @@ type Server struct {
 	// imageTemplates serializes the recreate of a failed derived template
 	// with the creates that use it.
 	imageTemplates imageTemplateLocks
+	// warmSlots are the WarmImage probe slots per worker selector; see
+	// WarmMaxProbesPerNode.
+	warmSlots warmSlotRegistry
 }
 
 // New creates a new Server.

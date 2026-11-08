@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -707,4 +708,66 @@ func TestClientAuthToken(t *testing.T) {
 		}
 		exercise(t, client, "sb-auth-conn")
 	})
+}
+
+// ListPlacementDomains and WarmImage reach ate-env-api's placement RPCs: the
+// pools come back grouped from the fake control plane's workers, and a warm
+// covers a domain's nodes through the streamed probes.
+func TestPlacementDomainsAndWarmImage(t *testing.T) {
+	f := newFixture(t)
+	labels := map[string]string{"workload": "default-env", "ate-env/domain": "d0"}
+	f.control.AddWorker(fakecontrol.Worker("ate-system", "pool-d0", "node-1", labels, 8))
+	f.control.AddWorker(fakecontrol.Worker("ate-system", "pool-d0", "node-2", labels, 8))
+	f.control.AddTemplate(&ateapipb.ActorTemplate{
+		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ate-env", Name: "default-template"},
+		WorkerSelector: &ateapipb.Selector{MatchLabels: map[string]string{"workload": "default-env"}},
+		Containers: []*ateapipb.Container{{
+			Name:        "guest",
+			Image:       "registry.example/ate-env-guest@sha256:" + strings.Repeat("ab", 32),
+			Command:     []string{"/ko-app/ate-env-guest"},
+			WakeupProbe: &ateapipb.WakeupProbe{HttpGet: &ateapipb.HttpGetAction{Path: "/readyz", Port: 80}},
+		}},
+		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://bucket/ate-env/"},
+	})
+
+	f.control.AddWorker(fakecontrol.Worker("ate-system", "pool-other", "node-3", map[string]string{"workload": "other"}, 8))
+
+	domains, err := f.client.ListPlacementDomains(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("ListPlacementDomains: %v", err)
+	}
+	if len(domains) != 2 || domains[0].GetName() != "pool-d0" || domains[0].GetNodes() != 2 || domains[0].GetNodeSlots() != 8 || !maps.Equal(domains[0].GetSelector(), labels) {
+		t.Errorf("domains = %v, want pool-d0 with 2 nodes, 8 slots and the labels, then pool-other", domains)
+	}
+	// With the template, only the pools its own selector matches.
+	domains, err = f.client.ListPlacementDomains(t.Context(), &ateenvv1alpha.ListPlacementDomainsRequest{Template: &ateenvv1alpha.Template{Name: "default-template"}})
+	if err != nil {
+		t.Fatalf("ListPlacementDomains(template): %v", err)
+	}
+	if len(domains) != 1 || domains[0].GetName() != "pool-d0" {
+		t.Errorf("domains for default-template = %v, want pool-d0 only", domains)
+	}
+	if _, err := f.client.ListPlacementDomains(t.Context(), &ateenvv1alpha.ListPlacementDomainsRequest{Template: &ateenvv1alpha.Template{Name: "nope"}}); !errors.Is(err, env.ErrNotFound) {
+		t.Errorf("unknown template: err = %v, want ErrNotFound", err)
+	}
+
+	var probes []*ateenvv1alpha.WarmProbe
+	cov, err := f.client.WarmImage(t.Context(), &ateenvv1alpha.WarmImageRequest{
+		RootfsImage:    "registry.example/task@sha256:" + strings.Repeat("cd", 32),
+		WorkerSelector: map[string]string{"ate-env/domain": "d0"},
+		ProbesPerNode:  1,
+		RunId:          "pf-1",
+	}, func(p *ateenvv1alpha.WarmProbe) { probes = append(probes, p) })
+	if err != nil {
+		t.Fatalf("WarmImage: %v", err)
+	}
+	if !cov.GetComplete() || !slices.Equal(cov.GetNodes(), []string{"node-1", "node-2"}) || cov.GetRounds() != 1 || len(probes) != 2 {
+		t.Errorf("coverage = %v with %d probes, want both nodes in one round of two probes", cov, len(probes))
+	}
+	if f.control.ActorCount() != 0 {
+		t.Errorf("%d actors left after the warm, want 0", f.control.ActorCount())
+	}
+	if _, err := f.client.WarmImage(t.Context(), &ateenvv1alpha.WarmImageRequest{RootfsImage: "registry.example/task:latest"}, nil); err == nil {
+		t.Error("an unpinned image was accepted")
+	}
 }

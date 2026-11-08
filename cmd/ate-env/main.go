@@ -563,6 +563,8 @@ Common environment commands:
 	root.AddCommand(newCreateCommand())
 	root.AddCommand(newGetCommand())
 	root.AddCommand(newImageStatusCommand())
+	root.AddCommand(newPlacementDomainsCommand())
+	root.AddCommand(newWarmImageCommand())
 	root.AddCommand(newSuspendCommand())
 	root.AddCommand(newDeleteCommand())
 	root.AddCommand(newServerInfoCommand())

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import grpc
 
@@ -49,14 +50,31 @@ async def _require_env(context: grpc.aio.ServicerContext) -> tuple[str, str]:
 class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
     def __init__(self):
         self.image_templates: dict = {}
+        # Base templates ListPlacementDomains can filter by: (atespace, name)
+        # to the template's own worker selector. The default template has
+        # none, so it addresses every pool with a selector.
+        self.template_selectors: dict[tuple[str, str], dict[str, str]] = {
+            ("ate-env", "default-template"): {},
+        }
         self.environments: dict[tuple[str, str], env_pb2.Environment] = {}
         self.last_create_request: env_pb2.CreateEnvironmentRequest | None = None
         self.last_suspend_request: env_pb2.SuspendEnvironmentRequest | None = None
-        # Placement: the nodes behind each value of the ate-env/domain selector
-        # label, handed out round-robin per create; an environment created
-        # without a known domain reports no node, as before its placement.
+        # Placement, for creates, ListPlacementDomains and WarmImage: the nodes
+        # behind each value of the ate-env/domain selector label, the slots per node
+        # per domain, whether the global role is missing, whether every probe
+        # lands on the first node, and the WarmImage requests seen.
         self.domain_nodes: dict[str, list[str]] = {}
         self._domain_counter: dict[str, int] = {}
+        self.node_slots: dict[str, int] = {}
+        self.deny_list_workers = False
+        self.warm_same_node = False
+        self.warm_requests: list[env_pb2.WarmImageRequest] = []
+        # Probe ids the next WarmImage reports undeleted, and the seconds it
+        # reports waited for probe slots.
+        self.warm_undeleted: list[str] = []
+        self.warm_waited = 0.0
+        # An environment created without a known domain reports no node, as
+        # before its placement; creates hand the domain's nodes out round-robin.
         self.first_node_creates = 0
 
     async def CreateEnvironment(self, request, context):
@@ -176,12 +194,94 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
             self.image_templates[key] = env_pb2.ImageStatus(golden=env_pb2.GOLDEN_SNAPSHOT_STATE_PENDING)
         return await self.GetImageStatus(request, context)
 
+    async def ListPlacementDomains(self, request, context):
+        # Mirror ate-env-api: one domain per value of the ate-env/domain label
+        # with the nodes behind it; PermissionDenied without the global role.
+        selector = None
+        if request.HasField("template") or request.atespace:
+            name = request.template.name or "default-template"
+            atespace = request.atespace or request.template.atespace or "ate-env"
+            if (atespace, name) not in self.template_selectors:
+                await context.abort(grpc.StatusCode.NOT_FOUND, f"actor template {name!r} not found")
+            selector = self.template_selectors[(atespace, name)]
+        if self.deny_list_workers:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "not allowed to list workers")
+        resp = env_pb2.ListPlacementDomainsResponse()
+        for name in sorted(self.domain_nodes):
+            labels = {"ate-env/domain": name}
+            if selector is not None and any(labels.get(k) != v for k, v in selector.items()):
+                continue
+            d = resp.domains.add(
+                name=f"pool-{name}", worker_namespace="ate-system",
+                nodes=len(set(self.domain_nodes[name])), workers=len(self.domain_nodes[name]),
+                node_slots=self.node_slots.get(name, 0),
+            )
+            d.selector["ate-env/domain"] = name
+        return resp
+
+    async def WarmImage(self, request, context):
+        # Mirror ate-env-api: rounds of nodes x probes_per_node probes placed
+        # round-robin on the domain's nodes (always the first with
+        # warm_same_node), deleted after each round; a probe event each, then
+        # the coverage.
+        if not re.search(r"@sha256:[0-9a-f]{64}$", request.rootfs_image):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "image is not pinned by digest")
+        domain = request.worker_selector.get("ate-env/domain", "")
+        pool = self.domain_nodes.get(domain)
+        wanted = request.nodes
+        if wanted == 0:
+            if self.deny_list_workers:
+                await context.abort(
+                    grpc.StatusCode.PERMISSION_DENIED,
+                    "nodes is 0 and ate-env-api may not list workers: pass nodes",
+                )
+            if not pool:
+                await context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"no active worker matches the selector {dict(request.worker_selector)}",
+                )
+            wanted = len(set(pool))
+        per_node = request.probes_per_node or 2
+        rounds = request.max_rounds or 3
+        run_id = request.run_id or "warm"
+        covered: set[str] = set()
+        probes = failed = 0
+        error = ""
+        rnd = 0
+        self.warm_requests.append(request)
+        while rnd < rounds and len(covered) < wanted:
+            rnd += 1
+            for k in range(wanted * per_node):
+                probes += 1
+                probe_id = f"{run_id}-{rnd}-{k}"
+                node = ""
+                if pool:
+                    idx = 0 if self.warm_same_node else self._domain_counter.get(domain, 0)
+                    self._domain_counter[domain] = idx + 1
+                    node = pool[idx % len(pool)]
+                    covered.add(node)
+                else:
+                    failed += 1
+                    error = "running but the control plane reports no node"
+                probe = env_pb2.WarmProbe(id=probe_id, node=node, round=rnd, error=error if not node else "")
+                probe.duration.FromMilliseconds(5)
+                yield env_pb2.WarmImageEvent(probe=probe)
+            if failed == probes:
+                break
+        coverage = env_pb2.WarmImageCoverage(
+            nodes=sorted(covered), wanted=wanted, probes=probes, failed=failed, rounds=rnd,
+            complete=len(covered) >= wanted, error=error, undeleted_probes=list(self.warm_undeleted),
+        )
+        if self.warm_waited:
+            coverage.waited.FromTimedelta(timedelta(seconds=self.warm_waited))
+        yield env_pb2.WarmImageEvent(coverage=coverage)
+
     async def GetServerInfo(self, request, context):
         return env_pb2.GetServerInfoResponse(
             server="sandboxenv-rl",
             version="v0.0.0-fake",
             substrate_version="unknown",
-            features=["rootfs_image", "pty", "suspend_mode", "image_status"],
+            features=["rootfs_image", "pty", "suspend_mode", "image_status", "placement_domains", "warm_image"],
         )
 
     async def _lookup(self, request, context):

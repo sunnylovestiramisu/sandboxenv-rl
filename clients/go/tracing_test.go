@@ -440,6 +440,8 @@ func TestTracingCallerConnSpansMatchPythonClient(t *testing.T) {
 	_, _ = c.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{Id: "tagged", RootfsImage: "registry.example/repo:v1@" + digest})
 	_, _ = c.ImageStatus(t.Context(), &ateenvv1alpha.GetImageStatusRequest{RootfsImage: "registry.example/repo@" + digest})
 	_, _ = c.EnsureImageTemplate(t.Context(), &ateenvv1alpha.EnsureImageTemplateRequest{RootfsImage: "registry.example/repo@" + digest})
+	_, _ = c.ListPlacementDomains(t.Context(), &ateenvv1alpha.ListPlacementDomainsRequest{Template: &ateenvv1alpha.Template{Name: "layered", Atespace: "t-space"}})
+	_, _ = c.WarmImage(t.Context(), &ateenvv1alpha.WarmImageRequest{RootfsImage: "registry.example/repo@" + digest, Nodes: 1, Template: &ateenvv1alpha.Template{Name: "layered", Atespace: "t-space"}}, nil)
 
 	spans := map[string][]sdktrace.ReadOnlySpan{}
 	for _, s := range rec.Ended() {
@@ -452,6 +454,7 @@ func TestTracingCallerConnSpansMatchPythonClient(t *testing.T) {
 		"suspend_environment": "SuspendEnvironment", "delete_environment": "DeleteEnvironment",
 		"get_server_info":  "GetServerInfo",
 		"get_image_status": "GetImageStatus", "ensure_image_template": "EnsureImageTemplate",
+		"list_placement_domains": "ListPlacementDomains", "warm_image": "WarmImage",
 	} {
 		if len(spans[prefix+op]) == 0 {
 			t.Errorf("no %s span", op)
@@ -486,6 +489,14 @@ func TestTracingCallerConnSpansMatchPythonClient(t *testing.T) {
 	}
 	if _, ok := attrs(spans[prefix+"get_environment"][0])[env.AttrAtespace]; ok {
 		t.Error("get_environment records an empty ate.atespace")
+	}
+	// The template RPCs record the template they were asked about, as the
+	// Python client's image_status, list_placement_domains and warm_image do.
+	for _, op := range []string{"list_placement_domains", "warm_image"} {
+		a := attrs(spans[prefix+op][0])
+		if a[env.AttrTemplateName].AsString() != "layered" || a[env.AttrTemplateAtespace].AsString() != "t-space" {
+			t.Errorf("%s template attributes = %v, want ate.template.name=layered ate.template.atespace=t-space", op, a)
+		}
 	}
 	for _, s := range spans[prefix+"create_environment"] {
 		a := attrs(s)

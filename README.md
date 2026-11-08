@@ -302,6 +302,28 @@ An atespace has one access policy. If `ate-env` already has one, add the binding
 `kubectl ate update access-policy`. Repeat both commands for each other atespace you create
 environments in.
 
+`ListPlacementDomains` reads Substrate's workers, which takes the global viewer role, and so does
+`WarmImage` when a request leaves `nodes` 0. `ate-env manifest access-policy --global` prints that
+binding. The global policy is one object for the whole control plane and holds the owners: merge
+the binding into it with `kubectl ate get access-policy` and `kubectl ate update access-policy`,
+do not create it over the existing one. Without it `WarmImage` still works when the caller passes
+the node count; `ListPlacementDomains` has no such field and needs the role, whether it lists every
+pool or, given a template, only the pools that template's own worker selector matches.
+
+`WarmImage` retries a probe's create and resume within the probe's timeout on the failures a
+control plane under load hands out for a while (`Unavailable` from an api server restarting,
+`DeadlineExceeded` on the call, `FailedPrecondition` for a derived template not visible yet), and a
+probe's delete on `Aborted`, `Unavailable` and `ResourceExhausted` within a minute. A probe still
+there after that is listed in the coverage's `undeleted_probes` (`ate-env warm-image` prints them
+and exits non-zero): sweep them with `ate-env delete`. A probe whose resume failed ends `CRASHED`,
+which Substrate cannot delete today, so it is listed too, until the control plane takes the delete.
+Across calls, `ate-env-api` caps the probes in flight per node of one worker selector with
+`-warm-max-probes-per-node` (default 2, the default `probes_per_node`): a round takes `nodes x
+probes_per_node` slots on its selector before it creates its probes and gives them back once they
+are deleted, so a pre-flight that fans out one `warm-image` per image puts at most that many first
+boots on a node at once; a request's `probes_per_node` above the cap is refused, a round that waits
+for slots is logged, and the coverage's `waited` sums the wait.
+
 Since Substrate v0.6.0 the atenet router serves only TLS listeners and admits
 only clients whose SPIFFE ID is on its allow-list. The manifest mounts the pod
 identity certificate and the servicedns trust bundle into `ate-env-api` for
@@ -536,8 +558,8 @@ $ ate-env suspend dev1
 $ ate-env delete dev1
 ```
 
-Subcommand names (`create`, `get`, `image-status`, `delete`, `suspend`, `manifest`, `server-info`,
-`help`, `completion`) are reserved: `ate-env create` rejects them as environment IDs, because `ate-env <id> ...` cannot reach
+Subcommand names (`create`, `get`, `image-status`, `placement-domains`, `warm-image`, `delete`,
+`suspend`, `manifest`, `server-info`, `help`, `completion`) are reserved: `ate-env create` rejects them as environment IDs, because `ate-env <id> ...` cannot reach
 such an environment.
 
 `ate-env` provides help text:
@@ -555,15 +577,17 @@ Usage:
   ate-env [command]
 
 Available Commands:
-  completion  Generate the autocompletion script for the specified shell
-  create       Create and start an environment
-  delete       Delete an environment
-  get          Show an environment: template, status, node and worker selector
-  help         Help about any command
-  image-status Show the template derived for a rootfs image and whether its golden snapshot is ready
-  manifest     Generate Kubernetes manifests to deploy the system
-  server-info  Show the ate-env-api server's version and features
-  suspend      Suspend an environment
+  completion        Generate the autocompletion script for the specified shell
+  create            Create and start an environment
+  delete            Delete an environment
+  get               Show an environment: template, status, node and worker selector
+  help              Help about any command
+  image-status      Show the template derived for a rootfs image and whether its golden snapshot is ready
+  manifest          Generate Kubernetes manifests to deploy the system
+  placement-domains List the worker pools a worker selector can address: labels, nodes, slots per node
+  server-info       Show the ate-env-api server's version and features
+  suspend           Suspend an environment
+  warm-image        Put an image's layers and golden snapshot on every node of a worker pool before a run
 
 Flags:
   -h, --help      help for ate-env
@@ -656,9 +680,11 @@ Manages the lifecycle of isolated execution environments (defined in [`proto/ate
 | `GetEnvironment` | Retrieves environment details and status, the node it is on and its worker selector |
 | `GetImageStatus` | Reports the ActorTemplate derived for a digest-pinned `rootfs_image` (whether it exists) and the state of its golden snapshot: `NONE` (no template), `PENDING` (baking; environments boot from the image), `READY` (with the golden tag), `FAILED` (with the reason). Reads only. `ate-env image-status <image>` |
 | `EnsureImageTemplate` | Creates the derived ActorTemplate when it is missing, which starts the golden bake, and reports it like `GetImageStatus`; no environment is created, and a template whose bake failed is recreated the way a create would. `ate-env image-status <image> --ensure`. Advertised as feature `image_status` |
+| `ListPlacementDomains` | Reports the worker pools a per-environment worker selector can address: the labels all their schedulable workers carry (the selector), their distinct nodes, workers and slots per node, read from Substrate's workers; with a `template`, only the pools that template's own worker selector matches (`ate-env placement-domains --template`); needs the global viewer role (`ate-env manifest access-policy --global`) |
+| `WarmImage` | Server-streaming: puts one digest-pinned `rootfs_image` on every node of one domain before a run. Creates probe environments with the worker selector, resumes them and holds them until the control plane reports them `RUNNING` (the layers and the golden snapshot are on the node by then), reads their nodes, deletes them, and repeats until every node ran the image or `max_rounds` is spent; streams a probe per environment and ends with the coverage. A probe's create, resume and delete are retried on the transient failures of a control plane under load, within the probe's timeout; the probes a call could not delete are listed in the coverage's `undeleted_probes` for a sweep, and the server caps the probes in flight per node of one selector across calls (`-warm-max-probes-per-node`). `nodes` 0 counts the matching workers' nodes, which takes the same role |
 | `SuspendEnvironment` | Suspends and checkpoints the environment: to snapshot storage by default, or to its node first with `mode: SUSPEND_MODE_LOCAL` (the upload follows in the background) |
 | `DeleteEnvironment` | Deletes the environment permanently |
-| `GetServerInfo` | Reports the server implementation (`sandboxenv-rl`), its version, the version of the `go.ate.dev/substrate` module it was built against, and its optional features (`rootfs_image`, `pty`, `suspend_mode`, and `port_proxy` when enabled); answered by `ate-env-api` itself. The Substrate version is a build fact, not the version of the control plane the server talks to; Substrate has no RPC that reports that. `ate-env server-info --json` prints the four fields as one JSON object |
+| `GetServerInfo` | Reports the server implementation (`sandboxenv-rl`), its version, the version of the `go.ate.dev/substrate` module it was built against, and its optional features (`rootfs_image`, `pty`, `suspend_mode`, `image_status`, `placement_domains`, `warm_image`, and `port_proxy` when enabled); answered by `ate-env-api` itself. The Substrate version is a build fact, not the version of the control plane the server talks to; Substrate has no RPC that reports that. `ate-env server-info --json` prints the four fields as one JSON object |
 
 ### ProcessService
 
