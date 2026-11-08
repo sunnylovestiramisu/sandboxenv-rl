@@ -135,6 +135,8 @@ runnable example in [`examples/runtime-layers`](../../examples/runtime-layers).
 | `FailedPrecondition: base actor template ... not found` | Register the base in the environment's atespace first (`ate-env manifest template`) |
 | `FailedPrecondition: actor template ... exists but runs ...` | The derived name is taken by a template whose image has a different digest; delete it or use another base name |
 | `InvalidArgument: ... cannot re-root command ...` | The base's command is not an absolute path to the guest (a shell wrapper); fix the base template |
+| `InvalidArgument: base template ... overlaps the guest mount` or `... the guest must be mounted at` | Another volume is mounted at or under `/ate`, or the base mounts the guest somewhere other than once at `/ate`; fix the base template |
+| `InvalidArgument: base template ... does not start the guest from its mount` or `... has no command` | The base mounts the guest at `/ate` but its command is not `/ate/ko-app/ate-env-guest ...` (for example `/ko-app/ate-env-guest`, a shell, or none); fix the base template |
 | Environment never serves, derived template stays `Failed` | The rootfs image could not be pulled or does not start the guest (port 80 taken, no exec permission); check the worker pod logs |
 
 ## Cleanup and limits

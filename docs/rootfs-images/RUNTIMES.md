@@ -13,7 +13,7 @@ A runtime layer is three things:
 
 | part | where it is expressed | what it does |
 |---|---|---|
-| the binary | an image volume on the ActorTemplate (`--layer name=image@sha256:...=/mount`) | mounts the runtime's image read-only at a path of your choice, next to the guest at `/ate` |
+| the binary | an image volume on the ActorTemplate (`--layer name=image@sha256:...=/mount`) | mounts the runtime's image read-only at a path of your choice (not `/ate` or under it), next to the guest at `/ate` |
 | the process | a guest flag (`--sidecar '/mount/binary args...'`) | the guest starts it after it is listening, logs its output with a prefix, and restarts it with backoff if it exits |
 | its readiness | a guest flag (`--sidecar-readyz http://127.0.0.1:PORT/health`) | the guest's `/readyz`, which is the actor's wakeup probe, answers 503 until every such URL has answered 2xx once |
 | its configuration | a template flag (`--env NAME=VALUE`) | sets a variable on the container; the guest passes its environment to sidecars and to the commands it starts |

@@ -250,3 +250,71 @@ func TestDeriveImageTemplateRefusesClashWithGuestSlot(t *testing.T) {
 		})
 	}
 }
+
+// A base that already mounts the guest (the second base shape) carries its
+// mounts and command over unchanged, so it must already have the guest alone
+// at GuestMountPath and start it from there. Derive refuses one that does
+// not, with the reason, as it does a guest-as-image base. (AE-4 in
+// docs/plans/ate-env-api/acceptance-criteria.md.)
+func TestDeriveImageTemplateRefusesInjectedBaseWithGuestNotAlone(t *testing.T) {
+	data := func(path string) func(*ateapipb.ActorTemplate) {
+		return func(base *ateapipb.ActorTemplate) {
+			base.Volumes = append(base.Volumes, &ateapipb.Volume{Name: "data", DurableDir: &ateapipb.DurableDirVolumeSource{}})
+			c := base.Containers[0]
+			c.VolumeMounts = append(c.VolumeMounts, &ateapipb.VolumeMount{Name: "data", MountPath: path})
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ateapipb.ActorTemplate)
+		want   string
+	}{
+		{"mount at the guest path", data(GuestMountPath), "overlaps the guest mount"},
+		{"mount under the guest path", data(GuestMountPath + "/cache"), "overlaps the guest mount"},
+		{"guest mounted elsewhere", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].VolumeMounts[0].MountPath = "/opt/guest"
+		}, "the guest must be mounted at"},
+		{"guest also mounted elsewhere", func(base *ateapipb.ActorTemplate) {
+			c := base.Containers[0]
+			c.VolumeMounts = append(c.VolumeMounts, &ateapipb.VolumeMount{Name: GuestVolumeName, MountPath: "/opt/guest"})
+		}, "the guest must be mounted at"},
+		{"guest not mounted", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].VolumeMounts = nil
+		}, "mounted 0 times"},
+		{"second volume named guest", func(base *ateapipb.ActorTemplate) {
+			base.Volumes = append(base.Volumes, &ateapipb.Volume{Name: GuestVolumeName, DurableDir: &ateapipb.DurableDirVolumeSource{}})
+		}, "volumes are named"},
+		{"guest image not pinned", func(base *ateapipb.ActorTemplate) {
+			base.Volumes[0].GetImage().Reference = "example.com/ate-env-guest:latest"
+		}, "not pinned by digest"},
+		// The command carries over, so it must start the guest from the
+		// mount: the rootfs image has no /ko-app/ate-env-guest, and with no
+		// command its own entrypoint runs.
+		{"command outside the guest mount", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].Command = []string{defaultGuestBinary, "-workspace", "/workspace"}
+		}, "does not start the guest from its mount"},
+		{"command leaves the guest mount through ..", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].Command = []string{GuestMountPath + "/.." + defaultGuestBinary}
+		}, "does not start the guest from its mount"},
+		{"command is another binary under the guest mount", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].Command = []string{GuestMountPath + "/bin/sh", "-c", "exec " + GuestMountPath + defaultGuestBinary}
+		}, "does not start the guest from its mount"},
+		{"no command", func(base *ateapipb.ActorTemplate) {
+			base.Containers[0].Command = nil
+		}, "has no command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A valid injected base: the guest image volume mounted at /ate.
+			base, err := DeriveImageTemplate(modeABase(), "py-base", "example.com/base@sha256:"+strings.Repeat("b", 64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(base)
+			_, err = DeriveImageTemplate(base, "py-base-0123456789ab", testRootfsImage)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("DeriveImageTemplate: err = %v, want one containing %q; base volumes = %v, mounts = %v",
+					err, tc.want, base.GetVolumes(), base.GetContainers()[0].GetVolumeMounts())
+			}
+		})
+	}
+}

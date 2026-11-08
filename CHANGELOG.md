@@ -235,6 +235,16 @@ user needs to know across them.
   non-image volume named `guest`, or a mount at or under `/ate`, fails with
   `InvalidArgument` naming the clash, instead of creating a template that
   Substrate rejects for a duplicate volume or nested mounts.
+- ate-env-api: deriving an image template from a base that already mounts
+  the guest image volume fails with `InvalidArgument` when another volume is
+  mounted at or under `/ate` or the guest is not mounted exactly once at
+  `/ate`, instead of creating a template whose guest is not alone at `/ate`.
+  It also fails when the base's command does not start the guest from the
+  mount (no command, or a first argument that is not the guest binary under
+  `/ate`, such as `/ko-app/ate-env-guest`), instead of creating a template
+  whose guest is not found at boot, and when its guest volume's image is not
+  pinned by digest, as a base that runs the guest as its image already must
+  be.
 - ate-env-api: a guest call whose caller context cancels or expires while its
   wake probe is parked at the router returns `Canceled` or `DeadlineExceeded`
   instead of treating the unwoken environment as awake and recording

@@ -91,6 +91,13 @@ func ImageTemplateName(base, image string) (string, error) {
 // that image becomes the guest volume and the command is re-rooted under the
 // mount; or one that already mounts the guest as an image volume (named
 // GuestVolumeName), in which case only the container image changes.
+// Either way the guest image must be pinned by digest, and the result must be
+// a template Substrate accepts, with the guest volume alone at GuestMountPath, so a base that already claims the guest's
+// volume name or mount path, or that mounts the guest anywhere else, is
+// refused with the reason. A base that already mounts the guest must also
+// start it from the mount: its command, which carries over, must begin with
+// the guest binary's absolute path under GuestMountPath; no command, or one
+// outside the mount, is refused.
 // Everything else carries over: worker selector, snapshots, sandbox config,
 // resources, env, readiness, and any other volumes, such as extra runtime
 // layers, together with the command-line flags that start them.
@@ -142,6 +149,18 @@ func DeriveImageTemplate(base *ateapipb.ActorTemplate, name, image string) (*ate
 			return nil, fmt.Errorf("base template %q: %w", base.GetMetadata().GetName(), err)
 		}
 		c.Command = command
+	} else {
+		// The base already mounts the guest. It carries over as is, so it
+		// must already be what Substrate accepts: a guest image pinned by
+		// digest, as for the other base shape, the guest alone at
+		// GuestMountPath, and a command that starts the guest from there.
+		// Say why here.
+		if _, err := ImageDigest(guestVolume(tmpl).GetImage().GetReference()); err != nil {
+			return nil, fmt.Errorf("base template %q guest image: %w", base.GetMetadata().GetName(), err)
+		}
+		if err := checkGuestMounted(tmpl, c); err != nil {
+			return nil, fmt.Errorf("base template %q: %w", base.GetMetadata().GetName(), err)
+		}
 	}
 	c.Image = image
 	return tmpl, nil
@@ -160,6 +179,62 @@ func checkGuestSlotFree(tmpl *ateapipb.ActorTemplate, c *ateapipb.Container) err
 		if p := m.GetMountPath(); p == GuestMountPath || strings.HasPrefix(p, GuestMountPath+"/") {
 			return fmt.Errorf("volume %q is mounted at %s, which overlaps the guest mount at %s; mount it elsewhere", m.GetName(), p, GuestMountPath)
 		}
+	}
+	return nil
+}
+
+// checkGuestMounted reports an error unless a base that already has the guest
+// image volume has exactly one volume named GuestVolumeName, mounted by c
+// exactly once and at GuestMountPath, with nothing else mounted at or under
+// GuestMountPath, and c's command starts the guest from that mount
+// (checkGuestCommand).
+func checkGuestMounted(tmpl *ateapipb.ActorTemplate, c *ateapipb.Container) error {
+	named := 0
+	for _, v := range tmpl.GetVolumes() {
+		if v.GetName() == GuestVolumeName {
+			named++
+		}
+	}
+	if named > 1 {
+		return fmt.Errorf("%d volumes are named %q, but volume names must be unique; rename the extra ones", named, GuestVolumeName)
+	}
+	mounted := 0
+	for _, m := range c.GetVolumeMounts() {
+		p := m.GetMountPath()
+		switch {
+		case m.GetName() == GuestVolumeName && p == GuestMountPath:
+			mounted++
+		case m.GetName() == GuestVolumeName:
+			return fmt.Errorf("guest volume %q is mounted at %s, but the guest must be mounted at %s; mount it there only", GuestVolumeName, p, GuestMountPath)
+		case p == GuestMountPath || strings.HasPrefix(p, GuestMountPath+"/"):
+			return fmt.Errorf("volume %q is mounted at %s, which overlaps the guest mount at %s; mount it elsewhere", m.GetName(), p, GuestMountPath)
+		}
+	}
+	if mounted != 1 {
+		return fmt.Errorf("guest volume %q is mounted %d times in container %q, want once at %s", GuestVolumeName, mounted, c.GetName(), GuestMountPath)
+	}
+	return checkGuestCommand(c.GetCommand())
+}
+
+// checkGuestCommand reports an error unless command, carried over unchanged
+// from a base that already mounts the guest, starts the guest from its
+// mount: command[0] must be an absolute path that names the guest binary and
+// resolves under GuestMountPath, cleaned as rerootCommand cleans it (as a
+// lookup from "/" resolves it, so "/ate/../ko-app/ate-env-guest" is outside
+// the mount). An empty command is refused too: the container image is a
+// rootfs image, so its own entrypoint would run and the guest never starts.
+// This is the rule rerootCommand applies to a guest-as-image base, checked on
+// a command that is already re-rooted.
+func checkGuestCommand(command []string) error {
+	want := path.Join(GuestMountPath, defaultGuestBinary)
+	if len(command) == 0 {
+		return fmt.Errorf("the container has no command, but the guest must be started from its mount (%s)", want)
+	}
+	cmd0 := command[0]
+	if !strings.HasPrefix(cmd0, "/") || path.Base(cmd0) != guestBinaryName ||
+		!strings.HasPrefix(path.Clean(cmd0), GuestMountPath+"/") {
+		return fmt.Errorf("command %q does not start the guest from its mount: it must start with the absolute path of the guest binary under %s (.../%s), such as %s",
+			strings.Join(command, " "), GuestMountPath, guestBinaryName, want)
 	}
 	return nil
 }
