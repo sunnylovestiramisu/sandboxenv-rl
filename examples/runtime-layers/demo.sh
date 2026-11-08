@@ -26,11 +26,12 @@
 # Required:
 #   GUEST_IMAGE      digest-pinned ate-env-guest image (built from this repo,
 #                    at or after the -sidecar flags)
-#   SNAPSHOTS_BUCKET object-storage URL for actor snapshots
 #   ROOTFS_IMAGE       digest-pinned rootfs image, e.g. docker.io/library/python@sha256:...
 #   LAYER_IMAGE      digest-pinned STATIC busybox image (the 1.37-musl tag),
 #                    e.g. docker.io/library/busybox@sha256:...
 # Optional:
+#   SNAPSHOTS_BUCKET per-template snapshot location (needs Substrate's
+#                    PerTemplateSnapshotLocation preview gate); empty uses the cluster's
 #   OTHER_IMAGE      a second digest-pinned image for the inheritance check
 #   TEMPLATE         base template name (default layered-demo)
 #   ATESPACE         atespace (default ate-env)
@@ -39,7 +40,9 @@
 set -euo pipefail
 
 : "${GUEST_IMAGE:?set GUEST_IMAGE to the digest-pinned ate-env-guest image}"
-: "${SNAPSHOTS_BUCKET:?set SNAPSHOTS_BUCKET to the snapshot object-storage URL}"
+# SNAPSHOTS_BUCKET is optional: a per-template location, which needs Substrate's
+# PerTemplateSnapshotLocation preview gate; empty uses the cluster's location.
+SNAPSHOTS_BUCKET="${SNAPSHOTS_BUCKET:-}"
 : "${ROOTFS_IMAGE:?set ROOTFS_IMAGE to a digest-pinned rootfs image}"
 : "${LAYER_IMAGE:?set LAYER_IMAGE to a digest-pinned busybox image}"
 TEMPLATE=${TEMPLATE:-layered-demo}
@@ -57,7 +60,7 @@ step() { printf '\n== %s\n' "$*"; }
 step "register ${ATESPACE}/${TEMPLATE}: ${ROOTFS_IMAGE} + guest + busybox layer"
 "${ATE_ENV}" manifest template --template "${TEMPLATE}" --atespace "${ATESPACE}" \
   --rootfs-image "${ROOTFS_IMAGE}" --guest-image "${GUEST_IMAGE}" \
-  --snapshots-bucket "${SNAPSHOTS_BUCKET}" \
+  ${SNAPSHOTS_BUCKET:+--snapshots-bucket "${SNAPSHOTS_BUCKET}"} \
   --layer "web=${LAYER_IMAGE}=/opt/web" \
   --sidecar "${SIDECAR}" \
   --sidecar-readyz "${READYZ}" | "${KUBECTL_ATE}" create actor-template -f - >/dev/null
@@ -74,8 +77,8 @@ trap cleanup EXIT
 # wait_serving <id>: the guest answers only once the sidecar's readiness URL
 # has answered, so the first successful shell means both runtimes are up.
 wait_serving() {
-  local id=$1 i
-  for i in $(seq 1 60); do
+  local id=$1
+  for _ in $(seq 1 60); do
     if "${ATE_ENV}" "${id}" shell 'true' >/dev/null 2>&1; then return 0; fi
     sleep 3
   done

@@ -192,8 +192,7 @@ kubectl ate create atespace ate-env
 ate-env manifest access-policy | kubectl ate create access-policy -a ate-env -f -
 ate-env manifest --api-image <api-image> --worker-image <ateworker-gvisor-image> | kubectl apply -f -
 ate-env manifest auth-secret | kubectl create -f -   # the caller token; create it once
-ate-env manifest template --guest-image <guest-image> --snapshots-bucket <object-storage-url> \
-  | kubectl-ate create actor-template -f -
+ate-env manifest template --guest-image <guest-image> | kubectl-ate create actor-template -f -
 ```
 
 Try an environment. `ate-env-api` requires the token from the Secret:
@@ -228,9 +227,9 @@ Then pick an [example](#examples) or an [integration](#integrations).
 ## Deployment guide
 
 Prerequisites: a cluster with [Agent Substrate](https://github.com/agent-substrate/substrate)
-installed and a snapshots bucket. ate-env is built against Substrate
-[`475f49b0`](https://github.com/agent-substrate/substrate/commit/475f49b0) (2026-10-28, Go module
-`go.ate.dev/substrate`), and the cluster must run Substrate at or after
+installed, with its cluster snapshot location (`ate-setup --snapshot-location`). ate-env is built
+against Substrate [`274605f1`](https://github.com/agent-substrate/substrate/commit/274605f1)
+(2026-11-05, Go module `go.ate.dev/substrate`), and the cluster must run Substrate at or after
 [`48f5744c`](https://github.com/agent-substrate/substrate/commit/48f5744c) (2026-10-22): that commit
 moved the Kubernetes CRDs (`WorkerPool`, `SandboxConfig`) from `ate.dev/v1alpha1` to `ate.dev/v1`
 and the control-plane gRPC service from `/ateapi.Control` to `/substrate.ateapi.v1.Control`.
@@ -448,9 +447,16 @@ generate the Substrate ActorTemplate manifest:
 ```bash
 # --guest-image is the ate-env-guest image that `make images` printed.
 ate-env manifest template \
-  --guest-image    <registry>/ate-env-guest@sha256:<digest> \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --guest-image    <registry>/ate-env-guest@sha256:<digest> | kubectl-ate create actor-template -f -
 ```
+
+The template's snapshots go to the cluster's snapshot location. `--snapshots-bucket <url>` gives
+the template a location of its own instead; that is Substrate's `PerTemplateSnapshotLocation`
+preview feature, so ate-api-server needs the gate on and the template must be created with
+`kubectl-ate --preview` (ate-env-api opts in the same way for the templates it derives from such a
+base). A Substrate since
+[`d86746d8`](https://github.com/agent-substrate/substrate/commit/d86746d8) rejects the field
+otherwise.
 
 Each actor gets 2 CPUs and 4 GiB unless you pass `--cpu` and `--memory` (Kubernetes quantities such as
 `500m` or `8Gi`; CPU at most `999.999`, as Substrate requires). Substrate requires both limits and books them against worker capacity; templates
@@ -463,8 +469,7 @@ it with `--rootfs-image`: the guest is then mounted into it as a read-only OCI i
 ```bash
 ate-env manifest template --template py312 \
   --rootfs-image   docker.io/library/python@sha256:<digest> \
-  --guest-image    <registry>/ate-env-guest@sha256:<digest> \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --guest-image    <registry>/ate-env-guest@sha256:<digest> | kubectl-ate create actor-template -f -
 ```
 
 A second runtime rides along the same way: `--layer` mounts its image read-only next to the
@@ -482,8 +487,7 @@ ate-env manifest template --template layered \
   --guest-image    <registry>/ate-env-guest@sha256:<digest> \
   --layer          web=docker.io/library/busybox@sha256:<digest of the 1.37-musl tag>=/opt/web \
   --sidecar        '/opt/web/bin/busybox httpd -f -p 44772 -h /' \
-  --sidecar-readyz http://127.0.0.1:44772/etc/hostname \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --sidecar-readyz http://127.0.0.1:44772/etc/hostname | kubectl-ate create actor-template -f -
 ```
 
 Layers must be self-contained: the `1.37-musl` busybox is static, while the glibc build fails
@@ -981,7 +985,7 @@ GOWORK=off make ci-go
 The Go module graph decides where Substrate comes from. When a workspace is active (or a `replace` directive is present in `go.mod`), the following tools automatically build against and run with your local Substrate checkout instead of the `go.mod` pin:
 - **Go compilation and test suites (`make ci-go` / `go build ./...` / `go test ./...`):** The Go compiler natively loads Substrate packages from the workspace directory.
 - **Substrate locator (`ensure-substrate`):** Discovers the local override from the module graph, prints the local directory, and skips commit hash checks (strict hash verification only applies when there is no override).
-- **Kind E2E integration pipeline (`make ci-e2e` / `hack/ci/e2e.py`):** Relies on `ensure-substrate` to build `kubectl-ate` from your local Substrate tree, compile the `ateworker-gvisor` container image from your local source, and execute cluster setup scripts (`hack/create-kind-cluster.sh` and `hack/install-ate-kind.sh`) directly from the local Substrate directory.
+- **Kind E2E integration pipeline (`make ci-e2e` / `hack/ci/e2e.py`):** Relies on `ensure-substrate` to build `kubectl-ate` from your local Substrate tree, compile the `ateworker-gvisor` container image from your local source, and execute cluster setup scripts (`hack/create-kind-cluster.sh` and `go run ./cmd/ate-setup --kind deploy ate-system`) directly from the local Substrate directory.
 
 Other tools do not consult the Go module graph: `check-pins` validates Nix and container digests against repository manifests, `nix devShell` manages CLI toolchain binaries, and `check-substrate-head` manages its own isolated target ref or temporary workspace.
 

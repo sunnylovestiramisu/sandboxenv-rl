@@ -52,6 +52,15 @@ import (
 // HTTP/2 wire form so dataplane configuration and metadata are native.
 const TargetActorHeader = "ate-target-actor"
 
+// PreviewHeader is the gRPC metadata key with which a client opts in to the
+// preview features ate-api-server has enabled; kubectl-ate --preview sends
+// it. CreateActorTemplate sends it for a template that names its own
+// snapshotConfig.storageLocation, a PerTemplateSnapshotLocation preview
+// feature: a derived template inherits the field from a base that was itself
+// created with the opt-in, and a server without the gate rejects the field
+// either way.
+const PreviewHeader = "ate-preview-allowed"
+
 // DefaultHostSuffix is the DNS suffix the atenet router uses to identify
 // actors: requests with Host "<id>.<suffix>" are routed to actor <id>.
 const DefaultHostSuffix = "actors.resources.substrate.ate.dev"
@@ -538,6 +547,9 @@ func (c *Client) CreateActorTemplate(ctx context.Context, tmpl *ateapipb.ActorTe
 	}
 	if tmpl.GetMetadata().GetAtespace() == "" {
 		tmpl.Metadata.Atespace = DefaultAtespace
+	}
+	if tmpl.GetSnapshotConfig().GetStorageLocation() != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, PreviewHeader, "true")
 	}
 	created, err := c.control.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: tmpl})
 	if err != nil {

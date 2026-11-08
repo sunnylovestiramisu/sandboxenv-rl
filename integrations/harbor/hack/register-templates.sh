@@ -24,8 +24,7 @@
 #   register-templates.sh [--prefix harbor-] <tasks-dir> [-- <ate-env manifest template flags>]
 #
 # The flags after `--` go on every command: at least --guest-image (digest
-# pinned) and --snapshots-bucket, plus --atespace or --workerpool when they
-# differ from the defaults.
+# pinned), plus --atespace or --workerpool when they differ from the defaults.
 set -o errexit -o nounset -o pipefail
 
 PREFIX="harbor-"

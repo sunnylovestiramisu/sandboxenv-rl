@@ -81,8 +81,8 @@ SESSION_KEY=<key> python examples/openhands/run_trajectory.py <env> \
 ```
 
 - Working directory: a terminal step runs in its `cwd`, else in `--workdir` (default `$WORKDIR`,
-  else `/`). The image's WORKDIR does not apply, because the agent-server runs in `/` where the guest
-  starts it; the same holds for `AteEnvWorkspace`'s `working_dir` and the examples' `WORKDIR`.
+  else `/`). The image's WORKDIR does not apply, because the script passes a working directory on
+  each step; the same holds for `AteEnvWorkspace`'s `working_dir` and the examples' `WORKDIR`.
 - Errors: a tool that reports an error (a non-zero exit status, a `file_editor` error) is an
   observation like any other and the run goes on. A step that cannot be executed (a malformed step,
   an unknown tool, an HTTP error, a timeout) is recorded with `"is_error": true, "failed": true`; the
@@ -129,7 +129,6 @@ images:
 ```bash
 kubectl -n ate-env port-forward deploy/ate-env-api 7777:7777 &
 GUEST_IMAGE=<registry>/ate-env-guest@sha256:<digest> \
-SNAPSHOTS_BUCKET=<object-storage-url> \
 LAYER_IMAGE=<registry>/oh-agent-server-layer@sha256:<digest> \
 IMAGES="docker.io/library/ubuntu@sha256:<digest> docker.io/library/node@sha256:<digest>" \
 examples/openhands/demo.sh
@@ -138,7 +137,9 @@ examples/openhands/demo.sh
 It also takes `BASE_IMAGE` (the glibc image the base template runs in, default a pinned
 `debian:bookworm-slim`), `PORT`, `AGENT_SERVER_ENV` (extra `NAME=VALUE` settings), `COMMAND`,
 `WORKDIR`, `API_TOKEN` (when ate-env-api runs with `-auth-token-file`) and `KEEP=1` (leave the
-environments up for the SDK scripts); see its header. It exits 1 if any agent-server did not answer.
+environments up for the SDK scripts); see its header. Set `SNAPSHOTS_BUCKET` only on a cluster with
+Substrate's `PerTemplateSnapshotLocation` preview gate on, to give the templates a snapshot location
+of their own; otherwise the cluster's location applies. It exits 1 if any agent-server did not answer.
 
 Templates are immutable and the session key is in them, also in the per-image templates that
 creates derive (`<base>-<12 hex digits of the image digest>`). The demo reuses an existing base

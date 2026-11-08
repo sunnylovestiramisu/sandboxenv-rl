@@ -117,8 +117,7 @@ ate-env manifest template --template oh-agent-server \
   --layer          oh=<registry>/oh-agent-server-layer@sha256:<digest>=/opt/oh \
   --sidecar        '/opt/oh/python/bin/python3 -m openhands.agent_server --host 0.0.0.0 --port 8000' \
   --sidecar-readyz http://127.0.0.1:8000/health \
-  --env            OH_SESSION_API_KEYS_0=<key> \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --env            OH_SESSION_API_KEYS_0=<key> | kubectl-ate create actor-template -f -
 ```
 
 This is the counterpart of agent-sandbox's SandboxTemplate and warm pool. Further agent-server

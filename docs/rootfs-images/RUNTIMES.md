@@ -37,8 +37,7 @@ ate-env manifest template --template osb-base \
   --guest-image    <registry>/ate-env-guest@sha256:<digest> \
   --layer          execd=<registry>/opensandbox/execd@sha256:<digest>=/opt/opensandbox \
   --sidecar        '/opt/opensandbox/execd' \
-  --sidecar-readyz http://127.0.0.1:44772/ready \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --sidecar-readyz http://127.0.0.1:44772/ready | kubectl-ate create actor-template -f -
 ```
 
 The resulting template has two image volumes (`execd` at `/opt/opensandbox`,

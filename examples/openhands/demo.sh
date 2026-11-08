@@ -45,12 +45,14 @@
 #
 # Required:
 #   GUEST_IMAGE       digest-pinned ate-env-guest image (with the -sidecar flags)
-#   SNAPSHOTS_BUCKET  object-storage URL for actor snapshots
 #   LAYER_IMAGE       digest-pinned layer image built from ../../integrations/openhands/layer/Dockerfile
 #   IMAGES            space-separated digest-pinned images to run the
 #                     agent-server in; any image with /bin/sh and glibc 2.31
 #                     or newer
 # Optional:
+#   SNAPSHOTS_BUCKET  per-template snapshot location (needs Substrate's
+#                     PerTemplateSnapshotLocation preview gate); empty uses
+#                     the cluster's
 #   BASE_IMAGE        digest-pinned glibc image the base template runs in
 #                     (default debian:bookworm-slim, pinned). The base
 #                     template bakes its own golden snapshot with the layer
@@ -69,9 +71,9 @@
 #                     (values cannot contain spaces)
 #   COMMAND           shell command the demo runs through the agent-server
 #                     (default: distribution, user and working directory)
-#   WORKDIR           directory COMMAND runs in (default: the agent-server's,
-#                     which is / under the guest; the image's WORKDIR does
-#                     not apply)
+#   WORKDIR           directory COMMAND runs in (default: the agent-server's
+#                     own, the image's WORKDIR: the guest starts there and
+#                     the sidecar inherits it)
 #   KEEP              1 keeps the environments and prints how to reach them
 #   TEMPLATE          base template name (default oh-agent-server)
 #   ATESPACE          atespace (default ate-env); another atespace must be in
@@ -84,7 +86,9 @@ set -euo pipefail
 umask 077
 
 : "${GUEST_IMAGE:?set GUEST_IMAGE to the digest-pinned ate-env-guest image}"
-: "${SNAPSHOTS_BUCKET:?set SNAPSHOTS_BUCKET to the snapshot object-storage URL}"
+# SNAPSHOTS_BUCKET is optional: a per-template location, which needs Substrate's
+# PerTemplateSnapshotLocation preview gate; empty uses the cluster's location.
+SNAPSHOTS_BUCKET="${SNAPSHOTS_BUCKET:-}"
 : "${LAYER_IMAGE:?set LAYER_IMAGE to the digest-pinned agent-server layer image}"
 : "${IMAGES:?set IMAGES to one or more digest-pinned images}"
 PORT=${PORT:-8000}
@@ -211,7 +215,7 @@ else
   step "register ${ATESPACE}/${TEMPLATE}: ${BASE_IMAGE%%@*} + guest + agent-server layer on port ${PORT}"
   "${ATE_ENV}" manifest template --template "${TEMPLATE}" --atespace "${ATESPACE}" \
     --rootfs-image "${BASE_IMAGE}" \
-    --guest-image "${GUEST_IMAGE}" --snapshots-bucket "${SNAPSHOTS_BUCKET}" \
+    --guest-image "${GUEST_IMAGE}" ${SNAPSHOTS_BUCKET:+--snapshots-bucket "${SNAPSHOTS_BUCKET}"} \
     --layer "oh=${LAYER_IMAGE}=/opt/oh" \
     --sidecar "/opt/oh/python/bin/python3 -m openhands.agent_server --host 0.0.0.0 --port ${PORT}" \
     --sidecar-readyz "http://127.0.0.1:${PORT}/health" \

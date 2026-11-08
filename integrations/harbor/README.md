@@ -81,8 +81,7 @@ applied) select the base:
 
   ```bash
   integrations/harbor/hack/register-templates.sh <tasks-dir> -- \
-    --guest-image <registry>/ate-env-guest@sha256:<digest> \
-    --snapshots-bucket <object-storage-url> | sh
+    --guest-image <registry>/ate-env-guest@sha256:<digest> | sh
   ```
 
 - `--override-cpus` and `--override-memory-mb` select classes the script does

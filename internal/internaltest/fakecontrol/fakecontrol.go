@@ -39,6 +39,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -54,7 +55,10 @@ type Server struct {
 	// Substrate does for an identity allowed to use but not create atespaces.
 	DenyCreateAtespace bool
 	templates          map[string]*ateapipb.ActorTemplate
-	templateSeq        int
+	// lastTemplateCreateMD is the incoming metadata of the last
+	// CreateActorTemplate call, for tests of the preview opt-in.
+	lastTemplateCreateMD metadata.MD
+	templateSeq          int
 	// RequireTemplate makes CreateActor fail with FailedPrecondition when
 	// the actor's template does not exist, as Substrate does.
 	RequireTemplate bool
@@ -360,6 +364,14 @@ func (s *Server) Template(atespace, name string) *ateapipb.ActorTemplate {
 	return proto.Clone(t).(*ateapipb.ActorTemplate)
 }
 
+// LastTemplateCreateMetadata returns the incoming gRPC metadata of the last
+// CreateActorTemplate call, or nil before the first.
+func (s *Server) LastTemplateCreateMetadata() metadata.MD {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastTemplateCreateMD.Copy()
+}
+
 // TemplateCount is how many ActorTemplates are stored.
 func (s *Server) TemplateCount() int {
 	s.mu.Lock()
@@ -424,6 +436,7 @@ func (s *Server) CreateActorTemplate(ctx context.Context, req *ateapipb.CreateAc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.templateCreates++
+	s.lastTemplateCreateMD, _ = metadata.FromIncomingContext(ctx)
 	t := req.GetActorTemplate()
 	md := t.GetMetadata()
 	if md.GetName() == "" {

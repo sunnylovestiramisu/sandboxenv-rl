@@ -134,6 +134,30 @@ user needs to know across them.
 
 ### Changed
 
+- Built against Substrate `274605f1` (2026-11-05), from `475f49b0`. The
+  control plane API is unchanged for ate-env (`MintActorCertificate`, which
+  ate-env never called, is gone). Three runtime changes reach a template.
+  Since `5d226a50` the container runs as the image's `USER` in its `WORKDIR`
+  (before: root in `/`); `ate-env-guest` sets no user, so a `--rootfs-image`
+  with a non-root `USER` runs the guest, the processes it starts and its
+  sidecars as that user, and gVisor snapshots of such templates from before
+  the upgrade do not restore: recreate them. Since `fd576d34` `/tmp` and
+  `/dev/shm` are a `tmpfs` on both runtimes (`/dev/shm` 64 MiB on gVisor,
+  `/tmp` capped at half the actor's memory) and `/run` comes from the image;
+  files an image ships under `/tmp` are hidden, and gVisor snapshots from
+  before it, goldens included, do not restore. Since `17fa8586`
+  `securityContext.capabilities.add` accepts 12 capabilities only; ate-env
+  templates set none. The Kind e2e installs Substrate with
+  `ate-setup --kind deploy ate-system`, since Substrate removed
+  `hack/install-ate-kind.sh`.
+- `ate-env manifest template`: `--snapshots-bucket` is optional. Without it
+  the template names no `snapshotConfig.storageLocation` and its snapshots go
+  to the cluster's `--snapshot-location`. With it, ate-api-server needs the
+  `PerTemplateSnapshotLocation` preview gate and the template must be created
+  with `kubectl-ate --preview`; ate-env-api sends the same opt-in when it
+  derives a template from such a base. Substrate since `d86746d8` rejects the
+  field without the gate, so a base template created earlier with a bucket
+  must be recreated without one on a cluster that has the gate off.
 - Python client: renamed distribution package from `ate-env-client` to
   `ate-env-rl` and import module from `ate_env` to `ate_env_rl`.
 - Python client: `warm_pool` pools the actors it created before it raises

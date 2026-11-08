@@ -362,9 +362,6 @@ func (c *templateConfig) resolveImages() error {
 binaries default it to the ate-env-guest image published with the release
 (see docs/release.md), or build and push your own with make images`)
 	}
-	if c.snapshotsBucket == "" {
-		return errors.New("--snapshots-bucket is required; use an object-storage bucket (e.g. gs://bucket/prefix/)")
-	}
 	if c.rootfsImage != "" {
 		if _, err := apiservice.ImageDigest(c.rootfsImage); err != nil {
 			return fmt.Errorf("--rootfs-image: %w", err)
@@ -625,7 +622,7 @@ It prints YAML to stdout without touching the cluster.`,
 	cmd.Flags().StringVar(&tCfg.atespace, "atespace", apiservice.DefaultAtespace, "Substrate atespace for the ActorTemplate")
 	cmd.Flags().StringVar(&tCfg.guestImage, "guest-image", defaultGuestImage, imageDefaultHelp("digest-pinned ate-env-guest image (repo@sha256:...)", defaultGuestImage))
 	cmd.Flags().StringSliceVar(&tCfg.guestCommand, "guest-command", []string{"/ko-app/ate-env-guest"}, "guest container entrypoint")
-	cmd.Flags().StringVar(&tCfg.snapshotsBucket, "snapshots-bucket", "", "object-storage bucket (with optional prefix) for actor snapshots, e.g. gs://bucket/prefix/")
+	cmd.Flags().StringVar(&tCfg.snapshotsBucket, "snapshots-bucket", "", "object-storage location for this template's snapshots, e.g. gs://bucket/prefix/; empty (the default) stores them under the cluster's snapshot location. A value needs Substrate's PerTemplateSnapshotLocation preview gate and kubectl-ate --preview to create the template")
 	cmd.Flags().StringVar(&tCfg.rootfsImage, "rootfs-image", "", "digest-pinned image to run unmodified; the guest is mounted into it as a read-only image volume at "+apiservice.GuestMountPath)
 	cmd.Flags().StringVar(&tCfg.workspace, "workspace", "", "workspace root inside the actor, passed to the guest as -workspace (default: the guest's default)")
 	cmd.Flags().StringArrayVar(&tCfg.layers, "layer", nil, "extra runtime mounted as a read-only image volume, as name=image@sha256:...=/mount/path (repeatable)")
@@ -873,6 +870,8 @@ func buildActorTemplate(cfg templateConfig) *ateapipb.ActorTemplate {
 			},
 		}},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
+			// Empty means the cluster's --snapshot-location. Substrate rejects a
+			// value unless its PerTemplateSnapshotLocation preview gate is on.
 			StorageLocation: cfg.snapshotsBucket,
 			// Environments must come back from suspend with their process
 			// state intact. MEMORY is also the server default, but the API

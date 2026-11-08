@@ -22,7 +22,7 @@ What it does:
   4. Deploys Agent Substrate control plane components (if provisioning fresh cluster).
   5. Compiles container images (ateworker-gvisor, ate-env-api, ate-env-guest) using ko to target registry.
   6. Applies Kubernetes manifests (atespace, access policy, caller auth Secret, WorkerPool, and ate-env-api with metrics).
-  7. Registers ActorTemplate with target snapshot bucket, environment marker, and waits for golden snapshot.
+  7. Registers the ActorTemplate (snapshots under the cluster snapshot location) with an environment marker, and waits for its golden snapshot.
   8. Forwards a free local port and runs portable smoke test, Python SDK full-stack tests, NeMo Gym provider live test, swebench-loader Go SDK smoke test, and Harbor provider live trial test.
 
 When it runs:
@@ -249,8 +249,6 @@ def deploy_manifests(
             f"{tmpl}-workerpool",
             "--guest-image",
             imgs["guest"],
-            "--snapshots-bucket",
-            target.bucket_url,
             "--env",
             f"E2E_TEMPLATE_MARKER={TEMPLATE_MARKER}",
         ],

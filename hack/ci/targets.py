@@ -53,7 +53,6 @@ class KindTarget:
 
     context: str
     registry: str
-    bucket_url: str
     platform: str
     rootfs_image: str | None
 
@@ -81,12 +80,13 @@ class KindTarget:
         else:
             self.keep_cluster = os.environ.get("KEEP_CLUSTER") in ("1", "true", "TRUE")
 
-        # Fixed by Substrate's Kind scripts; deliberately not read from the
-        # environment so a shell set up for GKE (KUBECTL_CONTEXT, KO_DOCKER_REPO,
-        # BUCKET_NAME) cannot redirect a Kind run.
+        # Fixed by Substrate's Kind profile (`ate-setup --kind`); deliberately not
+        # read from the environment so a shell set up for GKE (KUBECTL_CONTEXT,
+        # KO_DOCKER_REPO) cannot redirect a Kind run. The profile also puts the
+        # cluster snapshot location on its bundled object store
+        # (gs://ate-snapshots/), so templates name no bucket of their own.
         self.context = f"kind-{self.cluster_name}"
         self.registry = f"localhost:{os.environ.get('KIND_REGISTRY_PORT', '5001')}"
-        self.bucket_url = "gs://ate-snapshots"
         goarch = lib.run("go", "env", "GOARCH").stdout.strip()
         self.platform = f"linux/{goarch}"
 
@@ -110,8 +110,6 @@ class KindTarget:
         os.environ["KIND_CLUSTER_NAME"] = self.cluster_name
         os.environ["KUBECTL_CONTEXT"] = self.context
         os.environ["KO_DOCKER_REPO"] = self.registry
-        bucket = self.bucket_url.removeprefix("gs://") if self.bucket_url.startswith("gs://") else self.bucket_url
-        os.environ["BUCKET_NAME"] = bucket
 
         if self.reuse:
             if self.cluster_name not in existing:
@@ -140,8 +138,14 @@ class KindTarget:
             "ATE_INGRESS_ALLOWED_SPIFFE_IDS",
             f"spiffe://cluster.local/ns/{self.namespace}/sa/ate-env-api,spiffe://cluster.local/ns/ate-system/sa/default",
         )
+        # Substrate removed hack/install-ate-kind.sh (substrate#3354); --kind
+        # selects the same profile: the kind-$KIND_CLUSTER_NAME context, the
+        # local registry and the bundled object store.
         lib.run(
-            str(self.sub_dir / "hack/install-ate-kind.sh"),
+            "go",
+            "run",
+            "./cmd/ate-setup",
+            "--kind",
             "deploy",
             "ate-system",
             '--credential-provider={"name":"k8s.io"}',

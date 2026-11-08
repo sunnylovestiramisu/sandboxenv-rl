@@ -83,8 +83,37 @@ func TestTemplateConfigResolveImages(t *testing.T) {
 	}
 	cfg = testTemplateConfig()
 	cfg.snapshotsBucket = ""
-	if err := cfg.resolveImages(); err == nil {
-		t.Error("resolveImages with a missing snapshots bucket: want error, got nil")
+	if err := cfg.resolveImages(); err != nil {
+		t.Errorf("resolveImages without a snapshots bucket: %v, want nil (the cluster location applies)", err)
+	}
+}
+
+// Without --snapshots-bucket the template names no storageLocation, so a
+// Substrate without the PerTemplateSnapshotLocation preview gate accepts it
+// and stores its snapshots under the cluster's --snapshot-location.
+func TestTemplateWithoutSnapshotsBucketNamesNoLocation(t *testing.T) {
+	cfg := testTemplateConfig()
+	cfg.snapshotsBucket = ""
+	template := buildActorTemplate(cfg)
+	if got := template.GetSnapshotConfig().GetStorageLocation(); got != "" {
+		t.Errorf("storageLocation = %q, want empty", got)
+	}
+	if got := template.GetSnapshotConfig().GetPreferredFidelity(); got != ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		t.Errorf("preferred fidelity = %v, want SNAPSHOT_FIDELITY_MEMORY", got)
+	}
+	var buf bytes.Buffer
+	if err := writeActorTemplate(&buf, template); err != nil {
+		t.Fatalf("writeActorTemplate: %v", err)
+	}
+	if out := buf.String(); strings.Contains(out, "storageLocation") || !strings.Contains(out, "preferredFidelity: SNAPSHOT_FIDELITY_MEMORY") {
+		t.Errorf("rendered template must keep the fidelity and name no storageLocation:\n%s", out)
+	}
+	cmd := newManifestCommand()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"template", "--guest-image=example.com/guest@sha256:aaaa"})
+	if err := cmd.Execute(); err != nil {
+		t.Errorf("manifest template without --snapshots-bucket: %v", err)
 	}
 }
 

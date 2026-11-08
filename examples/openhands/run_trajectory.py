@@ -36,8 +36,7 @@ when the script is interrupted.
 
 Working directory. Terminal commands run in a step's ``cwd``, else in
 ``--workdir`` (default: ``$WORKDIR``, else ``/``). The image's WORKDIR does
-not apply: the agent-server runs in ``/``, where the guest starts it, and the
-SDK sends no directory of its own.
+not apply: each command goes with a working directory.
 
 The tool runner is started at the beginning and stopped at the end (also on
 an error), so it does not outlive the run or end up in a snapshot.

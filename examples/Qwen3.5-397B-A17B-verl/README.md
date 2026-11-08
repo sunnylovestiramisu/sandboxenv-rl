@@ -66,7 +66,7 @@ kubectl -n ate-env patch workerpool default-template-workerpool --type=merge -p 
   "nodeSelector":{"ate.dev/sandboxClass":"gvisor"},
   "resources":{"requests":{"cpu":"12","memory":"110Gi"},"limits":{"cpu":"12","memory":"110Gi"}}}}}'
 ate-env manifest template --template swe-1c4g --cpu 1 --memory 4Gi --workerpool default-template-workerpool \
-    --atespace ate-env | kubectl-ate create actor-template -f -      # ATE_TEMPLATE; add --snapshots-bucket / --guest-image as in the Quickstart
+    --atespace ate-env | kubectl-ate create actor-template -f -      # ATE_TEMPLATE; add --guest-image as in the Quickstart
 
 # 2. data slices + digest-pinned images (once per slice; match TRAIN_SOURCE / TRAIN_SEED / TRAIN_INSTANCES in the profile)
 python3 -m uni_agent_substrate.datasets --source r2e_gym_easy --shuffle-seed 0 --max-instances 700 --images-out images.txt --out /tmp/train.parquet   # *-easy: whole set

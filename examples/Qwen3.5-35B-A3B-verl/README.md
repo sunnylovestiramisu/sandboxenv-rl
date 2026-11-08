@@ -54,7 +54,7 @@ kubectl -n ate-env patch workerpool default-template-workerpool --type=merge -p 
   "nodeSelector":{"ate.dev/sandboxClass":"gvisor"},
   "resources":{"requests":{"cpu":"12","memory":"110Gi"},"limits":{"cpu":"12","memory":"110Gi"}}}}}'
 ate-env manifest template --template swe-2c6g --cpu 2 --memory 6Gi --workerpool default-template-workerpool \
-    --atespace ate-env | kubectl-ate create actor-template -f -          # add --snapshots-bucket / --guest-image as in the Quickstart
+    --atespace ate-env | kubectl-ate create actor-template -f -          # add --guest-image as in the Quickstart
 
 # 2. dataset slices and digest-pinned images (once per slice)
 pip install -e '../../integrations/uni-agent[datasets]'

@@ -80,8 +80,7 @@ from your deployment:
 
 ```bash
 integrations/harbor/hack/register-templates.sh ./tb2/terminal-bench -- \
-  --guest-image <registry>/ate-env-guest@sha256:<digest> \
-  --snapshots-bucket <object-storage-url> | sh
+  --guest-image <registry>/ate-env-guest@sha256:<digest> | sh
 ```
 
 Without a class template the provider falls back to `default-template` with a

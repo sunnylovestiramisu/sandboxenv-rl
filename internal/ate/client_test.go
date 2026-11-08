@@ -414,3 +414,43 @@ func TestNewControlClientInSynctest(t *testing.T) {
 		}
 	})
 }
+
+// A template that names its own snapshotConfig.storageLocation uses the
+// PerTemplateSnapshotLocation preview feature, so its create carries the
+// preview opt-in header; one without the field does not.
+func TestCreateActorTemplatePreviewOptIn(t *testing.T) {
+	control := fakecontrol.New()
+	addr, stop, err := control.Serve()
+	if err != nil {
+		t.Fatalf("starting fake control plane: %v", err)
+	}
+	t.Cleanup(stop)
+	client, err := ate.New(ate.Options{ControlAddr: addr, SkipVerify: true})
+	if err != nil {
+		t.Fatalf("ate.New: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	plain := &ateapipb.ActorTemplate{
+		Metadata:   &ateapipb.ResourceMetadata{Name: "plain", Atespace: "ate-env"},
+		Containers: []*ateapipb.Container{{Name: "guest", Image: "example.com/guest@sha256:aaaa"}},
+	}
+	if _, err := client.CreateActorTemplate(t.Context(), plain); err != nil {
+		t.Fatalf("CreateActorTemplate(plain): %v", err)
+	}
+	if got := control.LastTemplateCreateMetadata().Get(ate.PreviewHeader); len(got) != 0 {
+		t.Errorf("template without a storageLocation sent %s=%q, want no header", ate.PreviewHeader, got)
+	}
+
+	located := &ateapipb.ActorTemplate{
+		Metadata:       &ateapipb.ResourceMetadata{Name: "located", Atespace: "ate-env"},
+		Containers:     []*ateapipb.Container{{Name: "guest", Image: "example.com/guest@sha256:aaaa"}},
+		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://bucket/prefix/"},
+	}
+	if _, err := client.CreateActorTemplate(t.Context(), located); err != nil {
+		t.Fatalf("CreateActorTemplate(located): %v", err)
+	}
+	if got := control.LastTemplateCreateMetadata().Get(ate.PreviewHeader); len(got) != 1 || got[0] != "true" {
+		t.Errorf("template with a storageLocation sent %s=%q, want [true]", ate.PreviewHeader, got)
+	}
+}

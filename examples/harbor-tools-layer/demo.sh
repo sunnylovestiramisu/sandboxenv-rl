@@ -27,7 +27,8 @@
 # Environment:
 #   LAYER_REPO                   where the layer goes, e.g. us-central1-docker.pkg.dev/<project>/harbor/tools-layer
 #   GUEST_IMAGE                  digest-pinned ate-env-guest image, for the templates
-#   SNAPSHOTS_BUCKET             object-storage URL for actor snapshots, for the templates
+#   SNAPSHOTS_BUCKET             optional per-template snapshot location (needs Substrate's
+#                                PerTemplateSnapshotLocation preview gate); empty uses the cluster's
 #   SUBSTRATE_ENV_API            the port-forwarded ate-env-api (run-tb2.sh needs it)
 #   SUBSTRATE_ENV_AUTH_TOKEN     the caller token, when the API requires one
 #   TEMPLATE_FLAGS               more `ate-env manifest template` flags, e.g. --atespace or --workerpool
@@ -41,7 +42,7 @@ shift
 
 : "${LAYER_REPO:?set LAYER_REPO to the repository the layer is pushed to}"
 : "${GUEST_IMAGE:?set GUEST_IMAGE to the digest-pinned ate-env-guest image}"
-: "${SNAPSHOTS_BUCKET:?set SNAPSHOTS_BUCKET to the snapshots bucket URL}"
+SNAPSHOTS_BUCKET="${SNAPSHOTS_BUCKET:-}"
 
 MOUNT=/opt/harbor-tools
 TAG="${LAYER_REPO}:tmux-3.8"
@@ -58,7 +59,7 @@ echo "== layer: ${LAYER_REF}"
 echo "== resource class templates for ${TASKS}, with the layer at ${MOUNT}"
 # shellcheck disable=SC2086
 COMMANDS="$("${ROOT}/integrations/harbor/hack/register-templates.sh" "${TASKS}" -- \
-  --guest-image "${GUEST_IMAGE}" --snapshots-bucket "${SNAPSHOTS_BUCKET}" \
+  --guest-image "${GUEST_IMAGE}" ${SNAPSHOTS_BUCKET:+--snapshots-bucket "${SNAPSHOTS_BUCKET}"} \
   --layer "tools=${LAYER_REF}=${MOUNT}" ${TEMPLATE_FLAGS:-})"
 printf '%s\n' "${COMMANDS}"
 if [[ "${APPLY:-}" == "1" ]]; then

@@ -20,9 +20,8 @@ Environment: ``API`` (ate-env-api address, default 127.0.0.1:7777),
 port, default 8000), ``SESSION_KEY`` (the template's
 ``OH_SESSION_API_KEYS_0``), ``WORKDIR`` (where
 commands run and what relative paths resolve against; default ``/``). The
-image's WORKDIR does not apply: the agent-server runs in ``/``, where the
-guest starts it, and the SDK sends no directory unless given one, thus set
-``WORKDIR=/testbed`` on a SWE-bench image.
+image's WORKDIR does not apply: the SDK runs each command in ``WORKDIR``,
+thus set ``WORKDIR=/testbed`` on a SWE-bench image.
 """
 
 from __future__ import annotations

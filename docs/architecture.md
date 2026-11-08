@@ -281,7 +281,7 @@ Key non-obvious points:
 
 ## Relationship to Substrate
 
-`sandboxenv-rl` builds on `go.ate.dev/substrate` (`475f49b0`, `ate.dev/v1` CRDs and
+`sandboxenv-rl` builds on `go.ate.dev/substrate` (`274605f1`, `ate.dev/v1` CRDs and
 `substrate.ateapi.v1.Control`):
 
 - **Delegated to Substrate**: Sandbox isolation (gVisor `runsc`), worker pod scheduling, durable

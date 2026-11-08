@@ -399,7 +399,7 @@ class AteEnvEnvironment(BaseEnvironment):
             self._template_prefix,
             cpus,
             memory,
-            extra=("--guest-image", "<guest@sha256:...>", "--snapshots-bucket", "<url>"),
+            extra=("--guest-image", "<guest@sha256:...>"),
         )
         return f"{command} (integrations/harbor/hack/register-templates.sh prints these)"
 

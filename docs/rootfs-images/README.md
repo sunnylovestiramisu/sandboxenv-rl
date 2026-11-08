@@ -56,8 +56,7 @@ name, resources or workspace.
 ate-env manifest template --template py312 \
   --rootfs-image     docker.io/library/python@sha256:<digest> \
   --guest-image    <registry>/ate-env-guest@sha256:<digest> \
-  --workspace      /workspace \
-  --snapshots-bucket <object-storage-url> | kubectl-ate create actor-template -f -
+  --workspace      /workspace | kubectl-ate create actor-template -f -
 
 ate-env create job1 --template py312
 ```

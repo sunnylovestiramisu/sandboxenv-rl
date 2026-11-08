@@ -16,7 +16,6 @@ inherited, and deletes what it created.
 kubectl -n ate-env port-forward svc/ate-env-api 7777:7777 &
 
 GUEST_IMAGE=<registry>/ate-env-guest@sha256:<digest> \
-SNAPSHOTS_BUCKET=<object-storage-url> \
 ROOTFS_IMAGE=docker.io/library/python@sha256:<digest> \
 LAYER_IMAGE=docker.io/library/busybox@sha256:<digest of the 1.37-musl tag> \
 OTHER_IMAGE=docker.io/library/node@sha256:<digest> \
@@ -25,7 +24,10 @@ examples/runtime-layers/demo.sh
 
 Digests for public images come from `crane digest --platform linux/amd64
 python:3.12-slim` or `docker manifest inspect`. The guest image must be built
-from a revision of this repo that has the `-sidecar` flags.
+from a revision of this repo that has the `-sidecar` flags. Set
+`SNAPSHOTS_BUCKET` only on a cluster with Substrate's `PerTemplateSnapshotLocation`
+preview gate on, to give the template a snapshot location of its own; otherwise
+the cluster's location applies.
 
 Use the `busybox:1.37-musl` tag, which is statically linked. The default
 `busybox:1.37` is built against glibc and only runs on rootfs images whose glibc

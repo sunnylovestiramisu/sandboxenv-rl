@@ -9,7 +9,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/spf13/cobra v1.10.2
-	go.ate.dev/substrate v0.6.1-0.20261028195031-475f49b02335
+	go.ate.dev/substrate v0.6.1-0.20261105194526-274605f1f2a8
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0

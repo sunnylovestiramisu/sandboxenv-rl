@@ -59,7 +59,6 @@ needs carries it. The flag is `--layer <name>=<image@sha256:...>=<mount path>`:
 ```bash
 integrations/harbor/hack/register-templates.sh ./tb2/terminal-bench -- \
   --guest-image <registry>/ate-env-guest@sha256:<digest> \
-  --snapshots-bucket <object-storage-url> \
   --layer "tools=$LAYER_REF=/opt/harbor-tools" | bash -euo pipefail
 ```
 
@@ -87,7 +86,7 @@ paths.
 [`demo.sh`](demo.sh) does the three steps in a row for a tasks directory:
 
 ```bash
-LAYER_REPO=... GUEST_IMAGE=... SNAPSHOTS_BUCKET=... APPLY=1 \
+LAYER_REPO=... GUEST_IMAGE=... APPLY=1 \
   examples/harbor-tools-layer/demo.sh ./tb2/terminal-bench -a terminus-2 -m <model> -n 10
 ```
 

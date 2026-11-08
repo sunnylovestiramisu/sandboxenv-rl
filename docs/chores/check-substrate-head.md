@@ -55,7 +55,7 @@ Follow these numbered steps to upgrade `go.ate.dev/substrate`:
    ```
    [`hack/ci/ensure-substrate.sh`](../../hack/ci/ensure-substrate.sh) resolves Substrate via the Go module graph. When developing against a local checkout with `go.work` or a `replace` directive, the local tree is used directly without hash checks. Without an override, it clones or checks out the exact pin into `${XDG_CACHE_HOME}/sandboxenv-rl/substrate-<ref>` and strictly validates that HEAD matches the expected hash.
 
-   If Substrate changes `hack/install-ate-kind.sh`'s CLI, update [`hack/ci/targets.py`](../../hack/ci/targets.py) when bumping.
+   If Substrate changes the flags of `ate-setup --kind deploy ate-system`, update [`hack/ci/targets.py`](../../hack/ci/targets.py) when bumping.
 
 7. Optionally verify against a running cluster:
    ```bash
