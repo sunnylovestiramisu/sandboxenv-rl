@@ -50,13 +50,20 @@ This document is the canonical reference for common failure modes, diagnostic st
   ```
 
 ### Router TLS and SPIFFE authorization
-- **Symptom:** Remote shell execution or file I/O fails with `FailedPrecondition` or `Unavailable: connection reset by peer` when talking through the `atenet` router.
+- **Symptom:** Remote shell execution or file I/O fails at once with `FailedPrecondition` (the router rejected `ate-env-api`'s client certificate) or `Unavailable: connection reset by peer` when talking through the `atenet` router.
 - **Cause:** Substrate v0.6.0+ enforces mutual TLS (mTLS) and SPIFFE ID authorization on the router. Calls from `ate-env-api` to guest actors must present a certificate whose SPIFFE ID matches `ATE_INGRESS_ALLOWED_SPIFFE_IDS`.
-- **Fix:** Verify that the router's allowed SPIFFE IDs include the `ate-env-api` service account identity:
+- **Fix:** Verify that the router's allowed SPIFFE IDs include the `ate-env-api` service account identity and that the router trusts the podidentity signer. `ate-env-api` logs the ID it presents at startup.
+
+### Router allow-list is empty
+- **Symptom:** Creates succeed, but each guest call retries and then fails with `Unavailable` and `connection refused`. It retries for the running budget (`--wake-running-budget`, 20 s by default) when the environment is RUNNING, or for the wake budget (`--wake-budget`, 5 min by default) while it wakes. The port proxy answers 502 at once.
+- **Cause:** The router's allow-list is empty. ate-setup does not check it (since Substrate [`c093a40c`](https://github.com/agent-substrate/substrate/commit/c093a40c)). With the default Envoy dataplane, a router without it serves no TLS listener, thus no client reaches any actor. The router logs `No --ingress-allowed-spiffe-ids, so the router serves no traffic` at startup.
+- **Fix:** Set the router's allowed SPIFFE IDs to the `ate-env-api` service account identity and rerun `ate-setup deploy`:
   ```bash
-  export ATE_INGRESS_ALLOWED_SPIFFE_IDS="spiffe://cluster.local/ns/ate-env/sa/ate-env-api,spiffe://cluster.local/ns/ate-system/sa/default"
+  export ATE_INGRESS_ALLOWED_SPIFFE_IDS="spiffe://cluster.local/ns/ate-env/sa/ate-env-api"
   ```
-  In automated Kind runs, [`hack/ci/e2e.py`](../../hack/ci/e2e.py) configures this automatically.
+  Add `spiffe://cluster.local/ns/ate-system/sa/atenet-client` only if you use `kubectl ate proxy actor`: that ID lets each user who can create PodCertificateRequests in `ate-system` reach each actor.
+
+  In automated Kind runs, [`hack/ci/targets.py`](../../hack/ci/targets.py) sets `ATE_INGRESS_ALLOWED_SPIFFE_IDS` to `spiffe://cluster.local/ns/<namespace>/sa/ate-env-api,spiffe://cluster.local/ns/ate-system/sa/default` unless the environment sets it.
 
 ---
 

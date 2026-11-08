@@ -158,4 +158,5 @@ the actors on that cluster have no egress.
 | The create succeeds, then `did not answer within 600s` | The nodes cannot pull the image from the registry, the image has no `sh`, or port 80 is taken inside it. Check the derived template's state and the worker pod logs. |
 | `apt-get` or `curl` fail inside the task | No egress from the actors (prerequisites). |
 | The verifier fails at its first command with a permission error | The image runs as a non-root user and has no `sudo`; see the provider README's limits. |
-| A guest call hangs, then fails | The router rejected `ate-env-api`'s certificate: its SPIFFE ID is missing from the router's allow-list. |
+| A guest call hangs, then fails with `Unavailable` and `connection refused` | The router's allow-list is empty, thus the router serves no TLS listener. ate-setup does not check the list. Set it to ate-env-api's SPIFFE ID (root README, deployment guide). |
+| A guest call fails at once with `FailedPrecondition` about the client certificate | The router rejected `ate-env-api`'s certificate: its SPIFFE ID is missing from the router's allow-list. |
