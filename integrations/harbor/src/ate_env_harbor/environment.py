@@ -266,14 +266,19 @@ class AteEnvEnvironment(BaseEnvironment):
         )
 
     @classmethod
-    def preflight(cls) -> None:
-        """Check the API named by ``SUBSTRATE_ENV_API`` before trials are queued.
+    def preflight(cls, kwargs: dict[str, Any] | None = None) -> None:
+        """Check that ate-env-api answers before trials are queued.
 
-        Kwargs are not known here, thus only the environment variables are
-        checked; an ``api_url`` kwarg is checked when the first trial starts.
+        Harbor 0.26 passes the job's environment kwargs (0.25 passes none): the
+        endpoint is the ``api_url`` kwarg, else ``SUBSTRATE_ENV_API``. Without
+        either the check is skipped and the default endpoint is tried when the
+        first trial starts.
         """
-        api = os.environ.get(API_ENV)
-        token = os.environ.get(TOKEN_ENV) or None
+        # Harbor 0.25's BaseEnvironment.preflight takes no kwargs; call
+        # super().preflight(kwargs) when the pin moves to 0.26.
+        options = kwargs or {}
+        api = options.get("api_url") or os.environ.get(API_ENV)
+        token = options.get("api_token") or os.environ.get(TOKEN_ENV) or None
         if not api:
             _logger.debug("%s is not set; skipping the ate-env preflight", API_ENV)
             return

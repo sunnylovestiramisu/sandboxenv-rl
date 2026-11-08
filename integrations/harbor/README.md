@@ -40,8 +40,9 @@ Each setting is a constructor kwarg and an `--ek key=value` flag (repeatable).
 | `tool_paths` | none | Directories a runtime layer mounts into the environment, `:`-separated, put first on `PATH` for every command; `start` fails when one is missing. See [Tools as a second layer](#tools-as-a-second-layer) |
 | `tool_paths_profile` | `/etc/profile.d/zz-harbor-tools.sh` | The drop-in that gives login shells the tool paths; written at `start` when `tool_paths` is set, a warning when the image user cannot write it; empty disables it |
 
-`preflight()` checks `SUBSTRATE_ENV_API` (reachable, token accepted) before any
-trial is queued; an `api_url` kwarg is checked when the first trial starts.
+`preflight()` checks the API (the `api_url` kwarg Harbor 0.26 passes, else
+`SUBSTRATE_ENV_API`; reachable, token accepted) before any trial is queued; without
+either, the default endpoint is tried when the first trial starts.
 
 ## Images
 

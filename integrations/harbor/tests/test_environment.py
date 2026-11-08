@@ -595,6 +595,14 @@ async def test_preflight_checks_the_api_from_the_environment(fake, monkeypatch):
         await asyncio.to_thread(AteEnvEnvironment.preflight)
     monkeypatch.setenv("SUBSTRATE_ENV_AUTH_TOKEN", "tok")
     await asyncio.to_thread(AteEnvEnvironment.preflight)
+    # Harbor 0.26 passes the job kwargs: api_url and api_token select the probe.
+    monkeypatch.delenv("SUBSTRATE_ENV_API")
+    monkeypatch.delenv("SUBSTRATE_ENV_AUTH_TOKEN")
+    await asyncio.to_thread(
+        AteEnvEnvironment.preflight, {"api_url": fake.addr, "api_token": "tok"}
+    )
+    with pytest.raises(SystemExit, match="SUBSTRATE_ENV_AUTH_TOKEN"):
+        await asyncio.to_thread(AteEnvEnvironment.preflight, {"api_url": fake.addr})
     monkeypatch.setenv("SUBSTRATE_ENV_API", "127.0.0.1:1")
     with pytest.raises(SystemExit, match="cannot reach|no answer"):
         await asyncio.to_thread(AteEnvEnvironment.preflight)
