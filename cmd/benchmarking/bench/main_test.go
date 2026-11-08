@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	"github.com/agent-substrate/env/internal/ate"
 	"github.com/agent-substrate/env/internal/benchmarking/measure"
 	"github.com/agent-substrate/env/internal/benchmarking/schema"
+	"github.com/agent-substrate/env/internal/benchmarking/sut"
 	"github.com/agent-substrate/env/internal/benchmarking/swebench"
 	"github.com/agent-substrate/env/internal/internaltest/fakecontrol"
 	"github.com/agent-substrate/env/internal/internaltest/fakerouter"
@@ -765,5 +767,80 @@ func TestBenchValidateBundleAndUpload(t *testing.T) {
 	wantTarget := "gs://example-bench-bucket/2026-10-28_qwen3.5-35b_r2e-gym-easy_prewarmed_traced/"
 	if fakeUp.calls[0][1] != wantTarget {
 		t.Fatalf("expected upload target %q, got %q", wantTarget, fakeUp.calls[0][1])
+	}
+}
+
+// fakeLiveReaper is a LiveResourceListerDeleter over an in-memory set of
+// environment ids.
+type fakeLiveReaper struct {
+	live    map[string]bool
+	deleted []string
+}
+
+func (f *fakeLiveReaper) ListEnvironments(_ context.Context, _ string) ([]string, error) {
+	var ids []string
+	for id := range f.live {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (f *fakeLiveReaper) DeleteEnvironment(_ context.Context, _, id string) error {
+	delete(f.live, id)
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
+// The scripts pass -prefix "<run id>-", the environment name prefix. The run
+// id of the events in events/reap.jsonl is the prefix without that dash, so
+// the reap joins the run's other events.
+func TestReapCmdTrimsPrefixDashFromRunID(t *testing.T) {
+	dir := t.TempDir()
+	fake := &fakeLiveReaper{live: map[string]bool{"run-0": true, "run-1": true, "other-0": true}}
+	origDial := dialReaper
+	dialReaper = func(string) (sut.LiveResourceListerDeleter, func() error, error) {
+		return fake, func() error { return nil }, nil
+	}
+	t.Cleanup(func() { dialReaper = origDial })
+
+	var out, errBuf bytes.Buffer
+	if err := reapCmd([]string{"-ate-endpoint", "fake:7443", "-atespace", "ate-env", "-prefix", "run-", "-dest", dir}, &out, &errBuf); err != nil {
+		t.Fatalf("reapCmd failed: %v (stderr=%s)", err, errBuf.String())
+	}
+	if !fake.live["other-0"] || len(fake.deleted) != 2 {
+		t.Fatalf("deleted %v, live %v; want run-0 and run-1 deleted and other-0 kept", fake.deleted, fake.live)
+	}
+
+	f, err := os.Open(filepath.Join(dir, "events", "reap.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	events, err := swebench.ReadEvents(f)
+	if err != nil {
+		t.Fatalf("read events/reap.jsonl: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 2 deletes and 1 reap: %+v", len(events), events)
+	}
+	for _, ev := range events {
+		if ev.RunID != "run" {
+			t.Fatalf("event %s has run id %q, want \"run\" (the -prefix without its dash)", ev.Event, ev.RunID)
+		}
+	}
+	deletes := map[string]bool{}
+	for _, ev := range events[:2] {
+		if ev.Event != swebench.EventDelete || !ev.OK {
+			t.Fatalf("expected a successful delete event, got %+v", ev)
+		}
+		deletes[ev.Env] = true
+	}
+	if !deletes["run-0"] || !deletes["run-1"] {
+		t.Fatalf("delete events name %v, want run-0 and run-1", deletes)
+	}
+	reap := events[2]
+	if reap.Event != swebench.EventReap || reap.Env != "run" || !reap.OK || reap.Metrics["deleted_count"] != 2 || reap.Metrics["orphan_count"] != 0 {
+		t.Fatalf("unexpected reap event: %+v", reap)
 	}
 }

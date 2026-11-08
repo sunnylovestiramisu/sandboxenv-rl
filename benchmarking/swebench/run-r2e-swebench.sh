@@ -62,6 +62,19 @@
 #       --park POLICY            Park policy in steps mode without --strategy, which parks by itself (env: PARK; default: suspend)
 #       --step-pause DUR         Optional pause between steps without --strategy, e.g. 5s (env: STEP_PAUSE; default: 0s)
 #       --execution MODE         in-cluster or local (env: EXECUTION; auto-selects in-cluster with KO_DOCKER_REPO)
+#       --collect-telemetry      Collect node cache deltas, atelet restores, and periodic K8s snapshots (env: COLLECT_TELEMETRY)
+#       --measure-interval SEC   In-flight K8s snapshot interval in seconds; 0 disables (env: MEASURE_INTERVAL_SEC)
+#       --ate-endpoint ADDR      Optional Substrate ateapi host:port for bench measure and bench reap (env: ATE_ENDPOINT)
+#       --prom-url URL           Optional Prometheus HTTP base URL for bench measure (env: PROM_URL)
+#       --preflight-coverage P   Optional preflight-coverage.json copied into each arm bundle (env: PREFLIGHT_COVERAGE)
+#       --footing warm|cold      Optional footing assertion for bundle validation and upload (env: FOOTING)
+#       --trace                  Enable SDK/OTel tracing and capture Python TraceEvent JSONL files (env: ENABLE_TRACING)
+#       --otlp-endpoint ADDR     Optional OTLP/gRPC collector endpoint forwarded with --trace (env: OTEL_EXPORTER_OTLP_ENDPOINT)
+#       --validate-bundle        Run bench validate -dest on each arm bundle after reporting (env: VALIDATE_BUNDLE)
+#       --gcs-bucket BUCKET      Upload each validated arm bundle to gs://<BUCKET>/<folder>/ (env: GCS_BENCHMARK_BUCKET)
+#       --gcs-folder FOLDER      Explicit GCS folder <YYYY-MM-DD>_<model>_<dataset>_<nickname>[_traced] (env: GCS_BENCHMARK_FOLDER)
+#       --gcs-nickname NAME      Nickname segment override for auto-derived GCS folder names (env: GCS_BENCHMARK_NICKNAME)
+#       --gcs-dry-run            Validate bundles and GCS destination URIs without uploading (env: GCS_DRY_RUN)
 #   -h, --help                   Show this help text and exit.
 #
 # Examples:
@@ -77,7 +90,7 @@
 set -o errexit -o nounset -o pipefail
 
 usage() {
-  sed -n '17,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '17,89p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 require_arg() {
@@ -135,6 +148,19 @@ CLI_AUTH_TOKEN_FILE=""
 CLI_API_SERVICE=""
 CLI_PYTHON_BIN=""
 CLI_PYTHON_IMAGE=""
+CLI_COLLECT_TELEMETRY=""
+CLI_MEASURE_INTERVAL=""
+CLI_ATE_ENDPOINT=""
+CLI_PROM_URL=""
+CLI_PREFLIGHT_COVERAGE=""
+CLI_FOOTING=""
+CLI_ENABLE_TRACING=""
+CLI_OTLP_ENDPOINT=""
+CLI_VALIDATE_BUNDLE=""
+CLI_GCS_BUCKET=""
+CLI_GCS_FOLDER=""
+CLI_GCS_NICKNAME=""
+CLI_GCS_DRY_RUN=""
 EXTRA_ARGS=()
 
 while (( $# > 0 )); do
@@ -446,6 +472,107 @@ while (( $# > 0 )); do
       ;;
     --execution=*)
       EXECUTION="${1#*=}"
+      shift
+      ;;
+    --collect-telemetry)
+      CLI_COLLECT_TELEMETRY="1"
+      shift
+      ;;
+    --no-collect-telemetry)
+      CLI_COLLECT_TELEMETRY="0"
+      shift
+      ;;
+    --measure-interval)
+      require_arg "$1" "${2:-}"
+      CLI_MEASURE_INTERVAL="$2"
+      shift 2
+      ;;
+    --measure-interval=*)
+      CLI_MEASURE_INTERVAL="${1#*=}"
+      shift
+      ;;
+    --ate-endpoint)
+      require_arg "$1" "${2:-}"
+      CLI_ATE_ENDPOINT="$2"
+      shift 2
+      ;;
+    --ate-endpoint=*)
+      CLI_ATE_ENDPOINT="${1#*=}"
+      shift
+      ;;
+    --prom-url)
+      require_arg "$1" "${2:-}"
+      CLI_PROM_URL="$2"
+      shift 2
+      ;;
+    --prom-url=*)
+      CLI_PROM_URL="${1#*=}"
+      shift
+      ;;
+    --preflight-coverage)
+      require_arg "$1" "${2:-}"
+      CLI_PREFLIGHT_COVERAGE="$2"
+      shift 2
+      ;;
+    --preflight-coverage=*)
+      CLI_PREFLIGHT_COVERAGE="${1#*=}"
+      shift
+      ;;
+    --footing)
+      require_arg "$1" "${2:-}"
+      CLI_FOOTING="$2"
+      shift 2
+      ;;
+    --footing=*)
+      CLI_FOOTING="${1#*=}"
+      shift
+      ;;
+    --trace|--enable-tracing)
+      CLI_ENABLE_TRACING="1"
+      shift
+      ;;
+    --otlp-endpoint)
+      require_arg "$1" "${2:-}"
+      CLI_OTLP_ENDPOINT="$2"
+      shift 2
+      ;;
+    --otlp-endpoint=*)
+      CLI_OTLP_ENDPOINT="${1#*=}"
+      shift
+      ;;
+    --validate-bundle)
+      CLI_VALIDATE_BUNDLE="1"
+      shift
+      ;;
+    --gcs-bucket)
+      require_arg "$1" "${2:-}"
+      CLI_GCS_BUCKET="$2"
+      shift 2
+      ;;
+    --gcs-bucket=*)
+      CLI_GCS_BUCKET="${1#*=}"
+      shift
+      ;;
+    --gcs-folder)
+      require_arg "$1" "${2:-}"
+      CLI_GCS_FOLDER="$2"
+      shift 2
+      ;;
+    --gcs-folder=*)
+      CLI_GCS_FOLDER="${1#*=}"
+      shift
+      ;;
+    --gcs-nickname)
+      require_arg "$1" "${2:-}"
+      CLI_GCS_NICKNAME="$2"
+      shift 2
+      ;;
+    --gcs-nickname=*)
+      CLI_GCS_NICKNAME="${1#*=}"
+      shift
+      ;;
+    --gcs-dry-run)
+      CLI_GCS_DRY_RUN="1"
       shift
       ;;
     --)
@@ -817,10 +944,89 @@ BASE_TEMPLATE="${BASE_TEMPLATE:-default-template}"
 AUTH_TOKEN_SECRET="${AUTH_TOKEN_SECRET:-}"
 START_TIMEOUT="${START_TIMEOUT:-600}"
 MAX_API_ERRORS="${MAX_API_ERRORS:-30}"
-SAMPLE_CACHE="${SAMPLE_CACHE:-0}"
-HARVEST_RESTORES="${HARVEST_RESTORES:-0}"
+
+# shellcheck source=benchmarking/swebench/bundle-telemetry.sh
+source "${ROOT}/benchmarking/swebench/bundle-telemetry.sh"
+
+GCS_BENCHMARK_BUCKET="${CLI_GCS_BUCKET:-${GCS_BENCHMARK_BUCKET:-}}"
+if [[ -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+  GCS_BENCHMARK_BUCKET="${GCS_BENCHMARK_BUCKET#gs://}"
+  GCS_BENCHMARK_BUCKET="${GCS_BENCHMARK_BUCKET%/}"
+  if [[ -z "${GCS_BENCHMARK_BUCKET}" || "${GCS_BENCHMARK_BUCKET}" == */* || "${GCS_BENCHMARK_BUCKET}" =~ [[:space:]] ]]; then
+    echo "GCS_BENCHMARK_BUCKET must be a plain bucket name (or gs://<bucket>) without object prefix; use --gcs-folder for the folder name" >&2
+    exit 2
+  fi
+fi
+GCS_BENCHMARK_FOLDER="${CLI_GCS_FOLDER:-${GCS_BENCHMARK_FOLDER:-}}"
+GCS_BENCHMARK_NICKNAME="${CLI_GCS_NICKNAME:-${GCS_BENCHMARK_NICKNAME:-}}"
+GCS_DRY_RUN="${CLI_GCS_DRY_RUN:-${GCS_DRY_RUN:-0}}"
+
+if [[ -n "${CLI_COLLECT_TELEMETRY}" ]]; then
+  COLLECT_TELEMETRY="${CLI_COLLECT_TELEMETRY}"
+elif [[ -z "${COLLECT_TELEMETRY:-}" ]]; then
+  if [[ -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+    COLLECT_TELEMETRY="1"
+  else
+    COLLECT_TELEMETRY="0"
+  fi
+fi
+if [[ "${COLLECT_TELEMETRY}" != "0" && "${COLLECT_TELEMETRY}" != "1" ]]; then
+  echo "COLLECT_TELEMETRY must be 0 or 1 (got '${COLLECT_TELEMETRY}')" >&2
+  exit 2
+fi
+
+if [[ "${COLLECT_TELEMETRY}" == "1" ]]; then
+  SAMPLE_CACHE="${SAMPLE_CACHE:-1}"
+  HARVEST_RESTORES="${HARVEST_RESTORES:-1}"
+  MEASURE_INTERVAL_SEC="${CLI_MEASURE_INTERVAL:-${MEASURE_INTERVAL_SEC:-60}}"
+else
+  SAMPLE_CACHE="${SAMPLE_CACHE:-0}"
+  HARVEST_RESTORES="${HARVEST_RESTORES:-0}"
+  MEASURE_INTERVAL_SEC="${CLI_MEASURE_INTERVAL:-${MEASURE_INTERVAL_SEC:-0}}"
+fi
+require_nonneg_int "MEASURE_INTERVAL_SEC" "${MEASURE_INTERVAL_SEC}"
 HARVEST_INTERVAL_MIN="${HARVEST_INTERVAL_MIN:-10}"
 require_pos_int "HARVEST_INTERVAL_MIN" "${HARVEST_INTERVAL_MIN}"
+
+ATE_ENDPOINT="${CLI_ATE_ENDPOINT:-${ATE_ENDPOINT:-}}"
+PROM_URL="${CLI_PROM_URL:-${PROM_URL:-}}"
+PREFLIGHT_COVERAGE="${CLI_PREFLIGHT_COVERAGE:-${PREFLIGHT_COVERAGE:-}}"
+if [[ -n "${PREFLIGHT_COVERAGE}" ]]; then
+  PREFLIGHT_COVERAGE="$(abs_path "${PREFLIGHT_COVERAGE}")"
+  if [[ "${ACTION}" != "dry-run" && ! -f "${PREFLIGHT_COVERAGE}" ]]; then
+    echo "PREFLIGHT_COVERAGE not found: ${PREFLIGHT_COVERAGE}" >&2
+    exit 2
+  fi
+fi
+FOOTING="${CLI_FOOTING:-${FOOTING:-}}"
+if [[ -n "${FOOTING}" && "${FOOTING}" != "warm" && "${FOOTING}" != "cold" ]]; then
+  echo "FOOTING must be 'warm' or 'cold' (got ${FOOTING})" >&2
+  exit 2
+fi
+ENABLE_TRACING="${CLI_ENABLE_TRACING:-${ENABLE_TRACING:-0}}"
+OTEL_EXPORTER_OTLP_ENDPOINT="${CLI_OTLP_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-}}"
+if [[ "${ENABLE_TRACING}" == "1" && -z "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+  for c_tr in "${CLIENTS[@]}"; do
+    if [[ "${c_tr}" != "python" ]]; then
+      echo "warning: --trace with no --otlp-endpoint: the ${c_tr} arms export their spans to the OTel default localhost:4317; without a collector there each export fails" >&2
+    fi
+  done
+fi
+if [[ -n "${CLI_VALIDATE_BUNDLE}" ]]; then
+  VALIDATE_BUNDLE="${CLI_VALIDATE_BUNDLE}"
+elif [[ -z "${VALIDATE_BUNDLE:-}" ]]; then
+  if [[ "${COLLECT_TELEMETRY}" == "1" || -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+    VALIDATE_BUNDLE="1"
+  else
+    VALIDATE_BUNDLE="0"
+  fi
+fi
+# bench_bundle_has_trace and bench_check_gcs_folder_syntax run python3 whenever
+# a GCS folder is derived or checked: with a bucket or folder, and after each
+# arm that is validated.
+if [[ -n "${GCS_BENCHMARK_BUCKET}" || -n "${GCS_BENCHMARK_FOLDER}" || "${VALIDATE_BUNDLE}" == "1" ]]; then
+  command -v python3 >/dev/null || { echo "python3 is required with --gcs-bucket, --gcs-folder and --validate-bundle (GCS folder checks)" >&2; exit 2; }
+fi
 
 if [[ -z "${EXECUTION:-}" ]]; then
   if [[ -n "${KO_DOCKER_REPO:-}" ]]; then
@@ -1176,6 +1382,12 @@ if [[ "${ACTION}" == "dry-run" ]]; then
       mode_args_for_python "${MODE}" "${R2E_FANOUT}" "${arm_strategy}"
       r2e_py_mode=("${PY_MODE_ARGS[@]}")
       arm_label_args_python "${arm_client}" "${arm_name}"
+      swe_py_trace=()
+      r2e_py_trace=()
+      if [[ "${ENABLE_TRACING}" == "1" ]]; then
+        swe_py_trace=("--enable-tracing" "--trace-out=${arm_dir}/traces/swe.jsonl")
+        r2e_py_trace=("--enable-tracing" "--trace-out=${arm_dir}/traces/r2e.jsonl")
+      fi
 
       "${PYTHON_BIN}" "${ROOT}/benchmarking/swebench/run_fleet_bench.py" --dry-run \
         "--rendered-plan=${arm_dir}/plans/swe-plan.json" \
@@ -1191,6 +1403,7 @@ if [[ "${ACTION}" == "dry-run" ]]; then
         "--create-timeout=${CREATE_TIMEOUT}" \
         "--step-timeout=${STEP_TIMEOUT}" \
         "${swe_py_mode[@]}" \
+        ${swe_py_trace[@]+"${swe_py_trace[@]}"} \
         ${PY_LABEL_ARGS[@]+"${PY_LABEL_ARGS[@]}"} \
         ${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} \
         ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"}
@@ -1209,6 +1422,7 @@ if [[ "${ACTION}" == "dry-run" ]]; then
         "--create-timeout=${CREATE_TIMEOUT}" \
         "--step-timeout=${STEP_TIMEOUT}" \
         "${r2e_py_mode[@]}" \
+        ${r2e_py_trace[@]+"${r2e_py_trace[@]}"} \
         ${PY_LABEL_ARGS[@]+"${PY_LABEL_ARGS[@]}"} \
         ${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} \
         ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"}
@@ -1237,6 +1451,9 @@ if [[ "${ACTION}" == "dry-run" ]]; then
         "${MODE_ARGS[@]}"
         ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
       )
+      if [[ "${ENABLE_TRACING}" == "1" ]]; then
+        SWE_DRY_ARGS+=("-enable-tracing")
+      fi
       if [[ -n "${SWE_EXCLUDE_FILE}" ]]; then
         SWE_DRY_ARGS+=("-exclude-file=${SWE_EXCLUDE_FILE}")
       fi
@@ -1265,6 +1482,9 @@ if [[ "${ACTION}" == "dry-run" ]]; then
         "${MODE_ARGS[@]}"
         ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
       )
+      if [[ "${ENABLE_TRACING}" == "1" ]]; then
+        R2E_DRY_ARGS+=("-enable-tracing")
+      fi
       if [[ -n "${R2E_EXCLUDE_FILE}" ]]; then
         R2E_DRY_ARGS+=("-exclude-file=${R2E_EXCLUDE_FILE}")
       fi
@@ -1274,6 +1494,27 @@ if [[ "${ACTION}" == "dry-run" ]]; then
 
       go run ./cmd/benchmarking/swebench-loader "${SWE_DRY_ARGS[@]}"
       go run ./cmd/benchmarking/swebench-loader "${R2E_DRY_ARGS[@]}"
+    fi
+
+    if [[ -n "${GCS_BENCHMARK_BUCKET}" || -n "${GCS_BENCHMARK_FOLDER}" ]]; then
+      expect_traced="0"
+      if [[ "${ENABLE_TRACING}" == "1" && "${arm_client}" == "python" ]]; then
+        expect_traced="1"
+      fi
+      if (( NUM_ARMS > 1 )); then
+        nick_seg="${GCS_BENCHMARK_NICKNAME:-${RUN_ID}}-${arm_name}"
+        multi_suffix="${arm_name}"
+      else
+        nick_seg="${GCS_BENCHMARK_NICKNAME:-${RUN_ID}-${arm_name}}"
+        multi_suffix=""
+      fi
+      dry_folder="$(bench_derive_gcs_folder "${arm_dir}" "simulated-w${MAX_CONCURRENCY}" "r2e${R2E_IMAGES}-swe${SWE_IMAGES}" "${nick_seg}" "${GCS_BENCHMARK_FOLDER}" "${multi_suffix}" "${expect_traced}")"
+      bench_check_gcs_folder_syntax "${dry_folder}" "${expect_traced}"
+      if [[ -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+        echo "dry-run gcs target (${arm_name}): gs://${GCS_BENCHMARK_BUCKET}/${dry_folder}/" >&2
+      else
+        echo "dry-run gcs folder (${arm_name}): ${dry_folder}" >&2
+      fi
     fi
   done
   exit 0
@@ -1354,9 +1595,18 @@ cleanup_cluster() {
     rm -rf "${PY_BUILD_DIR}"
     PY_BUILD_DIR=""
   fi
+  bench_stop_measure_loop ""
 }
 
-trap cleanup_cluster EXIT INT TERM
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap
+cleanup_all() {
+  cleanup_cluster
+  bench_cleanup_telemetry
+}
+
+trap cleanup_all EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 TRAJ_N=0
 BAKED=""
@@ -1523,14 +1773,31 @@ apply_loader_job() {
   ns_json="$(json_encode_str "${NAMESPACE}")"
   image_json="$(json_encode_str "${image}")"
 
+  local -a env_lines=()
   if [[ -n "${AUTH_TOKEN_SECRET}" ]]; then
     auth_sec_json="$(json_encode_str "${AUTH_TOKEN_SECRET}")"
-    loader_env="env:
-            - name: SUBSTRATE_ENV_AUTH_TOKEN
+    env_lines+=("            - name: SUBSTRATE_ENV_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: ${auth_sec_json}
-                  key: token"
+                  key: token")
+  fi
+  if [[ "${ENABLE_TRACING}" == "1" && -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+    local otlp_ep_json
+    otlp_ep_json="$(json_encode_str "${OTEL_EXPORTER_OTLP_ENDPOINT}")"
+    env_lines+=("            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${otlp_ep_json}")
+    if [[ -n "${OTEL_EXPORTER_OTLP_INSECURE:-}" ]]; then
+      local otlp_insec_json
+      otlp_insec_json="$(json_encode_str "${OTEL_EXPORTER_OTLP_INSECURE}")"
+      env_lines+=("            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: ${otlp_insec_json}")
+    fi
+  fi
+  if (( ${#env_lines[@]} > 0 )); then
+    local IFS=$'\n'
+    loader_env="env:
+${env_lines[*]}"
   fi
   if [[ -n "${command_json}" ]]; then
     cmd_line="command: ${command_json}"
@@ -1754,6 +2021,9 @@ run_local_arm_shards() {
     if [[ -n "${AUTH_TOKEN_FILE}" ]]; then
       swe_cmd+=("--auth-token-file=${AUTH_TOKEN_FILE}")
     fi
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      swe_cmd+=("--enable-tracing" "--trace-out=${arm_dir}/traces/swe.jsonl")
+    fi
     if [[ "${pass_extra}" == "1" ]]; then
       swe_cmd+=(${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"})
     fi
@@ -1780,14 +2050,24 @@ run_local_arm_shards() {
     if [[ -n "${AUTH_TOKEN_FILE}" ]]; then
       r2e_cmd+=("--auth-token-file=${AUTH_TOKEN_FILE}")
     fi
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      r2e_cmd+=("--enable-tracing" "--trace-out=${arm_dir}/traces/r2e.jsonl")
+    fi
     if [[ "${pass_extra}" == "1" ]]; then
       r2e_cmd+=(${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"})
     fi
 
-    "${swe_cmd[@]}" &
-    swe_pid=$!
-    "${r2e_cmd[@]}" &
-    r2e_pid=$!
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" && -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+      OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" "${swe_cmd[@]}" &
+      swe_pid=$!
+      OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" "${r2e_cmd[@]}" &
+      r2e_pid=$!
+    else
+      "${swe_cmd[@]}" &
+      swe_pid=$!
+      "${r2e_cmd[@]}" &
+      r2e_pid=$!
+    fi
   else
     go_backend_args_local "${arm_client}"
     arm_label_args_go "${arm_client}" "${arm_name}"
@@ -1813,6 +2093,9 @@ run_local_arm_shards() {
       "${MODE_ARGS[@]}"
       ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      swe_cmd+=("-enable-tracing")
+    fi
     if [[ -n "${SWE_EXCLUDE_FILE}" ]]; then
       swe_cmd+=("-exclude-file=${SWE_EXCLUDE_FILE}")
     fi
@@ -1841,6 +2124,9 @@ run_local_arm_shards() {
       "${MODE_ARGS[@]}"
       ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      r2e_cmd+=("-enable-tracing")
+    fi
     if [[ -n "${R2E_EXCLUDE_FILE}" ]]; then
       r2e_cmd+=("-exclude-file=${R2E_EXCLUDE_FILE}")
     fi
@@ -1848,17 +2134,28 @@ run_local_arm_shards() {
       r2e_cmd+=("${EXTRA_ARGS[@]}")
     fi
 
-    "${swe_cmd[@]}" &
-    swe_pid=$!
-    "${r2e_cmd[@]}" &
-    r2e_pid=$!
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" && -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+      OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" "${swe_cmd[@]}" &
+      swe_pid=$!
+      OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}" "${r2e_cmd[@]}" &
+      r2e_pid=$!
+    else
+      "${swe_cmd[@]}" &
+      swe_pid=$!
+      "${r2e_cmd[@]}" &
+      r2e_pid=$!
+    fi
   fi
 
   LOCAL_PIDS=("${swe_pid}" "${r2e_pid}")
   start_restore_harvest "${arm_client}" "${arm_name}" "${is_timed_run}" "${swe_run}" "${r2e_run}"
+  if [[ "${is_timed_run}" == "1" ]] && (( MEASURE_INTERVAL_SEC > 0 )); then
+    bench_start_measure_loop "${ROOT}" "${CONTEXT}" "${arm_dir}" "${swe_run%-swe}" "${ATESPACE}" "${BASE_TEMPLATE}" "${MEASURE_INTERVAL_SEC}" "${ATE_ENDPOINT}" "${PROM_URL}"
+  fi
   wait "${swe_pid}" || swe_rc=$?
   wait "${r2e_pid}" || r2e_rc=$?
   LOCAL_PIDS=()
+  bench_stop_measure_loop "${arm_dir}"
   finish_restore_harvest "${arm_dir}" "${swe_run}" "${r2e_run}"
   SHARD_EXIT=$(( swe_rc != 0 ? swe_rc : r2e_rc ))
 }
@@ -1924,6 +2221,9 @@ run_in_cluster_arm_shards() {
       "${swe_py_mode[@]}"
       ${PY_LABEL_ARGS[@]+"${PY_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      swe_args+=("--enable-tracing" "--trace-out=/work/traces/swe.jsonl")
+    fi
     if [[ "${pass_extra}" == "1" ]]; then
       swe_args+=(${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"})
     fi
@@ -1945,6 +2245,9 @@ run_in_cluster_arm_shards() {
       "${r2e_py_mode[@]}"
       ${PY_LABEL_ARGS[@]+"${PY_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      r2e_args+=("--enable-tracing" "--trace-out=/work/traces/r2e.jsonl")
+    fi
     if [[ "${pass_extra}" == "1" ]]; then
       r2e_args+=(${PY_EXTRA_SET_ARGS[@]+"${PY_EXTRA_SET_ARGS[@]}"} ${PY_EXTRA_LABEL_ARGS[@]+"${PY_EXTRA_LABEL_ARGS[@]}"})
     fi
@@ -2018,6 +2321,9 @@ run_in_cluster_arm_shards() {
       "${MODE_ARGS[@]}"
       ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      swe_args+=("-enable-tracing")
+    fi
     if [[ -n "${SWE_EXCLUDE_FILE}" ]]; then
       swe_args+=("-exclude-file=/var/run/ko/swe-exclude.txt")
     fi
@@ -2046,6 +2352,9 @@ run_in_cluster_arm_shards() {
       "${MODE_ARGS[@]}"
       ${GO_LABEL_ARGS[@]+"${GO_LABEL_ARGS[@]}"}
     )
+    if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" ]]; then
+      r2e_args+=("-enable-tracing")
+    fi
     if [[ -n "${R2E_EXCLUDE_FILE}" ]]; then
       r2e_args+=("-exclude-file=/var/run/ko/r2e-exclude.txt")
     fi
@@ -2074,6 +2383,9 @@ run_in_cluster_arm_shards() {
   echo "started pods: swe=${swe_pod} r2e=${r2e_pod}"
 
   start_restore_harvest "${arm_client}" "${arm_name}" "${is_timed_run}" "${swe_run}" "${r2e_run}"
+  if [[ "${is_timed_run}" == "1" ]] && (( MEASURE_INTERVAL_SEC > 0 )); then
+    bench_start_measure_loop "${ROOT}" "${CONTEXT}" "${arm_dir}" "${swe_run%-swe}" "${ATESPACE}" "${BASE_TEMPLATE}" "${MEASURE_INTERVAL_SEC}" "${ATE_ENDPOINT}" "${PROM_URL}"
+  fi
 
   kc -n "${NAMESPACE}" logs -f "${swe_pod}" -c loader > "${arm_dir}/swe-loader.log" 2>&1 &
   local log_swe_pid=$!
@@ -2087,6 +2399,7 @@ run_in_cluster_arm_shards() {
   wait "${log_swe_pid}" 2>/dev/null || true
   wait "${log_r2e_pid}" 2>/dev/null || true
   LOG_PIDS=()
+  bench_stop_measure_loop "${arm_dir}"
   echo "loader exit codes (${arm_name}): swe=${swe_rc} r2e=${r2e_rc}"
 
   if ! kc -n "${NAMESPACE}" cp -c keep "${swe_pod}:/work/swe.jsonl" "${swe_out}"; then
@@ -2096,6 +2409,17 @@ run_in_cluster_arm_shards() {
   if ! kc -n "${NAMESPACE}" cp -c keep "${r2e_pod}:/work/r2e.jsonl" "${r2e_out}"; then
     echo "failed to copy r2e events from ${r2e_pod}" >&2
     r2e_rc=$(( r2e_rc == 0 ? 1 : r2e_rc ))
+  fi
+  if [[ "${is_timed_run}" == "1" && "${ENABLE_TRACING}" == "1" && "${arm_client}" == "python" ]]; then
+    mkdir -p "${arm_dir}/traces"
+    if ! kc -n "${NAMESPACE}" cp -c keep "${swe_pod}:/work/traces/swe.jsonl" "${arm_dir}/traces/swe.jsonl"; then
+      echo "failed to copy swe traces from ${swe_pod}" >&2
+      swe_rc=$(( swe_rc == 0 ? 1 : swe_rc ))
+    fi
+    if ! kc -n "${NAMESPACE}" cp -c keep "${r2e_pod}:/work/traces/r2e.jsonl" "${arm_dir}/traces/r2e.jsonl"; then
+      echo "failed to copy r2e traces from ${r2e_pod}" >&2
+      r2e_rc=$(( r2e_rc == 0 ? 1 : r2e_rc ))
+    fi
   fi
 
   finish_restore_harvest "${arm_dir}" "${swe_run}" "${r2e_run}"
@@ -2109,6 +2433,7 @@ run_in_cluster_arm_shards() {
 generate_arm_reports() {
   local arm_dir="$1"
   local run_prefix="$2"
+  local arm_client="${3:-}"
   local -a shard_extra=()
   # Only this run's harvest: an earlier run's file in a reused artifact
   # directory must not be joined with these events.
@@ -2125,14 +2450,8 @@ generate_arm_reports() {
       -json "${arm_dir}/r2e-summary.json" ${shard_extra[@]+"${shard_extra[@]}"}
   fi
   if [[ -s "${arm_dir}/events/swe.jsonl" || -s "${arm_dir}/events/r2e.jsonl" ]]; then
-    # system_description.json and measurements.json, which bench report
-    # folds into report.json; a cluster the host cannot read leaves the
-    # report without them rather than without a report.
-    if ! go run ./cmd/benchmarking/bench measure -k8s -atespace "${ATESPACE}" \
-      -base-template "${BASE_TEMPLATE}" -run-id "${run_prefix}" -dest "${arm_dir}"; then
-      echo "warning: bench measure -k8s failed for ${arm_dir}; report.json has no system_description or measurements" >&2
-    fi
-    go run ./cmd/benchmarking/bench report -dest "${arm_dir}"
+    bench_finalize_bundle "${ROOT}" "${CONTEXT}" "${arm_dir}" "${run_prefix}" \
+      "${ATESPACE}" "${BASE_TEMPLATE}" "${ATE_ENDPOINT}" "${PROM_URL}" "${PREFLIGHT_COVERAGE}" "${arm_client}"
   fi
 }
 
@@ -2225,10 +2544,14 @@ for (( idx = 0; idx < NUM_ARMS; idx++ )); do
     arm_dir="${ARTIFACT_DIR}"
   fi
   mkdir -p "${arm_dir}/events"
+  bench_reset_bundle_telemetry "${arm_dir}"
   echo "=== running arm $(( idx + 1 ))/${NUM_ARMS}: ${arm_name} (client=${arm_client} strategy=${arm_strategy:-legacy-${MODE}} run_prefix=${arm_prefix}) ===" >&2
 
   if [[ "${SAMPLE_CACHE}" == "1" ]]; then
-    NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${arm_dir}/cache_before.prom"
+    if ! NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${arm_dir}/cache_before.prom"; then
+      echo "warning: sample-node-cache.sh failed before arm ${arm_name}" >&2
+      rm -f "${arm_dir}/cache_before.prom"
+    fi
   fi
 
   SHARD_EXIT=0
@@ -2252,10 +2575,30 @@ for (( idx = 0; idx < NUM_ARMS; idx++ )); do
   fi
 
   if [[ "${SAMPLE_CACHE}" == "1" ]]; then
-    NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${arm_dir}/cache_after.prom"
+    if ! NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${arm_dir}/cache_after.prom"; then
+      echo "warning: sample-node-cache.sh failed after arm ${arm_name}" >&2
+      rm -f "${arm_dir}/cache_after.prom"
+    fi
   fi
 
-  generate_arm_reports "${arm_dir}" "${arm_prefix}"
+  generate_arm_reports "${arm_dir}" "${arm_prefix}" "${arm_client}"
+
+  if [[ -n "${GCS_BENCHMARK_BUCKET}" || "${VALIDATE_BUNDLE}" == "1" ]]; then
+    if (( NUM_ARMS > 1 )); then
+      nick_seg="${GCS_BENCHMARK_NICKNAME:-${RUN_ID}}-${arm_name}"
+      multi_suffix="${arm_name}"
+    else
+      nick_seg="${GCS_BENCHMARK_NICKNAME:-${RUN_ID}-${arm_name}}"
+      multi_suffix=""
+    fi
+    arm_folder="$(bench_derive_gcs_folder "${arm_dir}" "simulated-w${MAX_CONCURRENCY}" "r2e${R2E_IMAGES}-swe${SWE_IMAGES}" "${nick_seg}" "${GCS_BENCHMARK_FOLDER}" "${multi_suffix}" "0")"
+    if ! bench_validate_and_upload "${ROOT}" "${CONTEXT}" "${arm_dir}" "${arm_folder}" "${GCS_BENCHMARK_BUCKET}" "${GCS_DRY_RUN}" "${VALIDATE_BUNDLE}" "${FOOTING}"; then
+      echo "error: bundle validation or upload failed for arm ${arm_name} (${arm_dir})" >&2
+      if (( OVERALL_EXIT == 0 )); then
+        OVERALL_EXIT=1
+      fi
+    fi
+  fi
 done
 
 if (( NUM_ARMS > 1 )); then

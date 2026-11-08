@@ -570,6 +570,7 @@ type Builder struct {
 	distinctInstances  map[string]bool
 	distinctEnvs       map[string]bool
 	runTags            map[string]string
+	jobRunTags         map[string]map[string]string
 	envState           map[string]string
 	stepActiveEnvs     map[int]map[string]bool
 	stepPausedEnvs     map[int]map[string]bool
@@ -618,6 +619,7 @@ func NewBuilder() *Builder {
 		distinctInstances:  map[string]bool{},
 		distinctEnvs:       map[string]bool{},
 		runTags:            map[string]string{},
+		jobRunTags:         map[string]map[string]string{},
 		envState:           map[string]string{},
 		stepActiveEnvs:     map[int]map[string]bool{},
 		stepPausedEnvs:     map[int]map[string]bool{},
@@ -957,6 +959,13 @@ func (b *Builder) Add(e Event) {
 		}
 		for tk, tv := range e.Tags {
 			b.runTags[tk] = tv
+		}
+		if e.Job != "" && len(e.Tags) > 0 {
+			jt := make(map[string]string, len(e.Tags))
+			for tk, tv := range e.Tags {
+				jt[tk] = tv
+			}
+			b.jobRunTags[e.Job] = jt
 		}
 	case EventTask:
 		b.rep.Tasks++
@@ -1435,10 +1444,7 @@ func (b *Builder) Finish() *Report {
 		sort.Strings(rep.DistinctImages)
 	}
 	if len(b.runTags) > 0 {
-		rep.RunTags = make(map[string]string, len(b.runTags))
-		for k, v := range b.runTags {
-			rep.RunTags[k] = v
-		}
+		rep.RunTags = mergeMultiJobRunTags(b.runTags, b.jobRunTags, len(rep.DistinctImages))
 	}
 
 	if rep.DeletedCount == 0 {
@@ -1463,6 +1469,110 @@ func (b *Builder) Finish() *Report {
 		return rep.Errors[i].Err < rep.Errors[j].Err
 	})
 	return &rep
+}
+
+// normalizeDatasetRevision strips container-internal ko baked prefixes (/var/run/ko/)
+// while leaving caller-supplied file paths, URLs, and multi-dataset '+' strings intact.
+func normalizeDatasetRevision(raw string) string {
+	d := strings.TrimSpace(raw)
+	if strings.HasPrefix(d, "/var/run/ko/") {
+		return filepath.Base(d)
+	}
+	return d
+}
+
+// datasetShortName is the dataset's base name without its .jsonl extension,
+// the segment of the merged tag of a multi-shard run
+// (r2e-dataset+swe-dataset).
+func datasetShortName(raw string) string {
+	d := strings.TrimSpace(raw)
+	if d == "" {
+		return ""
+	}
+	if qIdx := strings.IndexByte(d, '?'); qIdx >= 0 {
+		d = d[:qIdx]
+	}
+	return strings.TrimSuffix(filepath.Base(d), ".jsonl")
+}
+
+// mergeMultiJobRunTags combines per-job EventRun tags when multiple concurrent
+// shards (e.g., job="r2e" + job="swe") are summarized into one Report, so
+// SystemDescription.Load reflects total fleet load instead of the last shard.
+func mergeMultiJobRunTags(base map[string]string, jobTags map[string]map[string]string, distinctImageCount int) map[string]string {
+	out := make(map[string]string, len(base))
+	for k, v := range base {
+		out[k] = v
+	}
+	if d, ok := out["dataset"]; ok && d != "" {
+		out["dataset"] = normalizeDatasetRevision(d)
+	}
+	if len(jobTags) <= 1 {
+		return out
+	}
+
+	jobs := make([]string, 0, len(jobTags))
+	for j := range jobTags {
+		jobs = append(jobs, j)
+	}
+	sort.Strings(jobs)
+
+	for _, sumKey := range []string{"load_tasks", "load_tasks_per_step", "load_trajectories_per_step", "load_max_concurrent"} {
+		sum := 0
+		for _, j := range jobs {
+			if v, err := strconv.Atoi(jobTags[j][sumKey]); err == nil && v > 0 {
+				sum += v
+			}
+		}
+		if sum > 0 {
+			out[sumKey] = strconv.Itoa(sum)
+		}
+	}
+
+	for _, maxKey := range []string{"load_group_size", "load_steps", "load_repeat"} {
+		best := 0
+		for _, j := range jobs {
+			if v, err := strconv.Atoi(jobTags[j][maxKey]); err == nil && v > best {
+				best = v
+			}
+		}
+		if best > 0 {
+			out[maxKey] = strconv.Itoa(best)
+		}
+	}
+
+	if distinctImageCount > 0 {
+		out["load_distinct_images"] = strconv.Itoa(distinctImageCount)
+	} else {
+		imgSum := 0
+		for _, j := range jobs {
+			if v, err := strconv.Atoi(jobTags[j]["load_distinct_images"]); err == nil && v > 0 {
+				imgSum += v
+			}
+		}
+		if imgSum > 0 {
+			out["load_distinct_images"] = strconv.Itoa(imgSum)
+		}
+	}
+
+	var datasets []string
+	for _, j := range jobs {
+		if ds := datasetShortName(jobTags[j]["dataset"]); ds != "" && !slices.Contains(datasets, ds) {
+			datasets = append(datasets, ds)
+		}
+	}
+	sort.Strings(datasets)
+	if len(datasets) > 0 {
+		out["dataset"] = strings.Join(datasets, "+")
+	}
+
+	for _, j := range jobs {
+		if gi := strings.TrimSpace(jobTags[j]["guest_image"]); gi != "" {
+			out["guest_image"] = gi
+			break
+		}
+	}
+
+	return out
 }
 
 // inferParkMode is the run's park mode: the loader's park label on the run
@@ -2466,7 +2576,7 @@ func (rep *Report) AttachClusterTelemetry(sys *schema.SystemDescription, meas *s
 			}
 		}
 		if sys.DatasetRevision == "" && rep.RunTags != nil && rep.RunTags["dataset"] != "" {
-			sys.DatasetRevision = rep.RunTags["dataset"]
+			sys.DatasetRevision = normalizeDatasetRevision(rep.RunTags["dataset"])
 		}
 		if sys.Load == nil {
 			sys.Load = rep.buildDefaultLoadParams(hc, sys)

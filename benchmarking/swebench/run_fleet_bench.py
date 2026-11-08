@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -55,6 +56,13 @@ def load_sdk() -> tuple[types.ModuleType, type[BaseException], Any]:
     )
 
     return sdk_mod, infra_err, slot_wait_var
+
+
+def _load_trace_recorder() -> Any:
+    """Import ate_env_rl.telemetry.trace_recorder on demand."""
+    from ate_env_rl.telemetry import trace_recorder
+
+    return trace_recorder
 
 
 AUTH_TOKEN_ENV = "SUBSTRATE_ENV_AUTH_TOKEN"
@@ -576,6 +584,7 @@ class _InstrumentedDriver:
         self._mock_warm_pool: dict[tuple[str, str | None], list[str]] = collections.defaultdict(list)
         self._synth_to_raw_id: dict[str, str] = {}
         self._warm_seq = 0
+        self._reap_recorded: set[str] = set()
         self._local = threading.local()
 
     @property
@@ -947,6 +956,27 @@ class _InstrumentedDriver:
                 self._live_warm_envs.clear()
         for wid, img_label in to_delete:
             self._emit_warm_delete(wid, img_label, dur_ms / max(1, len(to_delete)))
+        with self._meta_lock:
+            remaining_count = len(self._live_warm_envs) + len(self.sandbox_meta)
+            # The fleet reaps twice per `with` block: the strategy tears down at
+            # the end of run() and __exit__ tears down again. One reap event per
+            # run id, like bench reap's events/reap.jsonl; a repeat that deletes
+            # nothing and finds nothing is not an event.
+            repeat = run_id in self._reap_recorded
+            self._reap_recorded.add(run_id)
+        if repeat and reaped == 0 and not to_delete and remaining_count == 0:
+            return reaped
+        self._rec.record({
+            "event": "reap",
+            "env": run_id,
+            "task": 0,
+            "dur_ms": dur_ms,
+            "ok": remaining_count == 0,
+            "metrics": {
+                "orphan_count": float(remaining_count),
+                "deleted_count": float(max(reaped, len(to_delete))),
+            },
+        })
         return reaped
 
     def close(self) -> None:
@@ -998,6 +1028,16 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Size warm pools to 1 paused replica per rollout in each window (default: true).",
+    )
+    p.add_argument(
+        "--enable-tracing",
+        action="store_true",
+        help="Enable SDK span tracing and v1 TraceEvent JSONL capture.",
+    )
+    p.add_argument(
+        "--trace-out",
+        default="",
+        help="Path to write v1 TraceEvent JSONL lines (implies --enable-tracing).",
     )
     p.add_argument("--dry-run", action="store_true", help="Validate plan and flags, print JSON summary, and exit.")
     return p
@@ -1155,7 +1195,31 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
     else:
         out_path = pathlib.Path(f"{run_id}.jsonl")
 
-    plan_summary = {
+    tracing_enabled = bool(
+        args.enable_tracing
+        or args.trace_out
+        or os.environ.get("ENV_BENCH_MODE", "").strip().lower() == "trace"
+    )
+    trace_out_path: pathlib.Path | None = None
+    if args.trace_out:
+        trace_out_path = pathlib.Path(args.trace_out)
+    elif tracing_enabled:
+        env_trace = os.environ.get("ENV_BENCH_TRACE_PATH", "").strip()
+        if env_trace:
+            trace_out_path = pathlib.Path(env_trace)
+        else:
+            shard_stem = (args.worker or out_path.stem or "trace").removesuffix(".jsonl")
+            if args.events_dir:
+                base_root = pathlib.Path(args.events_dir)
+                if base_root.name == "events":
+                    base_root = base_root.parent
+                trace_out_path = base_root / "traces" / f"{shard_stem}.jsonl"
+            elif out_path.parent.name == "events":
+                trace_out_path = out_path.parent.parent / "traces" / f"{shard_stem}.jsonl"
+            else:
+                trace_out_path = out_path.parent / "traces" / f"{shard_stem}.jsonl"
+
+    plan_summary: dict[str, Any] = {
         "msg": "plan",
         "client": "python",
         "run": run_id,
@@ -1170,19 +1234,19 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
         "width": args.width,
         "trajectory": plan.get("trajectory_names", args.trajectory),
         "out": str(out_path),
+        "tracing": tracing_enabled,
     }
+    if trace_out_path is not None:
+        plan_summary["trace_out"] = str(trace_out_path)
     print(json.dumps(plan_summary), file=sys.stderr)
     if args.dry_run:
         return 0
 
     sdk, infra_error_cls, current_slot_wait_s = load_sdk()
-
-    recorder = EventRecorder(
-        out_path,
-        run_id=run_id,
-        worker=(args.worker or ("worker-0" if args.events_dir else "")),
-        job=args.job,
-    )
+    trace_rec_mod = _load_trace_recorder() if tracing_enabled else None
+    prev_bench_mode = os.environ.get("ENV_BENCH_MODE")
+    prev_trace_path = os.environ.get("ENV_BENCH_TRACE_PATH")
+    recorder: EventRecorder | None = None
 
     stats: dict[str, Any] = {
         "total_tasks": 0,
@@ -1200,6 +1264,7 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
     stats_lock = threading.Lock()
 
     def _execute_run() -> None:
+        assert recorder is not None
         # One pass: --steps is 1 (checked above), as the Go loader's -strategy.
         step_num = 1 if args.mode == "steps" else 0
 
@@ -1257,7 +1322,9 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
             ready_timeout_s=create_timeout_s,
             step_timeout_s=step_timeout_s,
             run_id=run_id,
-            observability=sdk.ObservabilityConfig(enable_metrics=False, enable_tracing=False),
+            observability=sdk.ObservabilityConfig(
+                enable_metrics=False, enable_tracing=tracing_enabled
+            ),
         )
 
         pass_start = time.monotonic()
@@ -1276,16 +1343,22 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
 
             def _bound_acquire_task(task_obj: Any, timeout_s: float | None) -> Any:
                 sp = task_specs.get(task_obj.id, {})
+                clean_iid = str(sp.get("instance_id", task_obj.id))
                 inst_driver.bind_thread_task(
                     task_id=task_obj.id,
-                    instance_id=sp.get("instance_id", task_obj.id),
+                    instance_id=clean_iid,
                     image=task_obj.image,
                     step=step_num,
                     task_idx=int(sp.get("rollout", 0)),
                     traj_name=sp.get("trajectory_name", ""),
                 )
+                trace_task_obj = (
+                    dataclasses.replace(task_obj, id=clean_iid)
+                    if task_obj.id != clean_iid
+                    else task_obj
+                )
                 try:
-                    return orig_acquire_task(task_obj, timeout_s)
+                    return orig_acquire_task(trace_task_obj, timeout_s)
                 finally:
                     inst_driver.clear_thread_task()
 
@@ -1320,15 +1393,27 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
                         total_think_ms += (time.monotonic() - t_sleep0) * 1000.0
 
                     step_t0 = time.monotonic()
-                    exit_code, stdout, stderr, attempts, s_err = _execute_step_with_retry(
-                        handle=handle,
-                        step_spec=s_spec,
-                        default_step_timeout_s=step_timeout_s,
-                        first=first,
-                        wake_budget_s=wake_budget_s,
-                        wake_backoff_s=wake_backoff_s,
-                        infra_error_cls=infra_error_cls,
+                    t_ctx = (
+                        trace_rec_mod.task_context(
+                            run_id=run_id,
+                            job=args.job or None,
+                            step=step_num or None,
+                            instance=iid,
+                            image=img,
+                        )
+                        if trace_rec_mod is not None
+                        else contextlib.nullcontext()
                     )
+                    with t_ctx:
+                        exit_code, stdout, stderr, attempts, s_err = _execute_step_with_retry(
+                            handle=handle,
+                            step_spec=s_spec,
+                            default_step_timeout_s=step_timeout_s,
+                            first=first,
+                            wake_budget_s=wake_budget_s,
+                            wake_backoff_s=wake_backoff_s,
+                            infra_error_cls=infra_error_cls,
+                        )
                     step_dur_ms = (time.monotonic() - step_t0) * 1000.0
 
                     if first:
@@ -1526,6 +1611,21 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
 
     run_start = time.monotonic()
     try:
+        if tracing_enabled:
+            if trace_out_path is not None:
+                trace_out_path.parent.mkdir(parents=True, exist_ok=True)
+                trace_out_path.unlink(missing_ok=True)
+                os.environ["ENV_BENCH_MODE"] = "trace"
+                os.environ["ENV_BENCH_TRACE_PATH"] = str(trace_out_path)
+            if trace_rec_mod is not None:
+                trace_rec_mod.set_bench_context(run_id=run_id, job=args.job or None)
+
+        recorder = EventRecorder(
+            out_path,
+            run_id=run_id,
+            worker=(args.worker or ("worker-0" if args.events_dir else "")),
+            job=args.job,
+        )
         _execute_run()
 
         total_tasks = int(stats["total_tasks"])
@@ -1612,7 +1712,19 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
             "retired": retired_total,
         })
     finally:
-        recorder.close()
+        if recorder is not None:
+            recorder.close()
+        if tracing_enabled:
+            if trace_rec_mod is not None:
+                trace_rec_mod.clear_bench_context()
+            if prev_bench_mode is None:
+                os.environ.pop("ENV_BENCH_MODE", None)
+            else:
+                os.environ["ENV_BENCH_MODE"] = prev_bench_mode
+            if prev_trace_path is None:
+                os.environ.pop("ENV_BENCH_TRACE_PATH", None)
+            else:
+                os.environ["ENV_BENCH_TRACE_PATH"] = prev_trace_path
 
     if args.fleet_report_out and combined_reports:
         prefix = pathlib.Path(args.fleet_report_out)

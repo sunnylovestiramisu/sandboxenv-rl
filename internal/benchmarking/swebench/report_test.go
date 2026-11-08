@@ -793,3 +793,71 @@ func TestParkEachRunReportsParkMode(t *testing.T) {
 		})
 	}
 }
+
+func TestMultiJobRunTagsMergeAndClusterTelemetry(t *testing.T) {
+	t0 := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
+	imgR2E1 := "us-central1-docker.pkg.dev/p/r2e/a@sha256:" + strings.Repeat("a", 64)
+	imgR2E2 := "us-central1-docker.pkg.dev/p/r2e/b@sha256:" + strings.Repeat("b", 64)
+	imgSWE1 := "us-central1-docker.pkg.dev/p/swe/c@sha256:" + strings.Repeat("c", 64)
+
+	events := []Event{
+		{Time: t0.Add(10 * time.Millisecond), RunID: "arm-r2e", Job: "r2e", Task: 0, Step: 1, Instance: "r2e-1", Image: imgR2E1, Env: "arm-r2e-0", Event: EventTask, DurMS: 100, OK: true, Reward: intp(1)},
+		{Time: t0.Add(20 * time.Millisecond), RunID: "arm-r2e", Job: "r2e", Task: 1, Step: 1, Instance: "r2e-2", Image: imgR2E2, Env: "arm-r2e-1", Event: EventTask, DurMS: 110, OK: true, Reward: intp(1)},
+		{Time: t0.Add(30 * time.Millisecond), RunID: "arm-swe", Job: "swe", Task: 0, Step: 1, Instance: "swe-1", Image: imgSWE1, Env: "arm-swe-0", Event: EventTask, DurMS: 120, OK: true, Reward: intp(1)},
+		{
+			Time: t0.Add(150 * time.Millisecond), RunID: "arm-r2e", Job: "r2e", Event: EventRun, Name: "steps", DurMS: 150, OK: true, Count: 4,
+			Labels: map[string]string{"mode": "steps", "strategy": "naive", "park": "suspend"},
+			Tags: map[string]string{
+				"dataset":                    "/var/run/ko/r2e-dataset.jsonl",
+				"guest_image":                imgR2E1,
+				"load_tasks":                 "2",
+				"load_group_size":            "2",
+				"load_steps":                 "1",
+				"load_tasks_per_step":        "2",
+				"load_trajectories_per_step": "4",
+				"load_max_concurrent":        "120",
+				"load_distinct_images":       "2",
+				"load_repeat":                "1",
+			},
+		},
+		{
+			Time: t0.Add(180 * time.Millisecond), RunID: "arm-swe", Job: "swe", Event: EventRun, Name: "steps", DurMS: 180, OK: true, Count: 2,
+			Labels: map[string]string{"mode": "steps", "strategy": "naive", "park": "suspend"},
+			Tags: map[string]string{
+				"dataset":                    "/var/run/ko/swe-dataset.jsonl",
+				"guest_image":                imgSWE1,
+				"load_tasks":                 "1",
+				"load_group_size":            "2",
+				"load_steps":                 "1",
+				"load_tasks_per_step":        "1",
+				"load_trajectories_per_step": "2",
+				"load_max_concurrent":        "80",
+				"load_distinct_images":       "1",
+				"load_repeat":                "1",
+			},
+		},
+	}
+
+	rep := Build(events)
+	if got := rep.RunTags["dataset"]; got != "r2e-dataset+swe-dataset" {
+		t.Fatalf("merged dataset tag = %q, want r2e-dataset+swe-dataset", got)
+	}
+	if got := rep.RunTags["load_max_concurrent"]; got != "200" {
+		t.Fatalf("load_max_concurrent = %q, want 200", got)
+	}
+	if got := rep.RunTags["load_trajectories_per_step"]; got != "6" {
+		t.Fatalf("load_trajectories_per_step = %q, want 6", got)
+	}
+	if got := rep.RunTags["load_distinct_images"]; got != "3" {
+		t.Fatalf("load_distinct_images = %q, want 3", got)
+	}
+
+	sys := &schema.SystemDescription{SchemaVersion: schema.SchemaVersion}
+	rep.AttachClusterTelemetry(sys, nil)
+	if sys.DatasetRevision != "r2e-dataset+swe-dataset" {
+		t.Fatalf("sys.DatasetRevision = %q, want r2e-dataset+swe-dataset", sys.DatasetRevision)
+	}
+	if sys.Load == nil || sys.Load.Tasks != 3 || sys.Load.GroupSize != 2 || sys.Load.TrajectoriesPerStep != 6 || sys.Load.MaxConcurrent != 200 || sys.Load.DistinctImages != 3 {
+		t.Fatalf("unexpected sys.Load: %+v", sys.Load)
+	}
+}

@@ -47,6 +47,29 @@
 # the parts are merged with duplicates dropped. Kubelet rotates a busy
 # atelet's log within the hour, so one harvest at the end loses most of a
 # long run. The report then reads the file through -restore-log.
+#
+# Optional telemetry bundle and GCS upload environment variables:
+#   COLLECT_TELEMETRY=1       Enable node-cache sampling, restore harvesting,
+#                             periodic K8s snapshots, and bundle assembly in
+#                             ARTIFACT_DIR (default ./<RUN_ID>-bundle).
+#   ARTIFACT_DIR=<dir>        Output v1 benchmark bundle directory.
+#   MEASURE_INTERVAL_SEC=<n>  Periodic K8s snapshot interval in seconds
+#                             (default 60 when COLLECT_TELEMETRY=1, else 0).
+#   SAMPLE_CACHE=1            Scrape node image-cache counters before/after.
+#   ATESPACE=<ns>             Substrate atespace (default NAMESPACE).
+#   BASE_TEMPLATE=<name>      Base actor template (default default-template).
+#   ATE_ENDPOINT=<host:port>  Optional ate-api gRPC endpoint for reap/measure.
+#   PROM_URL=<http-url>       Optional Prometheus base URL for measure.
+#   PREFLIGHT_COVERAGE=<file> Optional preflight-coverage.json to include.
+#   FOOTING=<warm|cold>       Optional footing check for bundle validation.
+#   ENABLE_TRACING=1          Pass -enable-tracing (plus OTEL_EXPORTER_OTLP_ENDPOINT).
+#   VALIDATE_BUNDLE=1         Run bench validate -dest on the assembled bundle.
+#   GCS_BENCHMARK_BUCKET=<b>  Validate and upload the bundle to gs://<b>/<folder>/
+#                             (implies COLLECT_TELEMETRY=1 and VALIDATE_BUNDLE=1;
+#                             never hardcoded).
+#   GCS_BENCHMARK_FOLDER=<f>  Explicit <YYYY-MM-DD>_<model>_<dataset>_<nickname>[_traced].
+#   GCS_BENCHMARK_NICKNAME=<n> Nickname segment when deriving the GCS folder.
+#   GCS_DRY_RUN=1             Validate bundle and GCS URI without uploading.
 
 set -o errexit -o nounset -o pipefail
 
@@ -71,13 +94,31 @@ AUTH_TOKEN_SECRET="${AUTH_TOKEN_SECRET:-}"
 # Checked as a DNS subdomain name, so the value cannot break the manifest.
 [[ -z "${AUTH_TOKEN_SECRET}" || ( "${AUTH_TOKEN_SECRET}" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#AUTH_TOKEN_SECRET} -le 253 ) ]] || { echo "AUTH_TOKEN_SECRET must be a Secret name" >&2; exit 2; }
 LOADER_ENV=""
+ENABLE_TRACING="${ENABLE_TRACING:-0}"
+OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+LOADER_ENV_LINES=()
 if [[ -n "${AUTH_TOKEN_SECRET}" ]]; then
-  LOADER_ENV="env:
-            - name: SUBSTRATE_ENV_AUTH_TOKEN
+  LOADER_ENV_LINES+=("            - name: SUBSTRATE_ENV_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: ${AUTH_TOKEN_SECRET}
-                  key: token"
+                  key: token")
+fi
+if [[ "${ENABLE_TRACING}" == "1" && -z "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+  echo "warning: ENABLE_TRACING=1 with no OTEL_EXPORTER_OTLP_ENDPOINT: the loader exports its spans to the OTel default localhost:4317 in its pod; without a collector there each export fails" >&2
+fi
+if [[ "${ENABLE_TRACING}" == "1" && -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ]]; then
+  OTLP_EP_JSON="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "${OTEL_EXPORTER_OTLP_ENDPOINT}")"
+  LOADER_ENV_LINES+=("            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${OTLP_EP_JSON}")
+  if [[ -n "${OTEL_EXPORTER_OTLP_INSECURE:-}" ]]; then
+    OTLP_INSEC_JSON="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "${OTEL_EXPORTER_OTLP_INSECURE}")"
+    LOADER_ENV_LINES+=("            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: ${OTLP_INSEC_JSON}")
+  fi
+fi
+if (( ${#LOADER_ENV_LINES[@]} > 0 )); then
+  LOADER_ENV="$(printf 'env:\n%s' "$(IFS=$'\n'; echo "${LOADER_ENV_LINES[*]}")")"
 fi
 command -v python3 >/dev/null || { echo "python3 is needed to encode the loader arguments" >&2; exit 2; }
 OUT_DIR="$(pwd)"
@@ -92,6 +133,78 @@ fi
 # run from any directory and the results land where it was invoked.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}"
+# shellcheck source=benchmarking/swebench/bundle-telemetry.sh
+source "${ROOT}/benchmarking/swebench/bundle-telemetry.sh"
+
+GCS_BENCHMARK_BUCKET="${GCS_BENCHMARK_BUCKET:-}"
+if [[ -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+  GCS_BENCHMARK_BUCKET="${GCS_BENCHMARK_BUCKET#gs://}"
+  GCS_BENCHMARK_BUCKET="${GCS_BENCHMARK_BUCKET%/}"
+  if [[ -z "${GCS_BENCHMARK_BUCKET}" || "${GCS_BENCHMARK_BUCKET}" == */* || "${GCS_BENCHMARK_BUCKET}" =~ [[:space:]] ]]; then
+    echo "GCS_BENCHMARK_BUCKET must be a plain bucket name (or gs://<bucket>) without object prefix" >&2
+    exit 2
+  fi
+fi
+GCS_BENCHMARK_FOLDER="${GCS_BENCHMARK_FOLDER:-}"
+GCS_BENCHMARK_NICKNAME="${GCS_BENCHMARK_NICKNAME:-}"
+GCS_DRY_RUN="${GCS_DRY_RUN:-0}"
+if [[ -z "${COLLECT_TELEMETRY:-}" ]]; then
+  if [[ -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+    COLLECT_TELEMETRY="1"
+  else
+    COLLECT_TELEMETRY="0"
+  fi
+fi
+if [[ "${COLLECT_TELEMETRY}" != "0" && "${COLLECT_TELEMETRY}" != "1" ]]; then
+  echo "COLLECT_TELEMETRY must be 0 or 1 (got '${COLLECT_TELEMETRY}')" >&2
+  exit 2
+fi
+if [[ -z "${VALIDATE_BUNDLE:-}" ]]; then
+  if [[ "${COLLECT_TELEMETRY}" == "1" || -n "${GCS_BENCHMARK_BUCKET}" ]]; then
+    VALIDATE_BUNDLE="1"
+  else
+    VALIDATE_BUNDLE="0"
+  fi
+fi
+BUNDLE_MODE=0
+if [[ "${COLLECT_TELEMETRY}" == "1" || -n "${ARTIFACT_DIR:-}" || -n "${GCS_BENCHMARK_BUCKET}" || "${VALIDATE_BUNDLE}" == "1" ]]; then
+  BUNDLE_MODE=1
+fi
+BUNDLE_DIR="${ARTIFACT_DIR:-${OUT_DIR}/${RUN_ID}-bundle}"
+if [[ "${BUNDLE_DIR}" != /* ]]; then
+  BUNDLE_DIR="${OUT_DIR}/${BUNDLE_DIR}"
+fi
+if [[ "${COLLECT_TELEMETRY}" == "1" ]]; then
+  SAMPLE_CACHE="${SAMPLE_CACHE:-1}"
+  MEASURE_INTERVAL_SEC="${MEASURE_INTERVAL_SEC:-60}"
+else
+  SAMPLE_CACHE="${SAMPLE_CACHE:-0}"
+  MEASURE_INTERVAL_SEC="${MEASURE_INTERVAL_SEC:-0}"
+fi
+[[ "${MEASURE_INTERVAL_SEC}" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "MEASURE_INTERVAL_SEC must be a non-negative integer" >&2; exit 2; }
+ATESPACE="${ATESPACE:-${NS}}"
+BASE_TEMPLATE="${BASE_TEMPLATE:-default-template}"
+ATE_ENDPOINT="${ATE_ENDPOINT:-}"
+PROM_URL="${PROM_URL:-}"
+PREFLIGHT_COVERAGE="${PREFLIGHT_COVERAGE:-}"
+if [[ -n "${PREFLIGHT_COVERAGE}" && "${PREFLIGHT_COVERAGE}" != /* ]]; then
+  PREFLIGHT_COVERAGE="${OUT_DIR}/${PREFLIGHT_COVERAGE}"
+fi
+if [[ -n "${PREFLIGHT_COVERAGE}" && ! -f "${PREFLIGHT_COVERAGE}" ]]; then
+  echo "PREFLIGHT_COVERAGE not found: ${PREFLIGHT_COVERAGE}" >&2
+  exit 2
+fi
+FOOTING="${FOOTING:-}"
+if [[ -n "${FOOTING}" && "${FOOTING}" != "warm" && "${FOOTING}" != "cold" ]]; then
+  echo "FOOTING must be 'warm' or 'cold'" >&2
+  exit 2
+fi
+if (( BUNDLE_MODE == 1 )); then
+  mkdir -p "${BUNDLE_DIR}/events"
+  if [[ "${COLLECT_TELEMETRY}" == "1" && -z "${RESTORE_LOG}" ]]; then
+    RESTORE_LOG="${BUNDLE_DIR}/atelet_restores.jsonl"
+  fi
+fi
 HARVEST="${ROOT}/benchmarking/swebench/harvest-restore-timings.sh"
 HARVEST_DIR="$(mktemp -d)"
 HARVEST_PID=""
@@ -155,6 +268,9 @@ while (( $# )); do
       ARGS+=("$1"); shift ;;
   esac
 done
+if [[ "${ENABLE_TRACING}" == "1" ]]; then
+  ARGS+=("-enable-tracing")
+fi
 IMAGE="$(KO_DOCKER_REPO="${KO_DOCKER_REPO}/swebench-loader" ko build --bare ./cmd/benchmarking/swebench-loader)"
 rm -rf "${KODATA}"
 echo "loader image ${IMAGE}"
@@ -208,6 +324,25 @@ merge_harvest() {
   fi
   echo "restore records in ${RESTORE_LOG}: $(wc -l < "${RESTORE_LOG}" | tr -d ' ')"
 }
+
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap
+cleanup_with_telemetry() {
+  bench_cleanup_telemetry
+  cleanup
+}
+trap cleanup_with_telemetry EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if (( BUNDLE_MODE == 1 )); then
+  bench_reset_bundle_telemetry "${BUNDLE_DIR}"
+  if [[ "${SAMPLE_CACHE}" == "1" ]]; then
+    if ! NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${BUNDLE_DIR}/cache_before.prom"; then
+      echo "warning: sample-node-cache.sh failed before ${RUN_ID}" >&2
+      rm -f "${BUNDLE_DIR}/cache_before.prom"
+    fi
+  fi
+fi
 
 kc -n "${NS}" delete job "${JOB}" --ignore-not-found --wait=true >/dev/null
 # busybox 1.36, pinned by digest; Docker Hub rate-limits unauthenticated pulls.
@@ -301,6 +436,9 @@ if [[ -n "${RESTORE_LOG}" ]]; then
   ( n=0; while :; do sleep "$(( HARVEST_INTERVAL_MIN * 60 ))" || true; n=$(( n + 1 )); harvest_part "${n}"; done ) &
   HARVEST_PID=$!
 fi
+if (( BUNDLE_MODE == 1 && MEASURE_INTERVAL_SEC > 0 )); then
+  bench_start_measure_loop "${ROOT}" "${CONTEXT}" "${BUNDLE_DIR}" "${RUN_ID}" "${ATESPACE}" "${BASE_TEMPLATE}" "${MEASURE_INTERVAL_SEC}" "${ATE_ENDPOINT}" "${PROM_URL}"
+fi
 kc -n "${NS}" logs -f "${POD}" -c loader || true
 
 # The log stream can end before the container does (or drop with the
@@ -350,4 +488,30 @@ if [[ -n "${RESTORE_LOG}" ]]; then
 fi
 go run ./cmd/benchmarking/swebench-loader report "${OUT_DIR}/${RUN_ID}.jsonl" -json "${OUT_DIR}/${RUN_ID}.json" \
   ${REPORT_ARGS[@]+"${REPORT_ARGS[@]}"}
+
+if (( BUNDLE_MODE == 1 )); then
+  bench_stop_measure_loop "${BUNDLE_DIR}"
+  if [[ "${SAMPLE_CACHE}" == "1" ]]; then
+    if ! NAMESPACE=ate-system CONTEXT="${CONTEXT}" "${ROOT}/benchmarking/swebench/sample-node-cache.sh" "${BUNDLE_DIR}/cache_after.prom"; then
+      echo "warning: sample-node-cache.sh failed after ${RUN_ID}" >&2
+      rm -f "${BUNDLE_DIR}/cache_after.prom"
+    fi
+  fi
+  mkdir -p "${BUNDLE_DIR}/events"
+  cp "${OUT_DIR}/${RUN_ID}.jsonl" "${BUNDLE_DIR}/events/${RUN_ID}.jsonl"
+  if [[ -n "${RESTORE_LOG}" && -s "${RESTORE_LOG}" && "${RESTORE_LOG}" != "${BUNDLE_DIR}/atelet_restores.jsonl" ]]; then
+    cp "${RESTORE_LOG}" "${BUNDLE_DIR}/atelet_restores.jsonl"
+  fi
+  bench_finalize_bundle "${ROOT}" "${CONTEXT}" "${BUNDLE_DIR}" "${RUN_ID}" \
+    "${ATESPACE}" "${BASE_TEMPLATE}" "${ATE_ENDPOINT}" "${PROM_URL}" "${PREFLIGHT_COVERAGE}"
+  if [[ -n "${GCS_BENCHMARK_BUCKET}" || "${VALIDATE_BUNDLE}" == "1" ]]; then
+    DATASET_SEG="$(basename "${DATASET}")"
+    DATASET_SEG="${DATASET_SEG%.jsonl}"
+    BUNDLE_FOLDER="$(bench_derive_gcs_folder "${BUNDLE_DIR}" "swebench-loader" "${DATASET_SEG}" "${GCS_BENCHMARK_NICKNAME:-${RUN_ID}}" "${GCS_BENCHMARK_FOLDER}" "" "0")"
+    if ! bench_validate_and_upload "${ROOT}" "${CONTEXT}" "${BUNDLE_DIR}" "${BUNDLE_FOLDER}" "${GCS_BENCHMARK_BUCKET}" "${GCS_DRY_RUN}" "${VALIDATE_BUNDLE}" "${FOOTING}"; then
+      echo "error: bundle validation or upload failed for ${BUNDLE_DIR}" >&2
+      EXIT="$(( EXIT == 0 ? 1 : EXIT ))"
+    fi
+  fi
+fi
 exit "${EXIT}"

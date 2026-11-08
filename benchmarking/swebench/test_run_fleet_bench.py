@@ -763,3 +763,65 @@ def test_real_substrate_driver_warm_pool_over_the_fake_api(tmp_path: pathlib.Pat
     assert run_ev["count"] == 2
     assert run_ev["working_set_hits"] == 2
     assert run_ev["working_set_misses"] == 0
+
+
+def test_enable_tracing_emits_v1_trace_events(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENV_BENCH_MODE", raising=False)
+    monkeypatch.delenv("ENV_BENCH_TRACE_PATH", raising=False)
+
+    r2e_manifest = _write_r2e_manifest(tmp_path / "r2e-2.jsonl", count=2)
+    bundle_dir = tmp_path / "bundle"
+    out_jsonl = bundle_dir / "events" / "r2e.jsonl"
+    trace_path = bundle_dir / "traces" / "r2e.jsonl"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text('{"stale":true}\n', encoding="utf-8")
+
+    rc = rfb.run_benchmark(
+        [
+            "--backend=mock",
+            f"--dataset={r2e_manifest}",
+            "--trajectory=command-default",
+            "--run-id=py-trace-1",
+            "--worker=r2e",
+            "--job=r2e",
+            "--mode=steps",
+            "--strategy=none",
+            "--rollouts=2",
+            "--steps=1",
+            "--width=4",
+            "--enable-tracing",
+            f"--out={out_jsonl}",
+        ],
+        custom_driver=_GradedMockDriver(),
+    )
+    assert rc == 0
+
+    # Verify ENV_BENCH_* env vars were cleaned up in finally.
+    import os
+
+    assert "ENV_BENCH_MODE" not in os.environ
+    assert "ENV_BENCH_TRACE_PATH" not in os.environ
+
+    assert trace_path.is_file()
+    trace_events = [
+        json.loads(ln)
+        for ln in trace_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(trace_events) >= 4
+    assert all("stale" not in ev for ev in trace_events)
+    assert all(ev["schema_version"] == "v1" for ev in trace_events)
+    assert all(ev["run"] == "py-trace-1" and ev["job"] == "r2e" for ev in trace_events)
+    assert all(ev.get("instance") in {"r2e-inst-00", "r2e-inst-01"} for ev in trace_events)
+    exec_traces = [ev for ev in trace_events if ev["op"] in {"exec", "shell"}]
+    assert len(exec_traces) >= 4
+    assert {ev["instance"] for ev in exec_traces} == {"r2e-inst-00", "r2e-inst-01"}
+    assert all(ev["image"].startswith("us-docker.pkg.dev/p/r2e/") for ev in exec_traces)
+
+    events = [json.loads(ln) for ln in out_jsonl.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    reap_evs = [e for e in events if e["event"] == "reap"]
+    assert len(reap_evs) == 1, reap_evs
+    reap_ev = reap_evs[0]
+    assert reap_ev["ok"] is True
+    assert reap_ev["metrics"]["orphan_count"] == 0.0
+

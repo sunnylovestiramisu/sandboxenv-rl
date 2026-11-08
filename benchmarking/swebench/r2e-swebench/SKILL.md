@@ -40,6 +40,8 @@ override environment variables):
 | Client / API chain    | `--client go\|go-direct\|python\|all\|CSV` (alias `--chain`)                                                                                                         | `CLIENT`                                                                                                                           | `go` (`swebench-loader` -> Go SDK -> `ate-env-api`). `all` sweeps `go` and `python` (plus `go-direct` when `--control-addr` is set).         |
 | Direct Substrate auth | `--control-addr ADDR`, `--router-addr ADDR`, `--atenet-client-cert P`, `--atenet-ca-file P`, `--atenet-server-name S`, `--ateapi-token-file P`, `--ateapi-ca-file P` | `CONTROL_ADDR`, `ROUTER_ADDR`, `ATENET_CLIENT_CERT`, `ATENET_CA_FILE`, `ATENET_SERVER_NAME`, `ATEAPI_TOKEN_FILE`, `ATEAPI_CA_FILE` | Required for `--client go-direct` (`--control-addr` points at `ateapi` gRPC `host:port`; `--ateapi-ca-file` verifies `ateapi` TLS).          |
 | Workload and schedule | `--workload graded\|io`, `--mode steps\|eval\|open-loop`, `--steps N`, `--park POLICY`, `--step-pause DUR`                                                           | `WORKLOAD`, `MODE`, `STEPS`, `PARK`, `STEP_PAUSE`                                                                                  | `WORKLOAD=graded`, `MODE=steps`, `STEPS=4` (`1` single-pass when `--strategy` or `--client python` is set), `PARK=suspend`, `STEP_PAUSE=0s`. |
+| Telemetry & traces    | `--collect-telemetry`, `--measure-interval SEC`, `--ate-endpoint ADDR`, `--prom-url URL`, `--preflight-coverage PATH`, `--footing warm\|cold`, `--trace`, `--otlp-endpoint ADDR` | `COLLECT_TELEMETRY`, `MEASURE_INTERVAL_SEC`, `ATE_ENDPOINT`, `PROM_URL`, `PREFLIGHT_COVERAGE`, `FOOTING`, `ENABLE_TRACING`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `--collect-telemetry` (implied by `--gcs-bucket`) enables node-cache sampling, `atelet` restore harvesting, 60s `measurements_snapshots/`, `bench report -dest`, and `bench validate`. `--trace` records `traces/{r2e,swe}.jsonl` (`python`) or exports OTLP spans (`go`). |
+| GCS archive upload    | `--validate-bundle`, `--gcs-bucket BUCKET`, `--gcs-folder FOLDER`, `--gcs-nickname NAME`, `--gcs-dry-run`                                                            | `VALIDATE_BUNDLE`, `GCS_BENCHMARK_BUCKET`, `GCS_BENCHMARK_FOLDER`, `GCS_BENCHMARK_NICKNAME`, `GCS_DRY_RUN`                         | Validates each arm bundle and uploads to `gs://<BUCKET>/<YYYY-MM-DD>_simulated-w<C>_r2e<R>-swe<S>_<nick>[_traced]/` via `bench upload` (never hardcode bucket names). |
 
 [`../run-r2e-swebench.sh`](../run-r2e-swebench.sh) resolves sizing combinations with three rules:
 
@@ -239,13 +241,17 @@ top-level comparison artifacts land at `$ARTIFACT_DIR/`:
 - `comparison.txt`, `comparison.json`, and `comparison.md` (multi-arm sweeps): side-by-side latency,
   throughput (`tasks/min`), warm-pool hit rate, peak active sandboxes, and standing-pool footprint
   across all `(client, strategy)` arms.
-- `system_description.json` and `measurements.json` (or `arms/<arm>/...`): `bench measure -k8s`
-  output, taken after each arm and folded into `report.json` by `bench report`.
-- `cache_before.prom`, `cache_after.prom`, and `atelet_restores.jsonl`: node cache metrics and the
-  raw `atelet` restore records captured when `SAMPLE_CACHE=1` and `HARVEST_RESTORES=1` are set (`go`
-  and `go-direct` arms; `swebench-loader report -restore-log` joins them into the `*-summary.json`
-  files, which is why they are not named `restore_timings.jsonl`, the `schema.RestoreSample` file
-  `bench measure` and `bench validate` read).
+- `system_description.json`, `measurements.json`, `measurements_snapshots/meas_*.json`, and
+  `run_window.json` (or `arms/<arm>/...`): periodic in-flight and post-arm `bench measure -k8s`
+  telemetry rolled up and folded into `report.json` by `bench report -dest`, plus `events/reap.jsonl`
+  when `--ate-endpoint` is set on a `go` or `go-direct` arm (a `python` arm writes its own `reap`
+  event into `events/{swe,r2e}.jsonl` instead) and `preflight-coverage.json` when
+  `--preflight-coverage` is passed.
+- `cache_before.prom`, `cache_after.prom`, `atelet_restores.jsonl`, and `traces/*.jsonl`: node cache
+  counters and raw `atelet` restore records (`go` and `go-direct` arms) joined into both the
+  `*-summary.json` files and `report.json` (`restores`), plus `v1` `TraceEvent` JSONL streams when
+  `--trace` runs on `--client python` (which marks `trace_captured: true` and appends `_traced` to
+  the `bench upload` GCS folder name).
 
 ## 6. Write the benchmark report
 

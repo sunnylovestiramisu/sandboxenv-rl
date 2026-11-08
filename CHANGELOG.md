@@ -38,6 +38,35 @@ user needs to know across them.
   `-window-size`, `swebench-loader render-plan`, `swebench-loader report -md`
   over several runs (the arm table), and the `-atenet-*` and `-ateapi-*`
   flags of the direct Substrate backend.
+- `run-r2e-swebench.sh --collect-telemetry` (`COLLECT_TELEMETRY`): each arm
+  scrapes the node image caches before and after, harvests the `atelet`
+  restore records, takes a `bench measure -k8s` snapshot every
+  `--measure-interval` seconds (`MEASURE_INTERVAL_SEC`, default 60) and ends
+  in `bench report -dest`, which folds it all into one `v1` bundle;
+  `--ate-endpoint`, `--prom-url`, `--preflight-coverage` and `--footing` feed
+  the reap, the measurements and the validity rules. `--validate-bundle` runs
+  `bench validate` on each bundle; `--gcs-bucket` (`GCS_BENCHMARK_BUCKET`,
+  never in the repository), `--gcs-folder`, `--gcs-nickname` and
+  `--gcs-dry-run` upload it with `bench upload`. `--trace` traces the loader
+  (`-enable-tracing` on the Go arms, `traces/{r2e,swe}.jsonl` on `--client
+  python`) and `--otlp-endpoint` names the collector. `run-in-cluster.sh`
+  takes the same as environment variables (`COLLECT_TELEMETRY`,
+  `ARTIFACT_DIR`, `MEASURE_INTERVAL_SEC`, `SAMPLE_CACHE`, `ATE_ENDPOINT`,
+  `PROM_URL`, `PREFLIGHT_COVERAGE`, `FOOTING`, `ENABLE_TRACING`,
+  `VALIDATE_BUNDLE`, `GCS_BENCHMARK_BUCKET`, `GCS_BENCHMARK_FOLDER`,
+  `GCS_BENCHMARK_NICKNAME`, `GCS_DRY_RUN`).
+- `run_fleet_bench.py --enable-tracing` and `--trace-out PATH`: the Python arm
+  points the client's trace recorder at `traces/<job>.jsonl` next to its
+  events, one `v1` `TraceEvent` line per sandbox operation; a bundle with a
+  trace uploads to a `_traced` folder.
+- `bench report -dest` joins the raw `atelet_restores.jsonl` into `restores`
+  and writes `restore_timings.jsonl` from it, so `bench validate` and the
+  upload carry the samples. When shards share one bundle (`r2e` and `swe`),
+  the run tags merge, `load_*` totals and the dataset tag
+  `r2e-dataset+swe-dataset`, instead of keeping the last shard's, and a
+  dataset tag loses its `/var/run/ko/` prefix. `bench reap -prefix run-` writes `run` as the run id of
+  `events/reap.jsonl`, and `bench upload` copies the bundle's files into
+  `gs://<bucket>/<folder>/` itself, not into a `<folder>/<dir>/` subdirectory.
 - swebench-loader: `run -delete-rate` caps the environment deletes per second
   through ate-env-api (default 200; 0 removes the cap), and a delete the
   bucket rate-limits (429, `ResourceExhausted`) is retried with backoff for

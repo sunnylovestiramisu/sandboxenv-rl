@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -692,5 +693,84 @@ func TestAllStrategiesRenderPlanAndDirectDriverValidation(t *testing.T) {
 		AteapiTokenFile: emptyToken,
 	}); err == nil {
 		t.Fatal("expected NewBackendDriver to fail on empty AteapiTokenFile")
+	}
+
+	// 4. Verify run-r2e-swebench.sh dry-run telemetry, tracing, and GCS folder validation.
+	// The script derives and checks the GCS folder with python3 whenever a bucket,
+	// a folder or bundle validation is in effect, so both dry-runs need it.
+	scriptPath := filepath.Join("..", "..", "..", "benchmarking", "swebench", "run-r2e-swebench.sh")
+	_, pyErr := exec.LookPath("python3")
+	if pyErr != nil {
+		t.Logf("python3 not found (%v); skipping the --gcs-bucket dry-runs", pyErr)
+	}
+	artDir := filepath.Join(dir, "dry-gcs")
+	cmd := exec.Command("bash", scriptPath, "dry-run",
+		"--r2e-dataset", r2eManifest,
+		"--swe-dataset", sweManifest,
+		"--concurrency", "20",
+		"--images", "2",
+		"--rollouts-per-image", "2",
+		"--client", "go",
+		"--strategy", "naive,sliding",
+		"--window-size", "2",
+		"--collect-telemetry",
+		"--measure-interval", "30",
+		"--gcs-bucket", "gs://unit-test-bucket",
+		"--gcs-nickname", "smoke",
+		"--gcs-dry-run",
+		"--artifact-dir", artDir,
+	)
+	cmd.Env = append(os.Environ(), "SWE_EXCLUDE_FILE=")
+	if pyErr == nil {
+		outBytes, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run-r2e-swebench.sh dry-run failed: %v\n%s", err, string(outBytes))
+		}
+		outText := string(outBytes)
+		for _, want := range []string{
+			"_simulated-w20_r2e2-swe2_smoke-go-naive/",
+			"_simulated-w20_r2e2-swe2_smoke-go-sliding/",
+		} {
+			if !strings.Contains(outText, "gs://unit-test-bucket/") || !strings.Contains(outText, want) {
+				t.Fatalf("dry-run output missing %q:\n%s", want, outText)
+			}
+		}
+	}
+
+	if pyErr == nil {
+		pyArtDir := filepath.Join(dir, "dry-py-traced")
+		pyCmd := exec.Command("bash", scriptPath, "dry-run",
+			"--r2e-dataset", r2eManifest,
+			"--swe-dataset", sweManifest,
+			"--concurrency", "10",
+			"--images", "2",
+			"--rollouts-per-image", "1",
+			"--client", "python",
+			"--strategy", "none",
+			"--trace",
+			"--gcs-bucket", "unit-test-bucket",
+			"--gcs-nickname", "pytrace",
+			"--artifact-dir", pyArtDir,
+		)
+		pyCmd.Env = append(os.Environ(), "SWE_EXCLUDE_FILE=")
+		pyOut, pyRunErr := pyCmd.CombinedOutput()
+		if pyRunErr != nil {
+			t.Fatalf("python --trace dry-run failed: %v\n%s", pyRunErr, string(pyOut))
+		}
+		if !strings.Contains(string(pyOut), "_simulated-w10_r2e2-swe2_pytrace_traced/") {
+			t.Fatalf("expected _traced GCS folder suffix on python --trace dry-run, got:\n%s", string(pyOut))
+		}
+	}
+
+	for _, badScriptArgs := range [][]string{
+		{"dry-run", "--r2e-dataset", r2eManifest, "--swe-dataset", sweManifest, "--gcs-bucket", "gs://bucket/with/subpath"},
+		{"dry-run", "--r2e-dataset", r2eManifest, "--swe-dataset", sweManifest, "--gcs-bucket", "unit-test-bucket", "--gcs-folder", "bad_folder_name"},
+		{"dry-run", "--r2e-dataset", r2eManifest, "--swe-dataset", sweManifest, "--footing", "sideways"},
+	} {
+		badCmd := exec.Command("bash", append([]string{scriptPath}, badScriptArgs...)...)
+		badCmd.Env = append(os.Environ(), "SWE_EXCLUDE_FILE=")
+		if badOut, badErr := badCmd.CombinedOutput(); badErr == nil {
+			t.Fatalf("expected failure for %v, succeeded with:\n%s", badScriptArgs, string(badOut))
+		}
 	}
 }

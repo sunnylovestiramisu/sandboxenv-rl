@@ -430,6 +430,9 @@ func fileExistsNonEmpty(p string) bool {
 
 // ensureRunWindowFile creates run_window.json if absent and merges metadata
 // into it either way, so facts learned at report time land in the run metadata.
+// If an existing run_window.json only holds a <=2s point-in-time placeholder
+// and startTime/endTime span a real run window (>2s), start_ts and end_ts are
+// upgraded to the real window bounds.
 func ensureRunWindowFile(destDir, runID, cluster string, startTime, endTime time.Time, metadata map[string]string) error {
 	rwPath := filepath.Join(destDir, "run_window.json")
 	if fileExistsNonEmpty(rwPath) {
@@ -441,6 +444,20 @@ func ensureRunWindowFile(destDir, runID, cluster string, startTime, endTime time
 			existing.Metadata = map[string]string{}
 		}
 		maps.Copy(existing.Metadata, metadata)
+		if !startTime.IsZero() && endTime.Sub(startTime) > 2*time.Second {
+			exStart, errS := time.Parse(time.RFC3339, existing.StartTS)
+			exEnd, errE := time.Parse(time.RFC3339, existing.EndTS)
+			if errS != nil || errE != nil || exEnd.Sub(exStart) <= 2*time.Second {
+				existing.StartTS = startTime.UTC().Format(time.RFC3339)
+				existing.EndTS = endTime.UTC().Format(time.RFC3339)
+			}
+		}
+		if strings.TrimSpace(existing.RunID) == "" && strings.TrimSpace(runID) != "" {
+			existing.RunID = runID
+		}
+		if strings.TrimSpace(existing.Cluster) == "" && strings.TrimSpace(cluster) != "" {
+			existing.Cluster = cluster
+		}
 		return swebench.WriteRunWindow(rwPath, *existing)
 	}
 	if strings.TrimSpace(runID) == "" {
@@ -475,9 +492,41 @@ type GCSUploadRunner interface {
 
 type gcloudUploadRunner struct{}
 
+// gcloudUploadArgs builds the `gcloud storage cp -r` argument vector that copies
+// the top-level contents of srcDir directly into destGCSURI (gs://<bucket>/<folder>/)
+// without creating a nested <folder>/<basename(srcDir)>/ subdirectory (which
+// `gcloud storage cp -r srcDir/.` does because Python os.path.normpath strips `/.`).
+func gcloudUploadArgs(srcDir, destGCSURI string) ([]string, error) {
+	cleanSrc := filepath.Clean(srcDir)
+	entries, err := os.ReadDir(cleanSrc)
+	if err != nil {
+		return nil, fmt.Errorf("read upload directory %q: %w", cleanSrc, err)
+	}
+	var sources []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		sources = append(sources, filepath.Join(cleanSrc, name))
+	}
+	sort.Strings(sources)
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("upload directory %q contains no files to upload", cleanSrc)
+	}
+	args := make([]string, 0, 4+len(sources))
+	args = append(args, "storage", "cp", "-r")
+	args = append(args, sources...)
+	args = append(args, destGCSURI)
+	return args, nil
+}
+
 func (gcloudUploadRunner) UploadDir(ctx context.Context, srcDir, destGCSURI string) ([]byte, error) {
-	// Upload the contents of srcDir into destGCSURI (gs://<bucket>/<folder>/)
-	cmd := exec.CommandContext(ctx, "gcloud", "storage", "cp", "-r", filepath.Clean(srcDir)+"/.", destGCSURI)
+	args, err := gcloudUploadArgs(srcDir, destGCSURI)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "gcloud", args...)
 	return cmd.CombinedOutput()
 }
 

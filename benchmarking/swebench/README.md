@@ -567,8 +567,7 @@ benchmarking/swebench/run-r2e-swebench.sh prewarm \
   --rollouts-per-image 5 \
   --artifact-dir "${ARTIFACT_DIR}"
 
-# 3. Run the timed benchmark (single arm or multi-arm sweep) and generate reports:
-SAMPLE_CACHE=1 HARVEST_RESTORES=1 \
+# 3. Run the timed benchmark, collect 4-scope telemetry, validate, and optionally upload to GCS:
 benchmarking/swebench/run-r2e-swebench.sh run \
   --r2e-dataset "${MANIFEST_DIR}/r2e.jsonl" \
   --swe-dataset "${MANIFEST_DIR}/swebench.jsonl" \
@@ -584,6 +583,9 @@ benchmarking/swebench/run-r2e-swebench.sh run \
   --api-service ate-env-api \
   --run-id r2eswe \
   --execution in-cluster \
+  --collect-telemetry \
+  --measure-interval 60 \
+  ${GCS_BENCHMARK_BUCKET:+--gcs-bucket "${GCS_BENCHMARK_BUCKET}"} \
   --artifact-dir "${ARTIFACT_DIR}"
 ```
 
@@ -629,6 +631,19 @@ forward to `--client python`).
 | `--atenet-server-name NAME` | `ATENET_SERVER_NAME` | unset | TLS SNI server name override for `atenet-router` in `--client go-direct`. |
 | `--ateapi-token-file PATH` | `ATEAPI_TOKEN_FILE` | unset | Bearer token file for `ateapi` in `--client go-direct`. |
 | `--ateapi-ca-file PATH` | `ATEAPI_CA_FILE` | unset | CA PEM bundle verifying `ateapi` TLS in `--client go-direct`. |
+| `--collect-telemetry` / `--no-collect-telemetry` | `COLLECT_TELEMETRY` | `1` if `--gcs-bucket` set, else `0` | Enable node-cache before/after scraping, `atelet` restore harvesting, periodic `bench measure -k8s` snapshots (`measurements_snapshots/`), `bench report -dest`, and bundle validation. |
+| `--measure-interval SEC` | `MEASURE_INTERVAL_SEC` | `60` when `COLLECT_TELEMETRY=1`, else `0` | Periodic in-flight `bench measure -k8s` snapshot interval in seconds (`0` disables periodic snapshots). |
+| `--ate-endpoint ADDR` | `ATE_ENDPOINT` | unset | Optional Substrate `ateapi` gRPC endpoint for `bench reap` (`events/reap.jsonl`) and `bench measure`. |
+| `--prom-url URL` | `PROM_URL` | unset | Optional Prometheus HTTP base URL for `bench measure`. |
+| `--preflight-coverage PATH` | `PREFLIGHT_COVERAGE` | unset | Optional `preflight-coverage.json` copied into each arm bundle for warm-footing validation (Validity Rule 1). |
+| `--footing warm\|cold` | `FOOTING` | unset | Optional footing check passed to `bench validate` / `bench upload`. |
+| `--trace, --enable-tracing` | `ENABLE_TRACING` | `0` | Enable OTel/SDK tracing (`-enable-tracing` on Go `swebench-loader`; `traces/{r2e,swe}.jsonl` `v1` `TraceEvent` capture on `--client python`). Only a `python` arm with a trace file gets `_traced` appended to its derived GCS folder; a Go arm exports OTLP spans and its folder stays untraced. |
+| `--otlp-endpoint ADDR` | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Optional OTLP gRPC collector `host:port` forwarded to traced loader processes / `Job`s. |
+| `--validate-bundle` | `VALIDATE_BUNDLE` | `1` when `COLLECT_TELEMETRY=1` or `--gcs-bucket` set | Run `bench validate -dest` on each completed arm bundle. |
+| `--gcs-bucket BUCKET` | `GCS_BENCHMARK_BUCKET` | unset (never hardcoded) | Validate and upload each arm bundle via `bench upload` to `gs://<BUCKET>/<folder>/`. |
+| `--gcs-folder FOLDER` | `GCS_BENCHMARK_FOLDER` | `<YYYY-MM-DD>_simulated-w<C>_r2e<R>-swe<S>_<nick>[_traced]` | Explicit `<YYYY-MM-DD>_<model>_<dataset>_<nickname>[_traced]` folder override (multi-arm sweeps append `-<arm>` per arm). |
+| `--gcs-nickname NAME` | `GCS_BENCHMARK_NICKNAME` | `<RUN_ID>-<arm>` | Nickname segment used when deriving the GCS folder name. |
+| `--gcs-dry-run` | `GCS_DRY_RUN` | `0` | Validate bundle and target `gs://` URI without executing `gcloud storage cp`. |
 | `-h, --help` | - | - | Print command usage and flags. |
 
 Additional environment variables for cluster targeting, timeouts, and node
@@ -642,4 +657,4 @@ telemetry:
 | `ENDPOINT`, `AUTH_TOKEN_SECRET` | `localhost:7777`, unset | Local `ate-env-api` address (`--execution local`), and Kubernetes `Secret` (`key: token`) mounted as `SUBSTRATE_ENV_AUTH_TOKEN` in-cluster. |
 | `CONNECTIONS`, `WAKE_BUDGET`, `CREATE_TIMEOUT`, `STEP_TIMEOUT`, `START_TIMEOUT` | `8`, `5m`, `5m`, `15m`, `600` | Sharded gRPC channel count, per-operation timeouts, and in-cluster pod start timeout in seconds. |
 | `SWE_EXCLUDE_FILE`, `R2E_EXCLUDE_FILE` | `offline-exclusions.txt`, unset | Per-dataset instance exclusion files (set `SWE_EXCLUDE_FILE=""` to disable exclusions). |
-| `SAMPLE_CACHE`, `HARVEST_RESTORES`, `HARVEST_INTERVAL_MIN` | `0`, `0`, `10` | Set to `1` to scrape `atelet` `ate_imagecache_requests_total` (`cache_before.prom`, `cache_after.prom`) and harvest `atelet` restore records (`atelet_restores.jsonl`, `go` and `go-direct` arms; `swebench-loader report -restore-log` joins them into the shard summaries). |
+| `SAMPLE_CACHE`, `HARVEST_RESTORES`, `HARVEST_INTERVAL_MIN` | `1` when `COLLECT_TELEMETRY=1` (else `0`), `10` | Scrape `atelet` `ate_imagecache_requests_total` (`cache_before.prom`, `cache_after.prom`) and harvest `atelet` restore records (`atelet_restores.jsonl`, joined into both per-shard summaries and `report.json` via `bench report -dest`). `run-in-cluster.sh` honors the same `COLLECT_TELEMETRY`, `ARTIFACT_DIR`, `MEASURE_INTERVAL_SEC`, and `GCS_BENCHMARK_*` environment variables for single-dataset runs. |

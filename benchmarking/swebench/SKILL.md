@@ -97,6 +97,13 @@ go -C "${ENV_REPO}" build -o "${PWD}/swebench-loader" ./cmd/benchmarking/swebenc
 - A run in tmux survives a dropped connection; a run in a plain shell does not.
 - One run id per arm, the same shape flags across arms, and `report -arm NAME=FILE` to compare;
   it refuses to pool runs whose shape labels differ.
+- To assemble a complete `v1` benchmark bundle (`events/`, `cache_before.prom` / `cache_after.prom`,
+  `atelet_restores.jsonl` joined into `report.json`, periodic in-flight `measurements_snapshots/`
+  rolled up into `measurements.json` + `system_description.json`, `run_window.json`, and `report.md`)
+  and optionally validate and upload it to GCS in one command, set `COLLECT_TELEMETRY=1`,
+  `ARTIFACT_DIR="${PWD}/bundle-RUN"`, and `GCS_BENCHMARK_BUCKET=<bucket>` (plus optional
+  `GCS_BENCHMARK_NICKNAME=fast-startup`, `PREFLIGHT_COVERAGE`, `FOOTING=warm|cold`, `ATE_ENDPOINT`,
+  and `PROM_URL`) on `run-in-cluster.sh`. Never hardcode a bucket name in repository files.
 
 Shape flags per measurement are in the README section named above. Two that are easy to get
 wrong:
