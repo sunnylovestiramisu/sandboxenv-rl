@@ -18,24 +18,29 @@ For any sequence of acquire, recycle, warm_pool and teardown operations,
 interleaved at their awaits: the warm-replica gauge equals the warm pool,
 teardown leaves no environment alive, and warm_pool never provisions more than
 it was asked for. The fake client pauses ``suspend()`` per actor, ``create()``
-per warm_pool call, ``delete()`` during a teardown and, when told to, fails
-``get()``, ``create()`` or ``delete()``, so the test chooses where the
-coroutines interleave.
+per warm_pool call, an acquire's ``get()`` and ``create()`` on its own gate,
+``delete()`` during a teardown and, when told to, fails ``get()``, ``create()``
+or ``delete()``, so the test chooses where the coroutines interleave.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import dataclasses
 import itertools
+import sys
 
 import pytest
 from hypothesis import settings
+from hypothesis import strategies as st
 from hypothesis.stateful import (
     Bundle,
     RuleBasedStateMachine,
     consumes,
     initialize,
     invariant,
+    multiple,
     precondition,
     rule,
 )
@@ -47,6 +52,22 @@ from ate_env_rl.observability import Observer
 from ate_env_rl.telemetry import metrics
 
 R = 3  # replicas asked for by every warm_pool call
+
+
+@dataclasses.dataclass
+class AcquireGate:
+    """Pauses one acquire's ``get()`` and ``create()`` calls until ``event`` is set."""
+
+    event: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    # The create() reaches the server before it waits: the actor is live,
+    # and only the reply is pending.
+    lands_first: bool = False
+
+
+# Set in the task that runs an acquire; the tasks it starts inherit it.
+acquire_gate: contextvars.ContextVar[AcquireGate | None] = contextvars.ContextVar(
+    "acquire_gate", default=None
+)
 
 
 class GatedClient:
@@ -67,6 +88,11 @@ class GatedClient:
 
     async def create(self, actor_id: str, **kw: object) -> None:
         n, self.creates = self.creates, self.creates + 1
+        gate = acquire_gate.get()
+        if gate is not None:
+            if gate.lands_first and n not in self.create_errors:
+                self.live.add(actor_id)
+            await gate.event.wait()
         if self.create_gate is not None:
             await self.create_gate.wait()
         if n in self.create_errors:
@@ -91,6 +117,9 @@ class GatedClient:
         self.live.discard(actor_id)
 
     async def get(self, actor_id: str, **kw: object) -> None:
+        gate = acquire_gate.get()
+        if gate is not None:
+            await gate.event.wait()
         if self.get_gate is not None:
             await self.get_gate.wait()
         if self.get_error is not None:
@@ -703,6 +732,63 @@ async def test_cold_acquire_keeps_its_run_id_without_an_overlapping_reap_of_its_
     assert client.live == set()
 
 
+# AC-15.2: a cold acquire cancelled while its create() is in flight, by its own
+# timeout_s or by its caller, leaves the actor, if the create landed, for any
+# run's reap.
+@pytest.mark.parametrize("cancel", ["timeout", "caller"])
+async def test_cold_acquire_cancelled_in_create_leaves_the_actor_for_any_reap(
+    cancel: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subphases: list[tuple[str, str, str]] = []
+
+    def record(phase: str, seconds: float, status: str = "ok", *, source: str = "direct") -> None:
+        subphases.append((phase, status, source))
+
+    monkeypatch.setattr(metrics, "observe_subphase", record)
+    client = GatedClient()
+    driver, _ = _driver(client)
+    acquire_gate.set(AcquireGate(lands_first=True))  # the reply never arrives
+
+    if cancel == "timeout":
+        with pytest.raises(SandboxStartError):
+            await driver.acquire_async("tmpl", "run-1", timeout_s=0.05)
+    else:
+        acquire = asyncio.create_task(driver.acquire_async("tmpl", "run-1"))
+        await _spin()  # paused in create()
+        acquire.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire
+    assert client.creates == 1 and len(client.live) == 1
+    assert {i.run_id for i in driver._owned_actors.values()} == {WARM_POOL_RUN_ID}
+    # One wire_claim sample for the abandoned create, as for a failed one.
+    wire = [s for s in subphases if s[0] == "wire_claim"]
+    assert wire == [("wire_claim", "error", "cold_create")]
+
+    await driver.reap_async("run-2")  # any later reap
+    assert client.live == set()
+    assert driver._owned_actors == {}
+
+
+async def test_cold_acquire_cancelled_in_create_after_its_runs_reap_deletes_the_actor() -> None:
+    # The run's reap ran during the create and could not see the actor, and a
+    # fleet reaps its run once: the cancel deletes it.
+    client = GatedClient()
+    driver, _ = _driver(client)
+    acquire_gate.set(AcquireGate(lands_first=True))
+
+    acquire = asyncio.create_task(driver.acquire_async("tmpl", "run-1"))
+    await _spin()  # paused in create(), the actor live
+    await driver.reap_async("run-1")
+    assert len(client.live) == 1
+    acquire.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire
+    await asyncio.gather(*list(driver._background_tasks))
+
+    assert client.live == set()
+    assert driver._owned_actors == {}
+
+
 async def test_direct_reap_moves_the_gauge_with_the_pool() -> None:
     client = GatedClient()
     driver, obs = _driver(client)
@@ -805,15 +891,54 @@ class WarmPoolMachine(RuleBasedStateMachine):
         self.reap: asyncio.Task[None] | None = None
         self.claimed: set[str] = set()
         self.torn_down = False
+        self.teardowns = 0  # start_teardown calls
+        # Acquires in flight: task, gate, and self.teardowns when each started.
+        self.acquires: dict[int, tuple[asyncio.Task[object], AcquireGate, int]] = {}
+        self.acquired: list[str] = []  # returned, not yet in the owned bundle
+        # Returned by an acquire that overlapped a teardown: the caller holds
+        # it, and a later reap deletes it (AC-15.10), so it may outlive this one.
+        self.late: set[str] = set()
 
     def teardown(self) -> None:
+        try:
+            # Not after a failed step (or Hypothesis ending the example early):
+            # the step's own error must be the one reported.
+            if sys.exc_info()[0] is None:
+                self._end_run()
+        finally:
+            self._cancel_all()
+
+    def _end_run(self) -> None:
+        # The end of a run: callers give up on the acquires still in flight,
+        # paused calls resume, and the fleet tears down if it has not. Then
+        # nothing is left but what acquires handed out across the teardown.
+        for task, _, _ in self.acquires.values():
+            task.cancel()
+        if self.client.create_gate is not None:
+            self.client.create_gate.set()
+        for gate in self.client.suspend_gates.values():
+            gate.set()
+        self._spin()
+        if self._quiet():
+            self.start_teardown()
+        if self.reap is not None:
+            self.finish_teardown()
+        self._spin()
+        assert not (self.inflight or self.warm_tasks or self.acquires), "work still paused"
+        assert not self.driver._background_tasks, "deletes still running"
+        self.nothing_survives_teardown()
+
+    def _cancel_all(self) -> None:
         tasks = [*self.inflight.values(), *self.warm_tasks]
+        tasks += [t for t, _, _ in self.acquires.values()]
         if self.reap is not None:
             tasks.append(self.reap)
-        for t in tasks:
-            t.cancel()
-        if tasks:
+        while tasks:
+            for t in tasks:
+                t.cancel()
             self.loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            # Deletes a cancel started, which may start more when cancelled.
+            tasks = list(self.driver._background_tasks)
         self.loop.close()
 
     def _spin(self) -> None:
@@ -826,6 +951,19 @@ class WarmPoolMachine(RuleBasedStateMachine):
         for task in [t for t in self.warm_tasks if t.done()]:
             task.result()
             self.warm_tasks.remove(task)
+        for n, (task, _, started_td) in list(self.acquires.items()):
+            if not task.done():
+                continue
+            del self.acquires[n]
+            if task.cancelled():
+                continue
+            inst = task.result()
+            aid = inst.instance_id  # type: ignore[attr-defined]
+            if inst.metadata["claim_source"] == "warm_pool":  # type: ignore[attr-defined]
+                self.claimed.add(aid)
+            if self.teardowns != started_td:
+                self.late.add(aid)
+            self.acquired.append(aid)
 
     def _quiet(self) -> bool:
         return not self.torn_down and self.reap is None
@@ -843,6 +981,12 @@ class WarmPoolMachine(RuleBasedStateMachine):
     def first_actor(self) -> str:
         return self.acquire_new()
 
+    # Sometimes one pooled actor up front, so acquires also claim warm ones.
+    @initialize(warm=st.booleans())
+    def pool_first(self, warm: bool) -> None:
+        if warm:
+            self.loop.run_until_complete(self.driver.warm_pool_async("tmpl", 1))
+
     @precondition(lambda self: self._quiet())
     @rule(target=owned)
     def acquire_new(self) -> str:
@@ -857,6 +1001,39 @@ class WarmPoolMachine(RuleBasedStateMachine):
         inst = self.loop.run_until_complete(self.driver._acquire_internal("tmpl", "run-1"))
         self.claimed.add(inst.instance_id)
         return inst.instance_id
+
+    # An acquire through acquire_async, paused at its own gate: in get() for a
+    # warm claim, in create() for a cold one, whose create may already have
+    # landed on the server. It may finish or be cancelled at any later step,
+    # including while a teardown runs.
+    @precondition(lambda self: self._quiet())
+    @rule(lands_first=st.booleans())
+    def start_acquire(self, lands_first: bool) -> None:
+        gate = AcquireGate(lands_first=lands_first)
+
+        async def acquire() -> object:
+            acquire_gate.set(gate)
+            return await self.driver.acquire_async("tmpl", "run-1")
+
+        task = self.loop.create_task(acquire())
+        self.acquires[next(self.ids)] = (task, gate, self.teardowns)
+        self._spin()  # paused in get() or create()
+
+    @precondition(lambda self: self.acquires)
+    @rule(target=owned, data=st.data())
+    def finish_acquire(self, data: st.DataObject) -> object:
+        n = data.draw(st.sampled_from(sorted(self.acquires)))
+        self.acquires[n][1].event.set()
+        self._spin()
+        done, self.acquired = self.acquired, []
+        return multiple(*done)
+
+    @precondition(lambda self: self.acquires)
+    @rule(data=st.data())
+    def cancel_acquire(self, data: st.DataObject) -> None:
+        n = data.draw(st.sampled_from(sorted(self.acquires)))
+        self.acquires[n][0].cancel()
+        self._spin()
 
     # Recycles and warm_pool calls may start and finish while a teardown runs.
     @precondition(lambda self: not self.torn_down)
@@ -901,6 +1078,7 @@ class WarmPoolMachine(RuleBasedStateMachine):
     @rule()
     def start_teardown(self) -> None:
         self.client.delete_gate = asyncio.Event()
+        self.teardowns += 1
         self.reap = self.loop.create_task(self._fleet_teardown())
         self._spin()  # paused in the reap's delete() calls
 
@@ -934,8 +1112,15 @@ class WarmPoolMachine(RuleBasedStateMachine):
 
     @invariant()
     def nothing_survives_teardown(self) -> None:  # P-10
-        if self.torn_down and not self.inflight and not self.warm_tasks:
-            assert not self.client.live, f"alive after teardown: {sorted(self.client.live)}"
+        if (
+            self.torn_down
+            and not self.inflight
+            and not self.warm_tasks
+            and not self.acquires
+            and not self.driver._background_tasks
+        ):
+            left = self.client.live - self.late
+            assert not left, f"alive after teardown: {sorted(left)}"
 
     @invariant()
     def warm_pool_never_over_provisions(self) -> None:  # P-11

@@ -308,3 +308,16 @@ Append-only. Each entry: date, who, what, why.
   not change the owner, so a reap from another fleet on the same driver never deletes an environment
   in use. Not re-tagging when the create started after the run's reap ended (the fleet is closed):
   that is a caller error, as for a release, and the model leaves it out.
+- 2026-11-07, orchestrator: #276 fixes the AC-15.2 leak the acceptance-criteria audit found (#273).
+  A cold `acquire` cancelled while its `create()` is in flight, for example by its own `timeout_s`,
+  dropped the actor id, though the create may have landed. It now does what a cancelled `warm_pool`
+  call does (AC-15.8): owns the id under `WARM_POOL_RUN_ID` and, if a reap ran since it read
+  `_teardowns`, deletes it in a background task. A create that never landed is NotFound for the
+  reap, which counts as gone. The Dafny model has no cancelled-acquire action, so no model claim
+  changes. A reap's own failed deletes stay out of scope: the reap drops them and raises
+  `InfrastructureError` with their ids, as `warm_pool_drain.dfy` records. Server-side assumption: a
+  reap's delete can reach Substrate before a timed-out create lands there; the delete is NotFound,
+  the driver drops the id, and a create that lands later has no owner. This case is out of scope for
+  the driver: it relies on Substrate registering the actor name before a delete can miss it, or
+  cleaning up such an actor itself. The AC-15.8 path (a cancelled `warm_pool` call) makes the same
+  assumption.

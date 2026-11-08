@@ -127,8 +127,8 @@ Re-check teardown state after each await before pooling an actor, and reserve wa
 
 - **Location**: `clients/python/src/ate_env_rl/backend/substrate.py` (`_release_internal`,
   `_warm_pool_internal`, `_acquire_internal`, `_reap_internal`, `_return_popped`,
-  `_delete_unpooled`, `_keep_for_any_reap`, `_may_pool`, `_cancel_warm_calls`),
-  `clients/python/tests/test_warm_pool_accounting.py`.
+  `_delete_unpooled`, `_keep_for_any_reap`, `_may_pool`, `_cancel_warm_calls`,
+  `_own_abandoned_create`), `clients/python/tests/test_warm_pool_accounting.py`.
 - **Why**: Recycles pop actors from `_owned_actors` during `suspend()`; pooling after a concurrent
   `reap` leaks actors past teardown, and unreserved shortfalls over-provision.
 - **Teardown & claim checks**: `reap` increments `_teardowns` on entry and exit (`_reaping` counts
@@ -138,13 +138,15 @@ Re-check teardown state after each await before pooling an actor, and reserve wa
   stale still-owned actor and retries.
 - **Ownership & generations**: Actors stay in `_owned_actors` until deletion succeeds. A cold
   `acquire` whose create overlaps its own run's reap owns the actor under `WARM_POOL_RUN_ID` too;
-  its handle keeps the run id. `_reap_internal` clears `_warm_inflight` on entry and on exit,
-  dropping warm reservations on reap. `_warm_inflight` tracks in-flight creations per pool key,
-  `_teardowns`, and generation (`_pool_gens`), subtracting them from shortfalls; `unwarm_pool`, and
-  a `resize_pool` below pooled plus in-flight, bump `_pool_gens` (`_cancel_warm_calls`), so a
-  `warm_pool` call that started before deletes what it created (`drained` in `_warm_pool_internal`)
-  and does not pool it. `_delete_unpooled` re-tags a failed or cancelled delete of an unpooled actor
-  under `WARM_POOL_RUN_ID` unconditionally via `_keep_for_any_reap` (distinct from `release` routing
+  its handle keeps the run id. A cold create cancelled in flight (for example by `acquire`'s
+  `timeout_s`) owns the actor under `WARM_POOL_RUN_ID` (`_own_abandoned_create`), since the create
+  may have landed. `_reap_internal` clears `_warm_inflight` on entry and on exit, dropping warm
+  reservations on reap. `_warm_inflight` tracks in-flight creations per pool key, `_teardowns`, and
+  generation (`_pool_gens`), subtracting them from shortfalls; `unwarm_pool`, and a `resize_pool`
+  below pooled plus in-flight, bump `_pool_gens` (`_cancel_warm_calls`), so a `warm_pool` call that
+  started before deletes what it created (`drained` in `_warm_pool_internal`) and does not pool it.
+  `_delete_unpooled` re-tags a failed or cancelled delete of an unpooled actor under
+  `WARM_POOL_RUN_ID` unconditionally via `_keep_for_any_reap` (distinct from `release` routing
   popped actors through `_return_popped` based on `_may_pool`). `reap` updates the warm-replica
   gauge alongside the cleared pool, and `tests/test_warm_pool_accounting.py` exercises these
   interleavings with a Hypothesis state machine.

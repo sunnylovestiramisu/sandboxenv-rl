@@ -16,28 +16,28 @@ Conventions:
 - "Properties (proposed)" names the properties in [properties.md](./properties.md) that would
   validate a criterion over generated inputs. Those tests are not in the repository.
 
-| ID    | Title                                                                               | PR                           | Status at `ae29368` with #242                                                                                 |
-| ----- | ----------------------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| AC-1  | Base install carries no telemetry dependency and imports clean                      | 1, 2                         | pass: `pyproject.toml`, `test_registry_import_does_not_load_prometheus`                                       |
-| AC-2  | Telemetry enabled without the extras is a logged no-op                              | 1, 2                         | pass: `test_missing_extra_logs_one_error`, `test_observer_without_layers_is_report_only`                      |
-| AC-3  | One in-process trace from `ate_env_fleet.run` to `ate_env_client.*`, sync and async | 1, 2                         | partial: `test_nests_*` in `test_telemetry_tracing.py`; 3.4 open (P-14)                                       |
-| AC-4  | The W3C context is on the wire for all four gRPC call kinds                         | 1                            | pass: `test_metadata_carries_traceparent_on_all_call_kinds`, `test_metadata_has_no_traceparent_when_disabled` |
-| AC-5  | `ate-env-api` continues the client trace and exports it                             | 3                            | pass: `internal/apiservice/telemetry_test.go`; #114 and #186 cluster runs                                     |
-| AC-6  | `ate-env-api` serves the documented `ate_env_api_*` families                        | 3                            | pass: `internal/telemetry/metrics_test.go`, `cmd/ate-env-api/metrics_test.go`, `docs/metrics.md`              |
-| AC-7  | `RunReport` has the agent-sandbox-rl shape                                          | 2                            | pass: `test_report_shape_and_summary_order`, `test_report_summary_order_has_reap`                             |
-| AC-8  | Prometheus series register lazily with exactly the documented labels                | 2                            | pass: `test_registry_*` in `test_observability.py`, `test_telemetry_metrics.py`                               |
-| AC-9  | Labels stay bounded under many images and environments                              | 2                            | pass: `test_cardinality_*`                                                                                    |
-| AC-10 | swebench loader JSONL is unchanged and every event has a span                       | 5                            | pass: `events_test.go` with `testdata/events.golden.txt`                                                      |
-| AC-11 | Go client: provider injection, span names, no exporter by default                   | 4                            | pass: `clients/go/tracing_test.go`                                                                            |
-| AC-12 | Docs: `docs/observability.md`, generated `docs/metrics.md`, CI freshness check      | 5                            | pass: CI step `docs/metrics.md is generated from internal/telemetry`                                          |
-| AC-13 | CI runs the suites with and without the extras; lint and boilerplate pass           | 1, 2, 5                      | pass: `.github/workflows/ci.yaml`                                                                             |
-| AC-14 | Blast radius: existing tests pass unchanged; telemetry-off overhead under 2%        | all                          | partial: suites green; overhead not measured                                                                  |
-| AC-15 | Warm-pool accounting under concurrent acquire, recycle, `warm_pool` and teardown    | #221, #238, #239, #240, #242 | pass: 15.1 to 15.10 (`test_warm_pool_accounting.py`, `verify/*.dfy`)                                          |
-| AC-16 | The span and attribute inventory in `interfaces.md` matches the code, checked in CI | follow-up                    | not met: the table is hand-written; last checked against `c0c41ac`                                            |
-| AC-17 | The Go and Python clients emit the same span names and keys for shared operations   | follow-up                    | partial: mirrored tables in `attrs_test.go`, `executable_test.go`; no shared fixture                          |
-| AC-18 | No command line, secret or file content in any span attribute value                 | follow-up                    | partial: example tests in both clients; no property test                                                      |
-| AC-19 | Several fleets in one process share the warm-replica gauge                          | 2                            | pass: `test_warm_gauge_adds_up_across_observers_and_resets_only_own_share`                                    |
-| AC-20 | CI verifies the Dafny models with the documented counts                             | follow-up                    | pass: `Dafny models` job, `hack/verify/dafny.py`                                                              |
+| ID    | Title                                                                               | PR                                 | Status at `ae29368` with #242                                                                                 |
+| ----- | ----------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| AC-1  | Base install carries no telemetry dependency and imports clean                      | 1, 2                               | pass: `pyproject.toml`, `test_registry_import_does_not_load_prometheus`                                       |
+| AC-2  | Telemetry enabled without the extras is a logged no-op                              | 1, 2                               | pass: `test_missing_extra_logs_one_error`, `test_observer_without_layers_is_report_only`                      |
+| AC-3  | One in-process trace from `ate_env_fleet.run` to `ate_env_client.*`, sync and async | 1, 2                               | partial: `test_nests_*` in `test_telemetry_tracing.py`; 3.4 open (P-14)                                       |
+| AC-4  | The W3C context is on the wire for all four gRPC call kinds                         | 1                                  | pass: `test_metadata_carries_traceparent_on_all_call_kinds`, `test_metadata_has_no_traceparent_when_disabled` |
+| AC-5  | `ate-env-api` continues the client trace and exports it                             | 3                                  | pass: `internal/apiservice/telemetry_test.go`; #114 and #186 cluster runs                                     |
+| AC-6  | `ate-env-api` serves the documented `ate_env_api_*` families                        | 3                                  | pass: `internal/telemetry/metrics_test.go`, `cmd/ate-env-api/metrics_test.go`, `docs/metrics.md`              |
+| AC-7  | `RunReport` has the agent-sandbox-rl shape                                          | 2                                  | pass: `test_report_shape_and_summary_order`, `test_report_summary_order_has_reap`                             |
+| AC-8  | Prometheus series register lazily with exactly the documented labels                | 2                                  | pass: `test_registry_*` in `test_observability.py`, `test_telemetry_metrics.py`                               |
+| AC-9  | Labels stay bounded under many images and environments                              | 2                                  | pass: `test_cardinality_*`                                                                                    |
+| AC-10 | swebench loader JSONL is unchanged and every event has a span                       | 5                                  | pass: `events_test.go` with `testdata/events.golden.txt`                                                      |
+| AC-11 | Go client: provider injection, span names, no exporter by default                   | 4                                  | pass: `clients/go/tracing_test.go`                                                                            |
+| AC-12 | Docs: `docs/observability.md`, generated `docs/metrics.md`, CI freshness check      | 5                                  | pass: CI step `docs/metrics.md is generated from internal/telemetry`                                          |
+| AC-13 | CI runs the suites with and without the extras; lint and boilerplate pass           | 1, 2, 5                            | pass: `.github/workflows/ci.yaml`                                                                             |
+| AC-14 | Blast radius: existing tests pass unchanged; telemetry-off overhead under 2%        | all                                | partial: suites green; overhead not measured                                                                  |
+| AC-15 | Warm-pool accounting under concurrent acquire, recycle, `warm_pool` and teardown    | #221, #238, #239, #240, #242, #276 | pass: 15.1 to 15.10 (`test_warm_pool_accounting.py`, `verify/*.dfy`)                                          |
+| AC-16 | The span and attribute inventory in `interfaces.md` matches the code, checked in CI | follow-up                          | not met: the table is hand-written; last checked against `c0c41ac`                                            |
+| AC-17 | The Go and Python clients emit the same span names and keys for shared operations   | follow-up                          | partial: mirrored tables in `attrs_test.go`, `executable_test.go`; no shared fixture                          |
+| AC-18 | No command line, secret or file content in any span attribute value                 | follow-up                          | partial: example tests in both clients; no property test                                                      |
+| AC-19 | Several fleets in one process share the warm-replica gauge                          | 2                                  | pass: `test_warm_gauge_adds_up_across_observers_and_resets_only_own_share`                                    |
+| AC-20 | CI verifies the Dafny models with the documented counts                             | follow-up                          | pass: `Dafny models` job, `hack/verify/dafny.py`                                                              |
 
 ## AC-1: Base install carries no telemetry dependency
 
@@ -222,7 +222,11 @@ Conventions:
   pool.
 - 15.2: a recycle, `warm_pool` call or failed warm claim paused in an `await` while teardown runs
   deletes its actor when it resumes; after teardown no environment from the run is alive on
-  Substrate or tracked by the driver.
+  Substrate or tracked by the driver. Met by #276 for a cold `acquire` cancelled while its
+  `create()` is in flight (by its own `timeout_s` or by its caller): the driver owns the actor under
+  `WARM_POOL_RUN_ID`, so any run's reap deletes it, and if a reap ran since the acquire read
+  `_teardowns`, starts its delete in a background task; a teardown that already runs does not wait
+  for it. Before it, an actor whose create landed stayed alive and untracked (#273).
 - 15.3: overlapping `warm_pool(template, replicas=R)` calls create at most `R` warm actors in total
   for one pool key.
 - 15.4: `unwarm_pool`, and a `resize_pool` below what is pooled plus in flight, cancel the
@@ -256,8 +260,12 @@ Conventions:
   `dafny verify docs/plans/telemetry/verify/warm_pool.dfy`,
   `dafny verify docs/plans/telemetry/verify/warm_pool_generations.dfy` and
   `dafny verify docs/plans/telemetry/verify/warm_pool_drain.dfy`.
-- Expected: the pytest run passes (37 plain tests and the stateful `test_warm_pool_accounting`).
-  15.4: `test_unwarm_cancels_a_warm_pool_in_flight`,
+- Expected: the pytest run passes (40 plain tests and the stateful `test_warm_pool_accounting`).
+  15.2: `test_cold_acquire_cancelled_in_create_leaves_the_actor_for_any_reap` (cancelled by
+  `timeout_s`, and by the caller),
+  `test_cold_acquire_cancelled_in_create_after_its_runs_reap_deletes_the_actor` and the machine's
+  `start_acquire`, `finish_acquire` and `cancel_acquire` rules. 15.4:
+  `test_unwarm_cancels_a_warm_pool_in_flight`,
   `test_shrinking_resize_cancels_a_warm_pool_in_flight`,
   `test_warm_pool_after_unwarm_ignores_the_cancelled_call` and the machine's `unwarm` rule. 15.5:
   `test_failed_delete_after_teardown_leaves_warm_actors_for_any_later_reap`,
@@ -292,7 +300,8 @@ Conventions:
   fix). [verify/README.md](./verify/README.md) explains each.
 - Pass rule: pytest green; Dafny output matches. CI runs both (the Dafny check is AC-20).
 - Status: 15.1 to 15.10 pass. The 15.9 tests fail on the code before #238, the 15.7 test on the code
-  before #239, the 15.8 test on the code before #240, the 15.10 test on the code before #242.
+  before #239, the 15.8 test on the code before #240, the 15.10 test on the code before #242, the
+  15.2 cancelled-acquire tests on the code before #276.
 - Properties: P-9 (15.1, 15.6), P-10 (15.2, 15.5, 15.8, 15.9, 15.10), P-11 (15.3, 15.4), P-24
   (15.7).
 
