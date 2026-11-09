@@ -209,6 +209,18 @@ user needs to know across them.
 
 ### Fixed
 
+- ate-env-api: `WarmImage` deletes a probe whose create the control plane
+  commits after the probe's delete (a create attempt cut off by its deadline,
+  a cancel or `Unavailable` while the control plane queues, even when a later
+  attempt made the probe). Before, such a probe stayed `SUSPENDED`, untracked
+  and missing from `undeleted_probes`. The delete of such a probe is now
+  repeated for a short settle window, and each round lists the atespace once
+  before it gives its probe slots back and deletes any of its probes that
+  appeared later. When that list fails, those probes are listed in
+  `undeleted_probes`. A create that the control plane commits after the
+  settle window and the round's list still leaks and is not listed. A round
+  with such a probe holds its slots about 2 s longer, and a cancelled call
+  returns about 2 s later.
 - OpenHands layer: security re-lock of the agent-server dependencies for the
   open Dependabot alerts: pillow 13.0.0, pypdf 6.21.4, pyasn1 0.6.5, certifi
   2026.10.23, fastmcp and fastmcp-slim 3.4.11, oauthlib 4.0.1, setuptools

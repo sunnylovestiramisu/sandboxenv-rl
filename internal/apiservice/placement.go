@@ -75,7 +75,17 @@ var (
 	warmRetryInitial  = 500 * time.Millisecond
 	warmRetryMax      = 5 * time.Second
 	warmDeleteTimeout = 60 * time.Second
+	// warmLateCreateSettle is how long a probe whose create was never
+	// confirmed (an attempt was cut off) is watched after its delete found
+	// nothing: the control plane can still commit such a create after the
+	// delete, and the call then deletes the probe again.
+	warmLateCreateSettle = 2 * time.Second
 )
+
+// warmLateCreateRechecks is how many more deletes an unconfirmed probe gets
+// in its settle window, spread evenly, after one that found nothing. Few, so
+// a call whose creates all time out does not load the control plane.
+const warmLateCreateRechecks = 2
 
 var warmRunIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
@@ -269,7 +279,15 @@ func parseWarmOptions(req *ateenvv1alpha.WarmImageRequest, maxPerNode int) (warm
 // does not fail every probe of a round, and with it the call. A probe's
 // delete is retried too; a probe still there when the budget ends, which a
 // CRASHED probe is because Substrate cannot delete one today, is listed in
-// the coverage's undeleted_probes for the caller to sweep.
+// the coverage's undeleted_probes for the caller to sweep. A probe with a
+// create attempt that was cut off can still be committed by the control
+// plane after its delete, even when a later attempt was confirmed: its
+// delete is repeated for a short settle window, and before the round gives
+// its probe slots back it lists the atespace once and deletes any such probe
+// that appeared later. When that list fails, such probes are listed in
+// undeleted_probes, since the call cannot tell whether they are gone. A create
+// that the control plane commits after the settle window and the round's list
+// still leaks and is not listed.
 //
 // Across calls, the server caps the probes in flight per node of one worker
 // selector (WarmMaxProbesPerNode): a round takes nodes x probes_per_node
@@ -356,7 +374,11 @@ func (s *Server) WarmImage(req *ateenvv1alpha.WarmImageRequest, stream grpc.Serv
 		}
 		waited += w
 		results := s.warmRound(ctx, atespace, templateName, req.GetWorkerSelector(), opts, round, width, send)
-		undeleted := s.deleteWarmProbes(ctx, atespace, results)
+		undeleted, uncertain := s.deleteWarmProbes(ctx, atespace, results)
+		// A probe whose create lands after its delete still holds a slot
+		// until it is gone, so the round sweeps for such probes before it
+		// gives its slots back.
+		undeleted = s.sweepWarmProbes(ctx, atespace, uncertain, undeleted)
 		slots.release(width)
 		cov.UndeletedProbes = append(cov.UndeletedProbes, undeleted...)
 		failed := 0
@@ -414,28 +436,33 @@ func (s *Server) warmRound(ctx context.Context, atespace, template string, selec
 }
 
 // deleteWarmProbes deletes the probes of a settled round that this call made,
-// together, and returns the ids of the ones still there, sorted.
-func (s *Server) deleteWarmProbes(ctx context.Context, atespace string, results []warmResult) []string {
+// together, and returns the ids of the ones still there, sorted, plus the
+// set of uncertain probes.
+func (s *Server) deleteWarmProbes(ctx context.Context, atespace string, results []warmResult) ([]string, map[string]bool) {
 	var mu sync.Mutex
 	var undeleted []string
+	uncertain := map[string]bool{}
 	var wg sync.WaitGroup
 	for _, r := range results {
+		if r.uncertain {
+			uncertain[r.id] = true
+		}
 		if !r.created {
 			continue
 		}
 		wg.Add(1)
-		go func(id string) {
+		go func(id string, uncertain bool) {
 			defer wg.Done()
-			if err := s.deleteWarmProbe(ctx, atespace, id); err != nil {
+			if err := s.deleteWarmProbe(ctx, atespace, id, uncertain); err != nil {
 				mu.Lock()
 				undeleted = append(undeleted, id)
 				mu.Unlock()
 			}
-		}(r.id)
+		}(r.id, r.uncertain)
 	}
 	wg.Wait()
 	sort.Strings(undeleted)
-	return undeleted
+	return undeleted, uncertain
 }
 
 // warmMaxProbesPerNode is WarmMaxProbesPerNode with the default applied.
@@ -600,6 +627,10 @@ type warmResult struct {
 	// attempt was cut off, see createMayHaveLanded), so the call deletes it.
 	// A create the control plane refused made nothing to delete.
 	created bool
+	// uncertain: created, and a create attempt was cut off. That attempt can
+	// still be committed after the call's delete, even when a later attempt
+	// was confirmed (succeeded or found the name taken); see deleteWarmProbe.
+	uncertain bool
 }
 
 // warmProbe creates one probe environment, resumes it and waits until it is
@@ -633,6 +664,7 @@ func (s *Server) warmProbe(ctx context.Context, atespace, template string, selec
 	// off (cut) and may have made it even when a later attempt was refused
 	// for good. Either way the call deletes it.
 	r.created = err == nil || cut || createMayHaveLanded(err)
+	r.uncertain = cut
 	if err != nil {
 		r.err = fmt.Errorf("create: %w", err)
 		return r
@@ -795,15 +827,45 @@ func (s *Server) waitRunning(ctx context.Context, atespace, id string, timeout t
 // CRASHED probe (a resume that failed) is one: Substrate refuses to delete it
 // today (its DeleteVolumes prerequisite is not met), and that refusal is
 // final.
-func (s *Server) deleteWarmProbe(ctx context.Context, atespace, id string) error {
+//
+// For an uncertain probe (a create attempt was cut off), a probe that is gone
+// is not final: the control plane can commit that attempt after this delete,
+// whether the delete found nothing or deleted the probe a later attempt
+// made. The delete is then repeated warmLateCreateRechecks times over
+// warmLateCreateSettle, and a probe that appears in that time is deleted. A
+// delete that the budget cuts off after an earlier one left the probe gone
+// counts as done.
+func (s *Server) deleteWarmProbe(ctx context.Context, atespace, id string, uncertain bool) error {
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout)
 	defer cancel()
 	wait := warmRetryInitial
+	rechecks := 0
+	step := time.Duration(0)
+	if warmLateCreateRechecks > 0 {
+		step = warmLateCreateSettle / time.Duration(warmLateCreateRechecks)
+	}
 	for attempt := 1; ; attempt++ {
 		err := s.client.Delete(dctx, atespace, id)
 		// A missing probe is ate.ErrNotFound: the ate client folds the
 		// NotFound status into it, so no status code is left to read.
 		if err == nil || errors.Is(err, ate.ErrNotFound) {
+			if !uncertain || warmLateCreateSettle <= 0 || rechecks == warmLateCreateRechecks {
+				return nil
+			}
+			if deadline, ok := dctx.Deadline(); ok && time.Until(deadline) < step {
+				return nil
+			}
+			rechecks++
+			select {
+			case <-time.After(step):
+				continue
+			case <-dctx.Done():
+				return nil
+			}
+		}
+		if rechecks > 0 && (dctx.Err() != nil || grpcCode(err) == codes.DeadlineExceeded) {
+			// An earlier delete left the probe gone; the budget ended while
+			// this one watched for a late create.
 			return nil
 		}
 		retry := false
@@ -823,6 +885,57 @@ func (s *Server) deleteWarmProbe(ctx context.Context, atespace, id string) error
 		log.Printf("apiservice: warm probe %s/%s not deleted, left for a sweep: %v", atespace, id, err)
 		return err
 	}
+}
+
+// sweepWarmProbes deletes the round's uncertain probes that are still in
+// atespace after their deletes: a cut-off create that the control plane
+// committed after the probe's delete and its settle window. The round runs it
+// before it gives its probe slots back. It lists the atespace once, and only
+// when some probe was uncertain, so a round whose creates were all confirmed
+// costs nothing more. It returns undeleted with the probes it could not
+// delete added, sorted. When the list fails, it adds every uncertain probe:
+// the call cannot tell whether one landed, and the caller's sweep of a probe
+// that is gone finds nothing.
+func (s *Server) sweepWarmProbes(ctx context.Context, atespace string, uncertain map[string]bool, undeleted []string) []string {
+	if len(uncertain) == 0 {
+		return undeleted
+	}
+	known := map[string]bool{}
+	for _, id := range undeleted {
+		known[id] = true
+	}
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout)
+	defer cancel()
+	actors, err := s.client.List(lctx, atespace)
+	if err != nil {
+		log.Printf("apiservice: warm probes in %s not swept, listing them as undeleted: %v", atespace, err)
+		for id := range uncertain {
+			if !known[id] {
+				undeleted = append(undeleted, id)
+			}
+		}
+		sort.Strings(undeleted)
+		return undeleted
+	}
+	var toDelete []warmResult
+	for _, a := range actors {
+		id := a.GetMetadata().GetName()
+		if !uncertain[id] || known[id] {
+			continue
+		}
+		if a.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
+			continue
+		}
+		log.Printf("apiservice: warm probe %s/%s appeared after its delete; deleting it again", atespace, id)
+		toDelete = append(toDelete, warmResult{id: id, created: true, uncertain: false})
+		known[id] = true
+	}
+	if len(toDelete) > 0 {
+		lateUndeleted, _ := s.deleteWarmProbes(lctx, atespace, toDelete)
+		undeleted = append(undeleted, lateUndeleted...)
+	}
+	sort.Strings(undeleted)
+	return undeleted
 }
 
 func errMessage(err error) string {

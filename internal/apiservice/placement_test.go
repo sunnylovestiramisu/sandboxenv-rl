@@ -514,6 +514,7 @@ func TestWarmImageCancelDeletesTheProbes(t *testing.T) {
 // and resume are retried within the probe's budget, and the probe succeeds.
 func TestWarmImageRetriesTransientCreateAndResumeFailures(t *testing.T) {
 	apiservice.SetWarmTimings(t, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	apiservice.SetWarmLateCreateSettle(t, 20*time.Millisecond)
 	for name, inject := range map[string]struct {
 		code codes.Code
 		msg  string
@@ -560,6 +561,7 @@ func TestWarmImageRetriesTransientCreateAndResumeFailures(t *testing.T) {
 	}
 
 	// Once the budget is spent the probe fails, with the attempts noted.
+	apiservice.SetWarmLateCreateSettle(t, 20*time.Millisecond)
 	client, control = newTestEnv(t)
 	seedDomains(t, control)
 	control.FailCreates(1<<20, codes.Unavailable, "graceful_stop")
@@ -579,10 +581,12 @@ func TestWarmImageRetriesTransientCreateAndResumeFailures(t *testing.T) {
 	if n := control.Creates(); n < 6 {
 		t.Errorf("%d creates, want several attempts per probe", n)
 	}
-	// A create cut off may have landed, so each probe is deleted once; the
-	// NotFound that answers is the probe gone, not one left for a sweep.
-	if n := control.Deletes(); n != 2 {
-		t.Errorf("%d deletes, want one per probe whose create may have landed", n)
+	// A create cut off may have landed, so each probe is deleted, and since
+	// its create was never confirmed the delete is repeated twice in the
+	// settle window in case the create lands late. The NotFound that answers
+	// is the probe gone, not one left for a sweep.
+	if n := control.Deletes(); n != 2*3 {
+		t.Errorf("%d deletes, want 3 per probe whose create may have landed (one, then two re-checks)", n)
 	}
 	if len(cov.GetUndeletedProbes()) != 0 {
 		t.Errorf("undeleted = %v, want none: a NotFound delete is done", cov.GetUndeletedProbes())
@@ -801,6 +805,7 @@ func TestServerInfoAdvertisesPlacementFeatures(t *testing.T) {
 // probe, create plan: stored but reply lost, then refused).
 func TestWarmImageDeletesAProbeWhoseLostCreateLanded(t *testing.T) {
 	apiservice.SetWarmTimings(t, 10*time.Millisecond, 50*time.Millisecond, time.Second)
+	apiservice.SetWarmLateCreateSettle(t, 20*time.Millisecond)
 	client, control := newTestEnv(t)
 	seedDomains(t, control)
 	control.PlanCreates("pf-l-1-0",
@@ -816,8 +821,8 @@ func TestWarmImageDeletesAProbeWhoseLostCreateLanded(t *testing.T) {
 	if len(probes) != 1 || cov.GetFailed() != 1 || !strings.Contains(cov.GetError(), "create: ") || !strings.Contains(cov.GetError(), "atespace quota reached") {
 		t.Errorf("probes = %v, coverage = %v, want one probe refused for good", probes, cov)
 	}
-	if n := control.Deletes(); n != 1 {
-		t.Errorf("%d deletes, want 1: the lost create may have landed", n)
+	if n := control.Deletes(); n != 3 {
+		t.Errorf("%d deletes, want 3: the lost create may have landed and is rechecked", n)
 	}
 	if n := control.ActorCount(); n != 0 {
 		t.Errorf("%d actors left, want 0: the landed probe is deleted", n)

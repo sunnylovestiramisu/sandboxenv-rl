@@ -314,8 +314,13 @@ control plane under load hands out for a while (`Unavailable` from an api server
 `DeadlineExceeded` on the call, `FailedPrecondition` for a derived template not visible yet), and a
 probe's delete on `Aborted`, `Unavailable` and `ResourceExhausted` within a minute. A probe still
 there after that is listed in the coverage's `undeleted_probes` (`ate-env warm-image` prints them
-and exits non-zero): sweep them with `ate-env delete`. A probe whose resume failed ends `CRASHED`,
-which Substrate cannot delete today, so it is listed too, until the control plane takes the delete.
+and exits non-zero): sweep them with `ate-env delete`. A probe whose create was cut off can still
+be committed after its delete, even when a retry made it first; the call repeats that delete for a
+short window and lists the atespace once before the round gives its probe slots back, to delete any
+such probe. When that list fails, such probes are listed in `undeleted_probes`. A create that the
+control plane commits after the settle window and the round's list still leaks and is not listed.
+A probe whose resume failed ends `CRASHED`, which Substrate cannot delete today, so it is listed too,
+until the control plane takes the delete.
 Across calls, `ate-env-api` caps the probes in flight per node of one worker selector with
 `-warm-max-probes-per-node` (default 2, the default `probes_per_node`): a round takes `nodes x
 probes_per_node` slots on its selector before it creates its probes and gives them back once they

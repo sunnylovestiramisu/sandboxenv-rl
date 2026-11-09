@@ -50,3 +50,11 @@ func (s *Server) WarmProbesInFlight() int {
 	}
 	return total
 }
+
+// SetWarmLateCreateSettle sets how long WarmImage watches for the late create
+// of a probe whose create was never confirmed, for the duration of t.
+func SetWarmLateCreateSettle(t *testing.T, d time.Duration) {
+	old := warmLateCreateSettle
+	warmLateCreateSettle = d
+	t.Cleanup(func() { warmLateCreateSettle = old })
+}

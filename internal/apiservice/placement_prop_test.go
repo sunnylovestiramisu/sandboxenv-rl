@@ -59,6 +59,9 @@ const (
 // TestWarmImageDeletesAProbeWhoseLostCreateLanded.
 func TestPropWarmImageLeavesNoProbe(t *testing.T) {
 	apiservice.SetWarmTimings(t, time.Millisecond, 5*time.Millisecond, 500*time.Millisecond)
+	// A settle window shorter than the 2 s default keeps the run fast; the
+	// sweep before the call returns catches a create that lands later.
+	apiservice.SetWarmLateCreateSettle(t, 200*time.Millisecond)
 	steps := []createStep{createRefused, createLost, createFinal}
 	lostCodes := []codes.Code{codes.Unavailable, codes.DeadlineExceeded}
 	deleteCodes := []codes.Code{codes.Aborted, codes.Unavailable, codes.ResourceExhausted}

@@ -404,7 +404,7 @@ func (c *Client) List(ctx context.Context, atespace string) ([]*ateapipb.Actor, 
 	for {
 		resp, err := c.control.ListActors(ctx, &ateapipb.ListActorsRequest{
 			Atespace: atespace,
-			Options:  &ateapipb.ListOptions{PageToken: token},
+			Options:  &ateapipb.ListOptions{PageToken: token, PageSize: 1000},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("ate: listing actors in %q: %w", atespace, wrapGRPCError(err))
