@@ -209,6 +209,16 @@ user needs to know across them.
 
 ### Fixed
 
+- `integrations/nemo-gym`: `exec(user=...)` no longer raises `ValueError`.
+  NeMo Gym `main` sends `user` on many commands (the Harbor environment
+  server's default user, `user="root"` from the transfer helpers), and each
+  one failed. The provider now probes the image once per sandbox and runs the
+  command through `sudo -n -u <user>` when the image's user has a passwordless
+  sudo, or through `su` when the image runs as root; a user that is the
+  image's own runs as is. An image with neither, one whose sudo wants a
+  password, and a uid under `su` return code 125 with
+  `error_type="user_switch_unavailable"`, which Gym's transfer helpers answer
+  by running as the default user.
 - ate-env-api: `WarmImage` deletes a probe whose create the control plane
   commits after the probe's delete (a create attempt cut off by its deadline,
   a cancel or `Unavailable` while the control plane queues, even when a later

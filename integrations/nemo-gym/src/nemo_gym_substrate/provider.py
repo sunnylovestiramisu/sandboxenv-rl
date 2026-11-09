@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -71,8 +72,8 @@ _PROVIDER_NAME = "substrate"
 # Client-side slack on top of exec(timeout_s=...): the guest enforces the
 # deadline itself (see exec), so the client only has to outlive it.
 _EXEC_GRACE_S = 5.0
-# Deadline for one readiness probe. A guest that is still booting may hold a
-# call open; bounding it keeps the poll loop honest.
+# Deadline for one readiness or user probe. A guest that is still booting may
+# hold a call open; bounding it keeps the poll loop honest.
 _PROBE_TIMEOUT_S = 10.0
 # Smallest guest deadline exec() asks for. The guest takes any positive
 # duration, but zero selects its default (an hour) and a sub-second kill
@@ -116,6 +117,20 @@ _POLICY_NEVER = "never"
 _POLICY_PAUSE = "pause_after_exec"
 _POLICY_SUSPEND = "suspend_after_exec"
 _POLICY_MODES = {_POLICY_PAUSE: SuspendMode.LOCAL, _POLICY_SUSPEND: SuspendMode.DURABLE}
+# The guest runs commands as the image's user. An exec that names another user
+# is wrapped in sudo, or in su when the image runs as root; this probe learns
+# the image user's name and uid and which of the two the image has. A sudo
+# that wants a password (no NOPASSWD entry, `requiretty`) counts as absent:
+# `sudo -n true` must succeed, a passwordless switch to root, the user Gym's
+# transfer helpers send. A root image whose sudo refuses falls through to su.
+# When neither can switch, the result is Gym's `user_switch_unavailable`,
+# which Gym's transfer helpers answer by running as the default user.
+_USER_PROBE = (
+    "id -un 2>/dev/null; id -u 2>/dev/null; "
+    "if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo tool=sudo; "
+    "elif command -v su >/dev/null 2>&1; then echo tool=su; fi"
+)
+_USER_SWITCH_UNAVAILABLE = "user_switch_unavailable"
 
 
 def _validate_ports(ports: object) -> list[int]:
@@ -161,15 +176,59 @@ def _runtime_failure(
 ) -> SandboxExecResult:
     """An exec result for a command the sandbox did not run to completion.
 
-    ``error_type`` is "timeout" or "sandbox"; the return code is the runtime
-    sentinel. Output the command produced before it was cut is kept, and
-    ``message`` goes on stderr after it."""
+    ``error_type`` is "timeout", "sandbox" or "user_switch_unavailable"; the
+    return code is the runtime sentinel. Output the command produced before
+    it was cut is kept, and ``message`` goes on stderr after it."""
     return SandboxExecResult(
         stdout=stdout,
         stderr=f"{stderr}\n{message}" if stderr else message,
         return_code=_SANDBOX_RUNTIME_RETURN_CODE,
         error_type=error_type,
     )
+
+
+class _UserSwitchUnavailable(Exception):
+    """The image cannot run a command as the requested user; the message says why."""
+
+
+def _as_user_command(
+    command: str, user: str | int, env: Mapping[str, str], switch: _UserSwitch
+) -> str:
+    """``command`` wrapped to run as ``user``; ``_UserSwitchUnavailable`` when
+    the image cannot switch.
+
+    The environment is inlined with ``env -- K=V ...``: sudo's ``env_reset``
+    drops the caller's variables, and the guest applies them to the outer
+    process only. The ``--`` keeps a key that starts with ``-`` from being
+    read as an option; su takes its options before the user for the same
+    reason. Both forms run on BusyBox and util-linux."""
+    name = str(user)
+    if name in switch.identities:
+        return command
+    inner = "sh -c " + shlex.quote(command)
+    if env:
+        inner = "env -- " + " ".join(shlex.quote(f"{k}={v}") for k, v in env.items()) + " " + inner
+    if switch.tool == "sudo":
+        target = f"#{name}" if name.isdigit() else name
+        return f"sudo -n -u {shlex.quote(target)} {inner}"
+    if switch.tool == "su" and "0" in switch.identities:
+        if name.isdigit():
+            raise _UserSwitchUnavailable(
+                f"the image switches users with su, which takes a name, not the uid {name}"
+            )
+        return f"su -s /bin/sh -c {shlex.quote(inner)} -- {shlex.quote(name)}"
+    raise _UserSwitchUnavailable(
+        "the image runs commands as its own user and has no passwordless sudo "
+        "(or su, when it runs as root)"
+    )
+
+
+def _parse_user_probe(stdout: str | None) -> _UserSwitch:
+    """The switch a run of ``_USER_PROBE`` printed: its ``tool=`` line, and the
+    other lines as the image user's identities."""
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    tool = next((line.removeprefix("tool=") for line in lines if line.startswith("tool=")), "")
+    return _UserSwitch(frozenset(line for line in lines if not line.startswith("tool=")), tool)
 
 
 def _require_keys(options: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
@@ -366,6 +425,18 @@ class _Parking:
     parked: bool = False
 
 
+@dataclass(frozen=True)
+class _UserSwitch:
+    """What a sandbox's image runs commands as, and how it runs them as another user."""
+
+    # Name and uid of the image's user; empty when the image has no `id`, and
+    # then every user gets the wrapper, or the refusal.
+    identities: frozenset[str]
+    # "sudo" (passwordless, for root), "su", or "" when the image has neither
+    # or its sudo wants a password.
+    tool: str
+
+
 class SubstrateSandboxProvider:
     """NeMo Gym sandbox provider running sandboxes as Substrate actors.
 
@@ -402,6 +473,9 @@ class SubstrateSandboxProvider:
         self._park_tasks: set[asyncio.Task] = set()
         self._park_mode: SuspendMode | None = _POLICY_MODES.get(self._create.suspend_policy)
         self._local_refused = False
+        # The user switch per sandbox id, probed on the first exec that names a
+        # user and dropped on close.
+        self._user_switch: dict[str, _UserSwitch] = {}
         # The channel is opened lazily so constructing a provider never dials.
         self._client: Client | None = client
         self._owns_client = client is None
@@ -475,11 +549,6 @@ class SubstrateSandboxProvider:
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        if user is not None:
-            raise ValueError(
-                "the substrate provider does not support per-exec `user`: "
-                "the guest daemon runs commands as the actor's configured user"
-            )
         raw = handle.raw or {}
         merged_env = {**(raw.get("env") or {}), **(env or {})}
         effective_cwd = cwd or raw.get("workdir") or ""
@@ -496,10 +565,26 @@ class SubstrateSandboxProvider:
         cancelled = False
         try:
             async with self._in_flight(handle):
-                result = await self._run(
-                    handle, argv, cwd=effective_cwd, env=merged_env, guest_timeout=guest_timeout,
-                    timeout_s=timeout_s,
-                )
+                result: SandboxExecResult | None = None
+                if user is not None:
+                    switch = await self._user_switch_for(handle)
+                    if isinstance(switch, SandboxExecResult):
+                        result = switch
+                    else:
+                        try:
+                            argv = ["sh", "-c", _as_user_command(command, user, merged_env, switch)]
+                        except _UserSwitchUnavailable as exc:
+                            # No process started: 125 is the runtime sentinel, as
+                            # Gym's OpenSandbox provider reports the same refusal.
+                            result = _runtime_failure(
+                                _USER_SWITCH_UNAVAILABLE,
+                                f"substrate provider: cannot run as user {user!r}: {exc}",
+                            )
+                if result is None:
+                    result = await self._run(
+                        handle, argv, cwd=effective_cwd, env=merged_env, guest_timeout=guest_timeout,
+                        timeout_s=timeout_s,
+                    )
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -516,7 +601,10 @@ class SubstrateSandboxProvider:
         env: dict[str, str],
         guest_timeout: float | None,
         timeout_s: int | float | None,
+        what: str = "exec",
     ) -> SandboxExecResult:
+        # `what` names the command in a timeout message: the caller's exec, or
+        # a probe the provider ran on its own with its own deadline.
         # A failure of the sandbox itself is a result with an `error_type`, not
         # an exception: that is the shape Gym's agents check to end a rollout
         # whose sandbox is gone, and it is how Gym's own providers report it.
@@ -536,7 +624,7 @@ class SubstrateSandboxProvider:
             with contextlib.suppress(EnvError):
                 await process.kill()
             return _runtime_failure(
-                "timeout", f"substrate provider: exec timed out after {timeout_s}s"
+                "timeout", f"substrate provider: {what} timed out after {timeout_s}s"
             )
         except EnvError as exc:
             return _runtime_failure("sandbox", self._sandbox_failure(handle, exc))
@@ -550,11 +638,28 @@ class SubstrateSandboxProvider:
             # the timeout it is, with the output the command got out first.
             return _runtime_failure(
                 "timeout",
-                f"substrate provider: exec timed out after {timeout_s}s (killed by the guest)",
+                f"substrate provider: {what} timed out after {timeout_s}s (killed by the guest)",
                 stdout=result.stdout,
                 stderr=result.stderr,
             )
         return result
+
+    async def _user_switch_for(self, handle: SandboxHandle) -> _UserSwitch | SandboxExecResult:
+        """The sandbox's user switch, probed once; a probe the sandbox could not
+        run is returned as its failure result and not cached. The cached switch
+        holds for the sandbox's life: a setup command that installs or unlocks
+        sudo later does not change it."""
+        switch = self._user_switch.get(handle.sandbox_id)
+        if switch is not None:
+            return switch
+        probe = await self._run(
+            handle, ["sh", "-c", _USER_PROBE], cwd="", env={},
+            guest_timeout=_PROBE_TIMEOUT_S, timeout_s=_PROBE_TIMEOUT_S, what="user probe",
+        )
+        if probe.error_type:
+            return probe
+        switch = self._user_switch[handle.sandbox_id] = _parse_user_probe(probe.stdout)
+        return switch
 
     @staticmethod
     def _sandbox_failure(handle: SandboxHandle, exc: EnvError) -> str:
@@ -744,6 +849,7 @@ class SubstrateSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         atespace = self._atespace_of(handle.raw or {})
+        self._user_switch.pop(handle.sandbox_id, None)
         state = self._parking.pop(handle.sandbox_id, None)
         if state is None:
             await self._best_effort_delete(handle.sandbox_id, atespace)

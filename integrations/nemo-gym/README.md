@@ -30,7 +30,7 @@ One gRPC endpoint, `ate-env-api`, carries everything (see the
 | Provider call | `ate_env_rl` call | Where it lands |
 |---|---|---|
 | `create(spec)` | `Client.create(id, template_name=…, template_atespace=…, rootfs_image=…)`, then `Env.shell("true")` until it answers, then `Env.write_file` for `spec.files` | `EnvironmentService` → Substrate control plane; the probe and the files go to the guest |
-| `exec(handle, cmd, cwd=, env=, timeout_s=)` | `Env.start_process(["sh","-c",cmd], cwd, env, timeout=)` + `Process.output(follow=True)` | `ProcessService` in `ate-env-guest`, proxied through the atenet router |
+| `exec(handle, cmd, cwd=, env=, timeout_s=, user=)` | `Env.start_process(["sh","-c",cmd], cwd, env, timeout=)` + `Process.output(follow=True)`; with `user=`, `cmd` goes through `sudo -n -u <user>` or `su` (see Resource mapping) | `ProcessService` in `ate-env-guest`, proxied through the atenet router |
 | `upload_file` / `download_file` | `Env.write_file` / `Env.read_file_bytes` | `FileSystemService` in the guest |
 | `status(handle)` | `Client.get(id)` → lifecycle status | `EnvironmentService`; does **not** wake a parked sandbox |
 | `close(handle)` | `Client.delete(id)`, NOT_FOUND-safe | `EnvironmentService` |
@@ -474,6 +474,14 @@ exactly what golden-snapshot starts and fork-from-golden creates are for.
   answer within `timeout_s` plus a few seconds and the client killed the process.
   `error_type="sandbox"`: the environment is gone (`NOT_FOUND`) or the call could not reach the
   guest (`ate_env_rl.EnvError`, named on stderr). `upload_file()` and `download_file()` still raise.
+- `exec(user=…)` runs the command through `sudo -n -u <user>` when the image's user has a
+  passwordless sudo (`sudo -n true` succeeds), or through `su` when the image runs as root; the
+  guest itself runs commands as the image's user, which the provider probes once per sandbox. A
+  non-root image therefore needs a `NOPASSWD` sudoers entry for its user, because Gym's transfer
+  helpers run as `user="root"`. A user that is the image's own runs as is. An image with neither
+  tool, one whose sudo wants a password, and a uid under `su` (which takes a name only) return
+  return code 125 with `error_type="user_switch_unavailable"`, which Gym's transfer helpers
+  answer by running as the default user.
 - `status()` reads the environment's lifecycle state from `ate-env-api` without touching the
   guest, so polling it never wakes a parked sandbox. A **suspended or paused actor reports
   `PAUSED`**: it is alive and one call away, since the router resumes it on the next command (a
@@ -484,7 +492,6 @@ Known limits (tracked in the RL-on-Substrate proposal):
 
 - `spec.ttl_s` is **not enforced** — substrate has no server-side TTL yet; clean up via
   `close()`. A crashed harness leaks actors until deleted.
-- `exec(user=…)` raises: commands run as the actor's configured user.
 
 ## Troubleshooting
 

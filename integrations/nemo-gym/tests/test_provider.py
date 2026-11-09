@@ -26,6 +26,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -242,12 +245,168 @@ def test_exec_without_timeout_has_no_guest_deadline():
     run(t())
 
 
-def test_exec_rejects_user():
+def _commands(fake) -> list[str]:
+    return [start["command"][-1] for start in fake.starts]
+
+
+def test_exec_as_the_image_user_runs_unwrapped_and_probes_once():
     async def t():
-        async with stack() as (provider, _):
+        async with stack() as (provider, fake):
+            fake.image_user(provider_mod._USER_PROBE, "root", 0, su=False)
             handle = await provider.create(SandboxSpec())
-            with pytest.raises(ValueError, match="user"):
-                await provider.exec(handle, "id", user="root")
+            for user in ("root", 0):
+                result = await provider.exec(handle, "id", user=user)
+                assert result.return_code == 0 and result.error_type is None
+            assert _commands(fake).count(provider_mod._USER_PROBE) == 1
+            assert _commands(fake)[-1] == "id"
+
+    run(t())
+
+
+def test_exec_without_user_does_not_probe():
+    async def t():
+        async with stack() as (provider, fake):
+            handle = await provider.create(SandboxSpec())
+            await provider.exec(handle, "id")
+            assert provider_mod._USER_PROBE not in _commands(fake)
+
+    run(t())
+
+
+def test_exec_as_another_user_wraps_in_sudo_with_the_env():
+    async def t():
+        async with stack() as (provider, fake):
+            fake.image_user(provider_mod._USER_PROBE, "app", 1000, sudo="passwordless")
+            handle = await provider.create(SandboxSpec(env={"A": "1"}))
+            result = await provider.exec(handle, "id -u", env={"B": "x y"}, user="root")
+            assert result.return_code == 0
+            assert _commands(fake)[-1] == "sudo -n -u root env -- A=1 'B=x y' sh -c 'id -u'"
+            await provider.exec(handle, "true", user=0)
+            assert _commands(fake)[-1].startswith("sudo -n -u '#0' ")
+
+    run(t())
+
+
+def test_exec_as_another_user_from_root_uses_su():
+    async def t():
+        async with stack() as (provider, fake):
+            # A root image whose sudo wants a password switches with su.
+            fake.image_user(provider_mod._USER_PROBE, "root", 0, sudo="locked")
+            handle = await provider.create(SandboxSpec())
+            await provider.exec(handle, "id", user="app")
+            assert _commands(fake)[-1] == "su -s /bin/sh -c 'sh -c id' -- app"
+            # su wants a name, and the refusal says so.
+            result = await provider.exec(handle, "id", user=1000)
+            assert result.return_code == 125
+            assert result.error_type == "user_switch_unavailable"
+            assert "su" in result.stderr and "uid 1000" in result.stderr
+            assert "no passwordless sudo" not in result.stderr
+
+    run(t())
+
+
+@pytest.mark.parametrize("sudo", ["absent", "locked"])
+@pytest.mark.parametrize("su", [True, False])
+def test_exec_as_another_user_without_a_passwordless_sudo_is_unavailable(sudo, su):
+    # su switches from root only, so a non-root image needs a sudo that takes
+    # no password. One with a locked sudo must get the same refusal as one
+    # without sudo: Gym's transfer helpers fall back on this error_type only.
+    async def t():
+        async with stack() as (provider, fake):
+            fake.image_user(provider_mod._USER_PROBE, "app", 1000, sudo=sudo, su=su)
+            handle = await provider.create(SandboxSpec())
+            starts = len(fake.starts)
+            result = await provider.exec(handle, "id", user="root")
+            assert result.return_code == 125
+            assert result.error_type == "user_switch_unavailable"
+            assert "root" in result.stderr and "passwordless sudo" in result.stderr
+            # Only the probe ran; the command did not.
+            assert _commands(fake)[starts:] == [provider_mod._USER_PROBE]
+
+    run(t())
+
+
+_SH = shutil.which("sh")
+_ID = shutil.which("id")
+
+
+@pytest.mark.skipif(not _SH or not _ID, reason="needs a POSIX sh and id on the host")
+@pytest.mark.parametrize(
+    ("sudo", "su", "tool"),
+    [
+        ("absent", True, "su"),
+        ("absent", False, ""),
+        ("passwordless", True, "sudo"),
+        ("locked", True, "su"),
+        ("locked", False, ""),
+    ],
+)
+def test_user_probe_in_a_real_shell(tmp_path: Path, sudo: str, su: bool, tool: str):
+    # The probe script under the host's sh, with a PATH that holds `id` and
+    # stubs only. The fake answers the probe from its text, so this is the test
+    # that would catch a typo in it, and it pins FakeAteEnv.image_user's
+    # mapping: a sudo that wants a password is not reported as sudo.
+    import pwd  # POSIX only, as sh is
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    os.symlink(_ID, bin_dir / "id")
+    stubs = {
+        "passwordless": f'#!{_SH}\n[ "$*" = "-n true" ] && exit 0\nexit 1\n',
+        "locked": f'#!{_SH}\necho "sudo: a password is required" >&2\nexit 1\n',
+    }
+    if sudo in stubs:
+        (bin_dir / "sudo").write_text(stubs[sudo])
+        (bin_dir / "sudo").chmod(0o700)
+    if su:
+        # The probe only looks su up.
+        (bin_dir / "su").write_text(f"#!{_SH}\nexit 0\n")
+        (bin_dir / "su").chmod(0o700)
+    ran = subprocess.run(
+        [_SH, "-c", provider_mod._USER_PROBE],
+        env={"PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert ran.returncode == 0, ran.stderr
+    switch = provider_mod._parse_user_probe(ran.stdout)
+    assert switch.tool == tool
+    assert switch.identities == {pwd.getpwuid(os.getuid()).pw_name, str(os.getuid())}
+
+
+def test_exec_user_probe_failure_is_a_sandbox_failure_and_not_cached():
+    async def t():
+        async with stack() as (provider, fake):
+            handle = await provider.create(SandboxSpec())
+            fake.refuse_starts[provider_mod._USER_PROBE] = grpc.StatusCode.UNAVAILABLE
+            result = await provider.exec(handle, "id", user="root")
+            assert result.error_type == "sandbox"
+            del fake.refuse_starts[provider_mod._USER_PROBE]
+            fake.image_user(provider_mod._USER_PROBE, "root", 0)
+            result = await provider.exec(handle, "id", user="root")
+            assert result.return_code == 0 and result.error_type is None
+
+    run(t())
+
+
+def test_exec_user_probe_timeout_names_the_probe_and_is_not_cached(monkeypatch):
+    monkeypatch.setattr(provider_mod, "_PROBE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(provider_mod, "_EXEC_GRACE_S", 0.05)
+
+    async def t():
+        async with stack() as (provider, fake):
+            handle = await provider.create(SandboxSpec())
+            fake.hang.add(provider_mod._USER_PROBE)
+            result = await provider.exec(handle, "id", user="root", timeout_s=30)
+            assert (result.return_code, result.error_type) == (125, "timeout")
+            # The probe's deadline, not the caller's timeout_s.
+            assert "user probe timed out after 0.01s" in result.stderr
+            fake.hang.discard(provider_mod._USER_PROBE)
+            fake.image_user(provider_mod._USER_PROBE, "root", 0)
+            result = await provider.exec(handle, "id", user="root")
+            assert result.return_code == 0 and result.error_type is None
 
     run(t())
 

@@ -78,6 +78,7 @@ class FakeAteEnv:
     delete_code: grpc.StatusCode | None = None
     ready_after_probes: int = 0  # fail this many `true` probes with UNAVAILABLE first
     hang: set[str] = field(default_factory=set)  # shell commands whose process never exits
+    outputs: dict[str, bytes] = field(default_factory=dict)  # stdout per shell command (exit 0)
     # Shell commands whose StartProcess the fake refuses with this status, as
     # a guest the API cannot reach would.
     refuse_starts: dict[str, grpc.StatusCode] = field(default_factory=dict)
@@ -112,6 +113,23 @@ class FakeAteEnv:
 
     def set_status(self, env_id: str, status: EnvironmentStatus) -> None:
         self.envs[env_id]["status"] = int(status)
+
+    def image_user(
+        self, probe: str, name: str, uid: int, *, sudo: str = "absent", su: bool = True
+    ) -> None:
+        """Answer ``probe``, the provider's user probe, as an image whose user is
+        ``name``/``uid`` would. ``sudo`` is "absent", "locked" (installed, wants
+        a password) or "passwordless"; only the last reports ``tool=sudo``, the
+        others fall through to ``tool=su`` when the image has su. The probe's
+        test in a real shell pins this mapping to the script."""
+        if sudo not in ("absent", "locked", "passwordless"):
+            raise ValueError(f"sudo={sudo!r}")
+        lines = [name, str(uid)]
+        if sudo == "passwordless":
+            lines.append("tool=sudo")
+        elif su:
+            lines.append("tool=su")
+        self.outputs[probe] = "".join(f"{line}\n" for line in lines).encode()
 
 
 async def _env_from_metadata(state: FakeAteEnv, context) -> str:
@@ -237,6 +255,8 @@ class FakeProcessService(guest_pb2_grpc.ProcessServiceServicer):
         proc = FakeProc(env_id=env_id, argv=argv, timeout_s=timeout_s)
         if shell_cmd in s.hang:
             proc.exit_code = None
+        elif shell_cmd in s.outputs:
+            proc.stdout, proc.exit_code = s.outputs[shell_cmd], 0
         elif "exit 7" in shell_cmd:
             proc.stderr, proc.exit_code = b"boom", 7
         else:
