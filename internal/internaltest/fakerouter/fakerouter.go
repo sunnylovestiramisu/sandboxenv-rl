@@ -77,6 +77,9 @@ type Router struct {
 	mu     sync.Mutex
 	guests map[string]http.Handler
 	ports  map[portKey]http.Handler
+	// open and total count the requests forwarded to guest handlers, by
+	// URL path (the gRPC method): in flight, and since New.
+	open, total map[string]int
 }
 
 type portKey struct {
@@ -87,7 +90,37 @@ type portKey struct {
 // New returns a Router that considers every actor running unless a Running
 // callback is set.
 func New() *Router {
-	return &Router{guests: make(map[string]http.Handler), ports: make(map[portKey]http.Handler)}
+	return &Router{
+		guests: make(map[string]http.Handler),
+		ports:  make(map[portKey]http.Handler),
+		open:   make(map[string]int),
+		total:  make(map[string]int),
+	}
+}
+
+// GuestRequests reports the requests for path (a gRPC method such as
+// "/ateenv.v1alpha.ProcessService/StreamProcessOutput") that the router has
+// forwarded to guest handlers: open is how many are in flight now, total how
+// many there have been. A gRPC stream is one request for its whole life.
+func (r *Router) GuestRequests(path string) (open, total int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.open[path], r.total[path]
+}
+
+// serveGuest forwards req to a guest handler and counts it while it runs.
+func (r *Router) serveGuest(h http.Handler, w http.ResponseWriter, req *http.Request) {
+	path := req.URL.Path
+	r.mu.Lock()
+	r.open[path]++
+	r.total[path]++
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.open[path]--
+		r.mu.Unlock()
+	}()
+	h.ServeHTTP(w, req)
 }
 
 // RegisterPort installs the handler that serves CONNECT tunnels to port on
@@ -130,7 +163,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "actor "+id+" is not running", http.StatusServiceUnavailable)
 		return
 	}
-	guest.ServeHTTP(w, req)
+	r.serveGuest(guest, w, req)
 }
 
 func actorID(req *http.Request) (string, bool) {

@@ -516,9 +516,10 @@ benchmark of its own.
 
 ## Two things the first runs showed
 
-- Commands run as start, poll, read rather than through the SDK's streaming
-  shell: the router's route timeout (five minutes by default) cuts a single
-  streamed request, and SWE-bench test runs regularly exceed it.
+- Commands run as start, poll, read (the Go client's `ShellRequest.Poll`)
+  rather than through the SDK's streaming shell: the router's route timeout
+  (five minutes by default) cuts a single streamed request, and SWE-bench
+  test runs regularly exceed it.
 - On a large pool a new actor rarely lands on a node that already has its
   image, so time to first instruction is the cold pull plus the golden bake
   (about 20 s) for nearly every task. Report cold and warm passes separately.

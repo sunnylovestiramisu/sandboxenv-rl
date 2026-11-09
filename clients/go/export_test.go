@@ -14,7 +14,20 @@
 
 package env
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// SetPollBoundsForTest sets the first and the largest interval between the
+// polls of a ShellRequest.Poll run on c, so a test of many polls runs fast.
+func SetPollBoundsForTest(c *Client, minPoll, maxPoll time.Duration) {
+	c.pollMin, c.pollMax = minPoll, maxPoll
+}
+
+// PollRetries is how many consecutive transient poll errors a
+// ShellRequest.Poll run tolerates.
+const PollRetries = pollRetries
 
 // SetRPCSemconvModeForTest sets the rpc.* convention of rpcAttrs ("new",
 // "old" or "dup") for the rest of t, so that a test does not depend on the

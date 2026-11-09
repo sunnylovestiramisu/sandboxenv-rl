@@ -56,11 +56,10 @@ type fakeAPI struct {
 
 	mu sync.Mutex
 	// pollsUntilExit is how many GetProcess calls a process stays running;
-	// unavailableStarts and unavailablePolls are how many StartProcess or
-	// GetProcess calls answer Unavailable first.
+	// unavailableStarts is how many StartProcess calls answer Unavailable
+	// first.
 	pollsUntilExit    int
 	unavailableStarts int
-	unavailablePolls  int
 	exitCode          int32
 	stdout, stderr    string
 
@@ -247,10 +246,6 @@ func (f *fakeAPI) StartProcess(_ context.Context, req *ateenvv1alpha.StartProces
 func (f *fakeAPI) GetProcess(_ context.Context, req *ateenvv1alpha.GetProcessRequest) (*ateenvv1alpha.Process, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.unavailablePolls > 0 {
-		f.unavailablePolls--
-		return nil, status.Error(codes.Unavailable, "router: no healthy upstream")
-	}
 	f.polls[req.GetProcessId()]++
 	p := &ateenvv1alpha.Process{ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_RUNNING}
 	if f.polls[req.GetProcessId()] > f.pollsUntilExit {
@@ -325,12 +320,13 @@ func newFakeBackend(t *testing.T, api *fakeAPI) *EnvBackend {
 	}
 	t.Cleanup(func() { _ = c.Close(); _ = conn.Close(); srv.Stop() })
 	b := &EnvBackend{clients: []*env.Client{c}, atespace: "ate-env", baseTemplate: "default-template", deletes: defaultDeleteLimits()}
-	WithPollBounds(time.Millisecond, 5*time.Millisecond)(b)
 	return b
 }
 
+// Run maps the SDK's polled run to a Result. The polling itself (retries,
+// the kill of an abandoned process) is tested in clients/go.
 func TestEnvBackendRunCollectsExitAndOutput(t *testing.T) {
-	api := &fakeAPI{pollsUntilExit: 3, exitCode: 4, stdout: "out", stderr: "err"}
+	api := &fakeAPI{pollsUntilExit: 1, exitCode: 4, stdout: "out", stderr: "err"}
 	b := newFakeBackend(t, api)
 	sb, err := b.Create(context.Background(), "e1", "reg/img@"+goodDigest)
 	if err != nil {
@@ -351,42 +347,6 @@ func TestEnvBackendRunCollectsExitAndOutput(t *testing.T) {
 	}
 	if !strings.HasSuffix(api.commands[0], "echo hi") {
 		t.Fatalf("command %q", api.commands[0])
-	}
-}
-
-func TestEnvBackendRunToleratesTransientPolls(t *testing.T) {
-	api := &fakeAPI{pollsUntilExit: 1, unavailablePolls: pollRetries}
-	b := newFakeBackend(t, api)
-	sb, _ := b.Create(context.Background(), "e1", "reg/img@"+goodDigest)
-	if _, err := sb.Run(context.Background(), "true", time.Minute); err != nil {
-		t.Fatalf("%d transient poll errors must be tolerated: %v", pollRetries, err)
-	}
-}
-
-func TestEnvBackendRunGivesUpAndKills(t *testing.T) {
-	api := &fakeAPI{pollsUntilExit: 100, unavailablePolls: pollRetries + 1}
-	b := newFakeBackend(t, api)
-	sb, _ := b.Create(context.Background(), "e1", "reg/img@"+goodDigest)
-	_, err := sb.Run(context.Background(), "sleep 100", time.Minute)
-	if err == nil || status.Code(err) != codes.Unavailable {
-		t.Fatalf("expected the poll error after the retry limit, got %v", err)
-	}
-	if len(api.killed) != 1 {
-		t.Fatalf("an abandoned process must be killed once, got %v", api.killed)
-	}
-}
-
-func TestEnvBackendRunKillsOnCancel(t *testing.T) {
-	api := &fakeAPI{pollsUntilExit: 1 << 30}
-	b := newFakeBackend(t, api)
-	sb, _ := b.Create(context.Background(), "e1", "reg/img@"+goodDigest)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	if _, err := sb.Run(ctx, "sleep 100", time.Minute); err == nil {
-		t.Fatal("a cancelled Run must return an error")
-	}
-	if len(api.killed) != 1 {
-		t.Fatalf("the process must be killed after a cancel, got %v", api.killed)
 	}
 }
 
@@ -509,16 +469,13 @@ func TestEnvBackendSpreadsConnections(t *testing.T) {
 			t.Fatalf("connection %d picked %d times, want 3: %v", j, seen[j], seen)
 		}
 	}
-	one, err := NewEnvBackend("127.0.0.1:1", "ate-env", "default-template", 0, "", WithPollBounds(3*time.Millisecond, 15*time.Millisecond))
+	one, err := NewEnvBackend("127.0.0.1:1", "ate-env", "default-template", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer one.Close()
 	if len(one.clients) != 1 {
 		t.Fatalf("connections 0 must mean 1, got %d", len(one.clients))
-	}
-	if one.minPoll != 3*time.Millisecond || one.maxPoll != 15*time.Millisecond {
-		t.Fatalf("WithPollBounds: got (%v, %v), want (3ms, 15ms)", one.minPoll, one.maxPoll)
 	}
 }
 
@@ -719,8 +676,6 @@ func TestDirectSubstrateBackend(t *testing.T) {
 		},
 		Atespace:     "ate-env",
 		BaseTemplate: "default-template",
-		MinPoll:      time.Millisecond,
-		MaxPoll:      5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewDirectSubstrateBackend: %v", err)

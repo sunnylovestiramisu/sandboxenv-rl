@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"time"
 
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -66,7 +69,9 @@ func (e *Env) Shell(ctx context.Context, commandLine string) (*ShellResponse, er
 
 // Run executes `sh -c req.Command` inside the environment, feeds it
 // req.Stdin, and returns its buffered output and exit status once it exits.
-// For incremental output or interactive input use StartProcess.
+// By default it follows the output in one stream while the process runs;
+// with req.Poll it polls instead (see ShellRequest.Poll). For incremental
+// output or interactive input use StartProcess.
 func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err error) {
 	ctx, span := e.client.tracer.start(ctx, opExec,
 		AttrActorName.String(e.id), AttrAtespace.String(e.atespace),
@@ -81,30 +86,54 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 	if req.Timeout > 0 {
 		start.Timeout = durationpb.New(req.Timeout)
 	}
+	began := time.Now()
 	proc, err := e.StartProcess(ctx, start)
 	if err != nil {
 		return nil, err
 	}
 
-	if req.Stdin != nil {
-		w, err := proc.Stdin(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := w.Write(req.Stdin); err != nil {
-			return nil, err
-		}
-		if err := w.Close(); err != nil {
-			return nil, err
-		}
+	var res *ShellResponse
+	if req.Poll {
+		res, err = e.runPolled(ctx, proc, req.Stdin, began)
+	} else {
+		res, err = runStreamed(ctx, proc, req.Stdin, began)
 	}
+	if err != nil {
+		return nil, err
+	}
+	res.TimedOut = res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
+	span.SetAttributes(AttrExitCode.Int(res.ExitCode))
+	return res, nil
+}
 
+// writeStdin feeds data to the process's stdin and closes it; nil leaves
+// stdin alone.
+func writeStdin(ctx context.Context, proc *Process, data []byte) error {
+	if data == nil {
+		return nil
+	}
+	w, err := proc.Stdin(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	return w.Close()
+}
+
+// runStreamed follows the process's output in one stream until it exits.
+func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Time) (*ShellResponse, error) {
+	if err := writeStdin(ctx, proc, stdin); err != nil {
+		return nil, err
+	}
 	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{Follow: true})
 	if err != nil {
 		return nil, err
 	}
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var exit *ateenvv1alpha.Process
+	var exited time.Time
 	for {
 		msg, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -120,18 +149,134 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 			stderrBuf.Write(out.Stderr)
 		case *ateenvv1alpha.ProcessOutput_Exit:
 			exit = out.Exit
+			exited = time.Now()
 		}
 	}
 	if exit == nil {
 		return nil, errors.New("env: output stream ended before the process exited")
 	}
-
-	span.SetAttributes(AttrExitCode.Int(int(exit.GetExitCode())))
 	return &ShellResponse{
 		Stdout:   stdoutBuf.String(),
 		Stderr:   stderrBuf.String(),
 		ExitCode: int(exit.GetExitCode()),
+		Duration: exited.Sub(began),
 	}, nil
+}
+
+const (
+	// Polling bounds for a running process with ShellRequest.Poll: short
+	// at first so quick commands return quickly, backing off so a long
+	// test run does not hammer the API.
+	defaultPollMin = 50 * time.Millisecond
+	defaultPollMax = 2 * time.Second
+	// pollRetries is how many consecutive transient poll errors are
+	// tolerated before Run fails; a wake or an API pod restart costs a few.
+	pollRetries = 10
+	// killTimeout bounds the kill of a process Run abandons.
+	killTimeout = 10 * time.Second
+)
+
+// runPolled polls the process's state until it exits, then reads its
+// buffered output in one non-following stream, so no call stays open while
+// the process runs. If it returns before the process has exited, it kills
+// the process, so a retry of the same command never runs beside the first
+// copy.
+func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began time.Time) (_ *ShellResponse, err error) {
+	exited := false
+	defer func() {
+		if exited {
+			return
+		}
+		kctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), killTimeout)
+		defer cancel()
+		if _, kerr := proc.Kill(kctx); kerr != nil && !errors.Is(kerr, ErrProcessExited) && err != nil {
+			err = fmt.Errorf("%w (and killing the process failed: %v)", err, kerr)
+		}
+	}()
+	if err := writeStdin(ctx, proc, stdin); err != nil {
+		return nil, err
+	}
+
+	pMin, pMax := e.client.pollMin, e.client.pollMax
+	if pMin <= 0 {
+		pMin = defaultPollMin
+	}
+	if pMax <= 0 {
+		pMax = defaultPollMax
+	}
+	wait := pMin
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		// No deadline of its own: a poll that finds the environment
+		// suspended waits in ate-env-api for the wake (up to its
+		// --wake-budget, five minutes by default), and a shorter deadline
+		// would cut a wake that is going to succeed.
+		p, perr := e.FindProcess(ctx, proc.ID())
+		switch {
+		case perr == nil:
+			failures = 0
+			if p.GetState() == ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED {
+				exited = true
+				// Measured before the output read, which a large
+				// output over a slow link can stretch.
+				d := time.Since(began)
+				res, err := collectOutput(ctx, proc, int(p.GetExitCode()))
+				if err != nil {
+					return nil, err
+				}
+				res.Duration = d
+				return res, nil
+			}
+		case status.Code(perr) == codes.Unavailable || status.Code(perr) == codes.DeadlineExceeded:
+			failures++
+			if failures > pollRetries {
+				return nil, fmt.Errorf("polling process %s: %w", proc.ID(), perr)
+			}
+		default:
+			// A cancel during the poll comes back as a gRPC Canceled
+			// status, which errors.Is does not match to ctx.Err().
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, perr
+		}
+		if wait < pMax {
+			wait = min(wait*2, pMax)
+		}
+	}
+}
+
+// collectOutput reads an exited process's buffered output in one
+// non-following stream until EOF.
+func collectOutput(ctx context.Context, proc *Process, exitCode int) (*ShellResponse, error) {
+	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{})
+	if err != nil {
+		return nil, err
+	}
+	var stdout, stderr bytes.Buffer
+	for {
+		msg, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fromGRPCError(err)
+		}
+		switch out := msg.GetOutput().(type) {
+		case *ateenvv1alpha.ProcessOutput_Stdout:
+			stdout.Write(out.Stdout)
+		case *ateenvv1alpha.ProcessOutput_Stderr:
+			stderr.Write(out.Stderr)
+		case *ateenvv1alpha.ProcessOutput_Exit:
+			exitCode = int(out.Exit.GetExitCode())
+		}
+	}
+	return &ShellResponse{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, nil
 }
 
 // ReadFile streams the contents of the file at path inside the environment using FileSystemService.

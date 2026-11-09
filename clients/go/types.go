@@ -39,6 +39,17 @@ type ShellRequest struct {
 	// Timeout kills the command with SIGKILL after this duration. Zero uses
 	// the guest default.
 	Timeout time.Duration `json:"timeout,omitempty"`
+
+	// Poll runs the command without holding a stream open while it runs:
+	// Run starts the process, polls its state with short calls (50 ms at
+	// first, doubling to 2 s), and reads its output in one call once it has
+	// exited. Use it for commands that can outlive the router's route
+	// timeout (five minutes by default). Ten consecutive Unavailable or
+	// DeadlineExceeded polls are tolerated; the eleventh fails the Run. If
+	// Run returns before the process has exited (ctx ends, a poll fails),
+	// it kills the process. False streams the output while the process
+	// runs.
+	Poll bool `json:"poll,omitempty"`
 }
 
 // ShellResponse is the outcome of a ShellRequest.
@@ -50,4 +61,17 @@ type ShellResponse struct {
 	// ExitCode is the process exit code, or 128 + signal number if the
 	// process was killed by a signal (e.g. 137 for SIGKILL).
 	ExitCode int `json:"exit_code"`
+
+	// Duration is the time from the start request to the process's exit,
+	// as the client measured it. With Poll it also holds the time until the
+	// poll that saw the exit, at most one poll interval (2 s), and not the
+	// read of the output after it.
+	Duration time.Duration `json:"duration"`
+
+	// TimedOut reports that the guest killed the process because Timeout
+	// elapsed. It is a heuristic, the Python client's: exit code 137 and a
+	// Duration of at least Timeout. Another SIGKILL that late (the OOM
+	// killer, for one) reads as a timeout too. With a zero Timeout it stays
+	// false, also when the guest's default timeout kills the process.
+	TimedOut bool `json:"timed_out"`
 }

@@ -17,9 +17,7 @@ package swebench
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"slices"
@@ -34,7 +32,6 @@ import (
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/durationpb"
 	"sync"
 )
 
@@ -147,14 +144,6 @@ type Backend interface {
 // EnvBackendOption configures an EnvBackend.
 type EnvBackendOption func(*EnvBackend)
 
-// WithPollBounds overrides the initial and maximum process-polling intervals.
-func WithPollBounds(minPoll, maxPoll time.Duration) EnvBackendOption {
-	return func(b *EnvBackend) {
-		b.minPoll = minPoll
-		b.maxPoll = maxPoll
-	}
-}
-
 // WithPlacement makes Create steer each image's environments into the
 // domains an image placement plan assigns it: the per-environment worker
 // selector of one of the image's domains, round-robin per image. Images the
@@ -173,12 +162,11 @@ func WithPlacement(plan *schema.ImagePlacement) EnvBackendOption {
 // connection would put every task on one API replica, and gRPC caps the
 // concurrent streams on a connection.
 type EnvBackend struct {
-	clients          []*env.Client
-	next             atomic.Uint64
-	atespace         string
-	baseTemplate     string
-	minPoll, maxPoll time.Duration
-	deletes          deleteLimits
+	clients      []*env.Client
+	next         atomic.Uint64
+	atespace     string
+	baseTemplate string
+	deletes      deleteLimits
 
 	placement *schema.ImagePlacement
 	placeMu   sync.Mutex
@@ -425,7 +413,7 @@ func (b *EnvBackend) CreateWith(ctx context.Context, id, image string, opts Crea
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", id, err)
 	}
-	return envSandbox{e: e, minPoll: b.minPoll, maxPoll: b.maxPoll, deletes: b.deletes}, nil
+	return envSandbox{e: e, deletes: b.deletes}, nil
 }
 
 // Node implements ImageWarmer.
@@ -484,164 +472,23 @@ func imageStateFrom(st *ateenvv1alpha.ImageStatus) ImageState {
 }
 
 type envSandbox struct {
-	e                *env.Env
-	minPoll, maxPoll time.Duration
-	deletes          deleteLimits
+	e       *env.Env
+	deletes deleteLimits
 }
 
-const (
-	// Default polling bounds for a running process: short at first so quick
-	// commands return quickly, backing off so a long test run does not hammer
-	// the API.
-	defaultPollMin = 50 * time.Millisecond
-	defaultPollMax = 2 * time.Second
-	// pollRetries is how many consecutive transient poll errors are
-	// tolerated before the step fails; a wake or an API pod restart costs a
-	// few.
-	pollRetries = 10
-	// killTimeout bounds the kill of a process Run abandons.
-	killTimeout = 10 * time.Second
-)
-
-type processOutputStream interface {
-	Recv() (*ateenvv1alpha.ProcessOutput, error)
-}
-
-type polledProcessOps struct {
-	minPoll time.Duration
-	maxPoll time.Duration
-	start   func(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (string, error)
-	poll    func(ctx context.Context, procID string) (*ateenvv1alpha.Process, error)
-	kill    func(ctx context.Context, procID string) error
-	output  func(ctx context.Context, procID string) (processOutputStream, error)
-}
-
-// runPolledProcess starts command via ops.start, polls ops.poll with exponential
-// backoff until the process exits, and reads buffered stdout/stderr via
-// ops.output. If runPolledProcess returns before the process has exited, it
-// kills the process via ops.kill.
-func runPolledProcess(ctx context.Context, command string, timeout time.Duration, ops polledProcessOps) (res Result, err error) {
-	start := &ateenvv1alpha.StartProcessRequest{Command: []string{"sh", "-c", command}}
-	if timeout > 0 {
-		start.Timeout = durationpb.New(timeout)
-	}
-	procID, err := ops.start(ctx, start)
+// Run starts the command, polls until it exits and then reads its output
+// (env.ShellRequest.Poll). The SDK's streaming Run holds one request open
+// through the router for the whole command, and the router's route timeout
+// (five minutes by default) cuts it off; SWE-bench test runs take up to
+// twelve minutes. If Run returns before the process has exited, the SDK
+// kills the process, so a retry of the same command never runs beside the
+// first copy.
+func (s envSandbox) Run(ctx context.Context, command string, timeout time.Duration) (Result, error) {
+	res, err := s.e.Run(ctx, env.ShellRequest{Command: command, Timeout: timeout, Poll: true})
 	if err != nil {
 		return Result{}, err
 	}
-	exited := false
-	defer func() {
-		if exited {
-			return
-		}
-		kctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), killTimeout)
-		defer cancel()
-		if kerr := ops.kill(kctx, procID); kerr != nil && !errors.Is(kerr, env.ErrProcessExited) && err != nil {
-			err = fmt.Errorf("%w (and killing the process failed: %v)", err, kerr)
-		}
-	}()
-
-	pMin, pMax := ops.minPoll, ops.maxPoll
-	if pMin <= 0 {
-		pMin = defaultPollMin
-	}
-	if pMax <= 0 {
-		pMax = defaultPollMax
-	}
-	wait := pMin
-	failures := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return Result{}, ctx.Err()
-		case <-time.After(wait):
-		}
-		p, perr := ops.poll(ctx, procID)
-		switch {
-		case perr == nil:
-			failures = 0
-			if p.GetState() == ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED {
-				exited = true
-				stream, oerr := ops.output(ctx, procID)
-				if oerr != nil {
-					return Result{}, oerr
-				}
-				return collectProcessOutput(stream, int(p.GetExitCode()))
-			}
-		case status.Code(perr) == codes.Unavailable || status.Code(perr) == codes.DeadlineExceeded:
-			failures++
-			if failures > pollRetries {
-				return Result{}, fmt.Errorf("poll %s: %w", procID, perr)
-			}
-		default:
-			return Result{}, perr
-		}
-		if wait < pMax {
-			wait = min(wait*2, pMax)
-		}
-	}
-}
-
-// collectProcessOutput reads an exited process's buffered output in one
-// non-following stream until EOF.
-func collectProcessOutput(stream processOutputStream, exitCode int) (Result, error) {
-	var stdout, stderr bytes.Buffer
-	for {
-		msg, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return Result{}, err
-		}
-		switch out := msg.GetOutput().(type) {
-		case *ateenvv1alpha.ProcessOutput_Stdout:
-			stdout.Write(out.Stdout)
-		case *ateenvv1alpha.ProcessOutput_Stderr:
-			stderr.Write(out.Stderr)
-		case *ateenvv1alpha.ProcessOutput_Exit:
-			exitCode = int(out.Exit.GetExitCode())
-		}
-	}
-	return Result{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()}, nil
-}
-
-// Run starts the command, polls until it exits and then reads its output.
-//
-// The SDK's streaming Shell holds one request open through the router for
-// the whole command, and the router's route timeout (five minutes by
-// default) cuts it off; SWE-bench test runs take up to twelve minutes.
-// Start, poll and read are each short calls, so no single request can
-// outlive it. This belongs in the SDK as an option of Env.Run, since every
-// SDK user with long commands meets the same timeout; it lives here until
-// that change lands so the benchmark does not wait on it.
-//
-// If Run returns before the process has exited, it kills the process, so a
-// retry of the same command never runs beside the first copy.
-func (s envSandbox) Run(ctx context.Context, command string, timeout time.Duration) (Result, error) {
-	var proc *env.Process
-	return runPolledProcess(ctx, command, timeout, polledProcessOps{
-		minPoll: s.minPoll,
-		maxPoll: s.maxPoll,
-		start: func(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (string, error) {
-			p, err := s.e.StartProcess(ctx, req)
-			if err != nil {
-				return "", err
-			}
-			proc = p
-			return p.ID(), nil
-		},
-		poll: func(ctx context.Context, procID string) (*ateenvv1alpha.Process, error) {
-			return s.e.FindProcess(ctx, procID)
-		},
-		kill: func(ctx context.Context, _ string) error {
-			_, err := proc.Kill(ctx)
-			return err
-		},
-		output: func(ctx context.Context, _ string) (processOutputStream, error) {
-			return proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{})
-		},
-	})
+	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}, nil
 }
 
 func (s envSandbox) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {

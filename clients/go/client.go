@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -91,6 +92,9 @@ type Client struct {
 	process    ateenvv1alpha.ProcessServiceClient
 	filesystem ateenvv1alpha.FileSystemServiceClient
 	tracer     clientTracer
+	// pollMin and pollMax override the polling bounds of ShellRequest.Poll
+	// in tests (SetPollBoundsForTest); zero uses the defaults.
+	pollMin, pollMax time.Duration
 }
 
 // NewClient returns a Client targeting endpoint.

@@ -233,20 +233,17 @@ type DirectSubstrateOptions struct {
 	ATEOptions   ate.Options
 	Atespace     string
 	BaseTemplate string
-	MinPoll      time.Duration
-	MaxPoll      time.Duration
 }
 
 // DirectSubstrateBackend implements Backend, ForkBackend, and Prewarmer
 // directly against Substrate's control plane and atenet router.
 type DirectSubstrateBackend struct {
-	client           *ate.Client
-	controlConn      *grpc.ClientConn
-	control          ateapipb.ControlClient
-	ownsClient       bool
-	atespace         string
-	baseTemplate     string
-	minPoll, maxPoll time.Duration
+	client       *ate.Client
+	controlConn  *grpc.ClientConn
+	control      ateapipb.ControlClient
+	ownsClient   bool
+	atespace     string
+	baseTemplate string
 }
 
 // NewDirectSubstrateBackend dials the Substrate control plane and router.
@@ -275,7 +272,7 @@ func NewDirectSubstrateBackend(opts DirectSubstrateOptions) (*DirectSubstrateBac
 		_ = c.Close()
 		return nil, err
 	}
-	b := NewDirectSubstrateBackendFromClient(c, opts.Atespace, opts.BaseTemplate, opts.MinPoll, opts.MaxPoll)
+	b := NewDirectSubstrateBackendFromClient(c, opts.Atespace, opts.BaseTemplate)
 	b.controlConn = controlConn
 	b.control = ateapipb.NewControlClient(controlConn)
 	b.ownsClient = true
@@ -284,7 +281,7 @@ func NewDirectSubstrateBackend(opts DirectSubstrateOptions) (*DirectSubstrateBac
 
 // NewDirectSubstrateBackendFromClient wraps an existing ate.Client as a
 // DirectSubstrateBackend.
-func NewDirectSubstrateBackendFromClient(client *ate.Client, atespace, baseTemplate string, minPoll, maxPoll time.Duration) *DirectSubstrateBackend {
+func NewDirectSubstrateBackendFromClient(client *ate.Client, atespace, baseTemplate string) *DirectSubstrateBackend {
 	if atespace == "" {
 		atespace = ate.DefaultAtespace
 	}
@@ -295,8 +292,6 @@ func NewDirectSubstrateBackendFromClient(client *ate.Client, atespace, baseTempl
 		client:       client,
 		atespace:     atespace,
 		baseTemplate: baseTemplate,
-		minPoll:      minPoll,
-		maxPoll:      maxPoll,
 	}
 }
 
@@ -440,36 +435,23 @@ type directSubstrateSandbox struct {
 	id string
 }
 
+// Run runs the command through the SDK over the actor's guest connection,
+// polled (env.ShellRequest.Poll), so no request outlives the router's route
+// timeout.
 func (s *directSubstrateSandbox) Run(ctx context.Context, command string, timeout time.Duration) (Result, error) {
 	conn, err := s.b.client.DialGuest(s.b.atespace, s.id)
 	if err != nil {
 		return Result{}, err
 	}
-	procClient := ateenvv1alpha.NewProcessServiceClient(conn)
-	return runPolledProcess(ctx, command, timeout, polledProcessOps{
-		minPoll: s.b.minPoll,
-		maxPoll: s.b.maxPoll,
-		start: func(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (string, error) {
-			proc, err := procClient.StartProcess(ctx, req)
-			if err != nil {
-				return "", err
-			}
-			return proc.GetProcessId(), nil
-		},
-		poll: func(ctx context.Context, procID string) (*ateenvv1alpha.Process, error) {
-			return procClient.GetProcess(ctx, &ateenvv1alpha.GetProcessRequest{ProcessId: procID})
-		},
-		kill: func(ctx context.Context, procID string) error {
-			_, _ = procClient.SignalProcess(ctx, &ateenvv1alpha.SignalProcessRequest{
-				ProcessId: procID,
-				Signal:    ateenvv1alpha.Signal_SIGNAL_KILL,
-			})
-			return nil
-		},
-		output: func(ctx context.Context, procID string) (processOutputStream, error) {
-			return procClient.StreamProcessOutput(ctx, &ateenvv1alpha.StreamProcessOutputRequest{ProcessId: procID})
-		},
-	})
+	c, err := env.NewClient(env.ClientOptions{GRPCConn: conn})
+	if err != nil {
+		return Result{}, err
+	}
+	res, err := c.Env(s.b.atespace, s.id).Run(ctx, env.ShellRequest{Command: command, Timeout: timeout, Poll: true})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}, nil
 }
 
 func (s *directSubstrateSandbox) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {

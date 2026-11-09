@@ -180,6 +180,13 @@ user needs to know across them.
   (`ate_env_guest_process_duration_seconds`).
 - Go client: `ClientOptions.TracerProvider` and `TraceServiceName`,
   `NewTracerProvider`, the `Attr*` span attribute keys, and `Client.Get`.
+- Go client: `ShellRequest.Poll` runs a command without holding a stream
+  through the router: `Env.Run` starts the process, polls it (50 ms doubling
+  to 2 s, ten consecutive `Unavailable` or `DeadlineExceeded` polls
+  tolerated), reads the output once after the exit, and kills the process if
+  it returns first. `Poll` is off by default, and `Run` streams as before.
+  `ShellResponse.Duration` and `TimedOut` (exit 137 at or past `Timeout`, the
+  Python client's heuristic), in both modes.
 - swebench-loader: `run -enable-tracing` records every event as a span under one
   `swebench-loader.run` span; the JSONL is unchanged.
 - `examples/grpo` and the NeMo Gym rollout benchmark record their phases with

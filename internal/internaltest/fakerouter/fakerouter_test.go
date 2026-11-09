@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/env/internal/ate"
 )
@@ -52,5 +53,40 @@ func TestServeHTTPTargetActorHeader(t *testing.T) {
 				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.want, rec.Body.String())
 			}
 		})
+	}
+}
+
+// GuestRequests counts a guest request while its handler runs and after.
+func TestGuestRequests(t *testing.T) {
+	const path = "/ateenv.v1alpha.ProcessService/StreamProcessOutput"
+	r := New()
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.Register("a", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodPost, "http://router.test"+path, nil)
+		req.Header.Set(ate.TargetActorHeader, "ns/a")
+		r.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the guest handler was not called")
+	}
+	if open, total := r.GuestRequests(path); open != 1 || total != 1 {
+		t.Errorf("while the handler runs: open %d, total %d; want 1, 1", open, total)
+	}
+	close(release)
+	<-done
+	if open, total := r.GuestRequests(path); open != 0 || total != 1 {
+		t.Errorf("after the handler returned: open %d, total %d; want 0, 1", open, total)
+	}
+	if open, total := r.GuestRequests("/other"); open != 0 || total != 0 {
+		t.Errorf("another path: open %d, total %d; want 0, 0", open, total)
 	}
 }
