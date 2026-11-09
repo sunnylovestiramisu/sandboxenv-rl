@@ -20,7 +20,7 @@ import dataclasses
 import logging
 import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -32,6 +32,7 @@ from .handle import SandboxHandle
 from .observability import Observer, RunReport, repo_family
 from .runtime.base import RuntimeGuestHook
 from .sizing import plan_replicas
+from .sources import FieldSpec, TaskSource, to_tasks
 from .strategies import STRATEGIES
 from .telemetry.trace_recorder import (
     is_trace_mode,
@@ -49,28 +50,6 @@ from .types import (
 )
 
 logger = logging.getLogger("ate_env_rl.fleet")
-
-
-def _dict_task_id(item: dict[str, Any], index: int) -> str:
-    """The id of a task given as a dict: its ``task_id``, else its ``id``.
-
-    A dict with neither (or only empty values) is refused. A made-up id
-    would name the row's position, not the row: the same id would mean
-    another task in another process of the job, after a reload or after a
-    reorder, and a misspelled key would go unnoticed. ``acquire`` by id,
-    results and reports need ids that come from the data.
-    """
-    for key in ("task_id", "id"):
-        value = item.get(key)
-        if value is not None and value != "":
-            return str(value)
-    keys = ", ".join(sorted(map(str, item))[:10]) or "none"
-    raise ValueError(
-        f"Task dict at index {index} has no 'task_id' or 'id' (its keys: {keys}). "
-        "Give each task a stable id from your data: pass Task(id=..., image=...), "
-        "or add an 'id' key, for example from 'instance_id' (SWE-bench) or "
-        "'repo_name' and 'commit_hash' (R2E-Gym)."
-    )
 
 
 class SandboxFleet:
@@ -203,20 +182,28 @@ class SandboxFleet:
         with self._lock:
             return list(self._tasks)
 
-    def load_tasks(self, tasks: list[Any]) -> None:
-        """Load tasks into the fleet (supports list of Task or dicts).
+    def load_tasks(self, tasks: Iterable[Task | dict] | TaskSource, *, image_field: FieldSpec = None,
+                   id_field: FieldSpec = None) -> None:
+        """Load tasks into the fleet: ``Task`` objects, dataset rows, or a
+        ``TaskSource`` such as ``JsonlSource``.
 
         Replaces the tasks loaded before; ``add_tasks`` appends instead. If
         ``plan()`` has run, the plan is recomputed for the new tasks.
 
-        A dict needs ``image`` and a non-empty ``task_id`` or ``id``; its
-        other keys go to ``Task.metadata``.
+        A row (a dict) gives its image and id from ``image_field`` and
+        ``id_field``: one dotted path (``"metadata.docker_image"``), several
+        tried in order, or a callable ``row -> value``. By default the image
+        is read from ``image``, then the R2E-Gym and SWE-bench keys
+        (``sources.DEFAULT_IMAGE_FIELDS``), and the id from ``task_id``,
+        ``id`` or ``instance_id``. The whole row becomes ``Task.metadata``.
 
         Raises ValueError, and keeps the tasks loaded before, if a task id
-        repeats within ``tasks`` or a dict has no ``task_id`` or ``id``: like
-        ``add_tasks``, ``acquire`` by id must resolve to one task.
+        repeats within ``tasks``, a row has no image or no id, or a callable
+        field raises (the error names the row): like
+        ``add_tasks``, ``acquire`` by id must resolve to one task, and an id
+        is never made up from a row's position.
         """
-        normalized = self._normalize_tasks(tasks)
+        normalized = to_tasks(tasks, image_field=image_field, id_field=id_field)
         repeated = self._repeated_ids(normalized)
         if repeated:
             raise ValueError(f"Task ids repeated: {repeated}")
@@ -227,13 +214,14 @@ class SandboxFleet:
         logger.info("Fleet loaded %d tasks (%d unique images)",
                     len(normalized), len(self.image_counts()))
 
-    def add_tasks(self, tasks: list[Any]) -> list[Task]:
+    def add_tasks(self, tasks: Iterable[Task | dict] | TaskSource, *, image_field: FieldSpec = None,
+                  id_field: FieldSpec = None) -> list[Task]:
         """Append tasks to the fleet and extend the plan with their images.
 
         For a job whose task list grows while it runs: a worker that is handed
         an episode the orchestrator did not plan, or a trainer that streams
-        batches from a prompt source. Takes the same items as ``load_tasks``
-        and returns them as ``Task`` objects. If ``plan()`` has run, the plan
+        batches from a prompt source. Takes the same items, sources and field
+        options as ``load_tasks`` and returns them as ``Task`` objects. If ``plan()`` has run, the plan
         is recomputed so ``plan.for_image()`` covers the new images; nothing
         is warmed, call ``warm_images`` for that. A ``run()`` in progress
         does not run the added tasks. Safe to call from several threads.
@@ -242,7 +230,7 @@ class SandboxFleet:
         fleet or repeats within ``tasks``: ``acquire`` by id must resolve to
         one task.
         """
-        new = self._normalize_tasks(tasks)
+        new = to_tasks(tasks, image_field=image_field, id_field=id_field)
         if not new:
             return new
         ids = [t.id for t in new]
@@ -275,23 +263,6 @@ class SandboxFleet:
         with self._plan_lock:
             if self._plan is not None:
                 self._plan_entries_locked()
-
-    @staticmethod
-    def _normalize_tasks(tasks: list[Any]) -> list[Task]:
-        normalized: list[Task] = []
-        for i, t in enumerate(tasks):
-            if isinstance(t, Task):
-                normalized.append(t)
-            elif isinstance(t, dict):
-                normalized.append(Task(
-                    id=_dict_task_id(t, i),
-                    image=t["image"],
-                    metadata=t,
-                    template=t.get("template"),
-                ))
-            else:
-                raise ValueError(f"Unsupported task item type: {type(t)}")
-        return normalized
 
     def image_counts(self) -> dict[str, int]:
         """Return task count per unique image."""

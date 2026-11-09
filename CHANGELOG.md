@@ -39,6 +39,17 @@ user needs to know across them.
   sentinels `env.ErrInvalidArgument`, `env.ErrPermissionDenied` and
   `env.ErrFailedPrecondition` (an `ErrProcessExited` error also wraps
   `ErrFailedPrecondition`).
+- Python client: task sources and dataset-row parsing. `load_tasks()` and
+  `add_tasks()` (and their `AsyncSandboxFleet` forms) take `image_field=` and
+  `id_field=` (a dotted path, several paths tried in order, or a callable), or
+  a `TaskSource`: `ListSource` and `JsonlSource` (a local UTF-8 JSON-lines
+  file; a bad row names its file and line). By default a row's image is read
+  from `image`, then the R2E-Gym and SWE-bench keys (`docker_image`,
+  `image_name`, under `metadata` and `env_config.entry` too), and its id from
+  `task_id`, `id` or `instance_id`, so SWE-bench rows load without mapping. An
+  id is never made up from a row's position. `extract_image`, `row_to_task`,
+  `to_tasks` and `FieldSpec` are public. What changes for an existing dict
+  row is under Changed.
 - `ate-env manifest template --sidecar-env NAME=VALUE`: a variable that only
   the `--sidecar` processes get. The container carries it as
   `ATE_SIDECAR_ENV_NAME`; the guest takes it out of its own environment before
@@ -255,6 +266,24 @@ user needs to know across them.
 - Python client: `unwarm_pool`, and a `resize_pool` that shrinks the pool,
   cancel `warm_pool` calls in flight for that pool: those calls delete the
   actors they create instead of pooling them.
+- Python client: `load_tasks()` and `add_tasks()` read a dict row as follows.
+  The id changes rename a row that loaded before, so `acquire()` by id and
+  stored results see the new id.
+  - Only `instance_id`: loads with that id (was `ValueError`).
+  - No image: `ValueError` (was `KeyError('image')`).
+  - Image under `docker_image`, `image_name`, or those keys under `metadata`
+    or `env_config.entry`: loads (was `KeyError('image')`).
+  - Image with surrounding whitespace: stripped.
+  - Blank `image`: the next key is tried (was the image `""`).
+  - Non-string image, such as `123`: `ValueError` (was `Task.image == 123`).
+  - One-element list id: unwrapped, `["one"]` gives `"one"` (was
+    `"['one']"`).
+  - Bool id: refused (was `"True"`).
+  - Dict or multi-element list id: skipped for the next key (was its
+    `str()`).
+  - Blank or non-string `template`: no template (was the value).
+  - Whitespace-only or binary id: skipped for the next key (was the value);
+    a UTF-8 bytes id is decoded (was `"b'...'"`).
 
 ### Fixed
 

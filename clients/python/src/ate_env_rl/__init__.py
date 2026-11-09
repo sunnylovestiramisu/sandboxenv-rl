@@ -71,6 +71,17 @@ from .preflight import (
     PreflightCoverage,
     PreflightWarmer,
 )
+from .sources import (
+    DEFAULT_ID_FIELDS,
+    DEFAULT_IMAGE_FIELDS,
+    FieldSpec,
+    JsonlSource,
+    ListSource,
+    TaskSource,
+    extract_image,
+    row_to_task,
+    to_tasks,
+)
 
 # Types
 from .types import (
@@ -117,6 +128,16 @@ __all__ = [
     "PreflightCoverage",
     "ImagePlacement",
     "PlacementEntry",
+    # Task sources
+    "TaskSource",
+    "ListSource",
+    "JsonlSource",
+    "DEFAULT_IMAGE_FIELDS",
+    "DEFAULT_ID_FIELDS",
+    "FieldSpec",
+    "extract_image",
+    "row_to_task",
+    "to_tasks",
     # Telemetry
     "TracerConfig",
     "ObservabilityConfig",

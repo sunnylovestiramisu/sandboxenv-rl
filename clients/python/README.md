@@ -439,17 +439,44 @@ nothing if an id is already in the fleet or repeats within the call.
 and keeps the tasks loaded before if an id repeats. It also recomputes an
 existing plan.
 
-Both take `Task` objects or dicts. A dict needs `image` and a non-empty
-`task_id` or `id`; a dict without one raises `ValueError`. The fleet does not
-make up ids, because `acquire()`, results and reports need ids that name the
-row in your data. Map dataset rows first:
+Both take `Task` objects, dataset rows (dicts), or a task source.
+
+A row gives its image and id from `image_field` and `id_field`. Each takes one
+dotted path (`"metadata.docker_image"`), several paths tried in order, or a
+callable `row -> value`. By default:
+
+- the image comes from `image`, then the R2E-Gym and SWE-bench keys
+  (`docker_image`, `image_name`, the same under `metadata`, and under the
+  `env_config.entry` a trainer wraps a row in). A one-element list, as a
+  columnar dataset returns, is unwrapped.
+- the id comes from `task_id`, `id` or `instance_id`. A blank or binary
+  value is skipped.
+
+A dotted path reads a literal key of that name first, such as a flattened
+`metadata.docker_image` column, and descends into `metadata` when that key
+is missing or blank. A field you name replaces the defaults: it does not fall
+back to them.
+
+The whole row becomes `Task.metadata`, and its `template` key, when set, the
+task's ActorTemplate. A row with no image or no id, or whose callable field
+raises, raises `ValueError` with the row's position and what was tried. The
+fleet never makes up an id from a row's position, because `acquire()`,
+results and reports need ids that name the row in your data.
+
+A source is any object with a `load()` method that returns `Task` objects
+(`TaskSource`): `ListSource(items, image_field=, id_field=)` over a list, and
+`JsonlSource(path, image_field=, id_field=, limit=)` over a local UTF-8
+JSON-lines file, which names the file and line of a bad row. `load()` is
+synchronous: `AsyncSandboxFleet.load_tasks` runs it on the event loop thread.
 
 ```python
-fleet.load_tasks([{"id": r["instance_id"], "image": r["image"]} for r in rows])   # SWE-bench JSONL
-fleet.load_tasks([Task(id=f"{r['repo_name']}@{r['commit_hash'][:12]}", image=r["docker_image"])
-                  for r in rows])                                                    # R2E-Gym
+from ate_env_rl import JsonlSource
 
-new = fleet.add_tasks(next_batch)                    # Task objects or dicts
+fleet.load_tasks(rows)                                               # SWE-bench rows: instance_id, image_name
+fleet.load_tasks(rows, id_field=lambda r: f"{r['repo_name']}@{r['commit_hash'][:12]}")   # R2E-Gym
+fleet.load_tasks(JsonlSource("tasks.jsonl", image_field="metadata.docker_image", limit=100))
+
+new = fleet.add_tasks(next_batch)                    # Task objects, rows or a source
 fleet.warm_images(sorted({t.image for t in new}), wait=False)
 ```
 

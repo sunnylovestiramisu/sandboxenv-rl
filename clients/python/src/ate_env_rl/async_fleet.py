@@ -24,13 +24,14 @@ import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from .config import FleetConfig
 from .fleet import SandboxFleet
 from .handle import SandboxHandle
 from .observability import Observer, RunReport, repo_family
+from .sources import FieldSpec, TaskSource
 from .telemetry.metrics import status_of
 from .telemetry.trace_recorder import (
     current_slot_wait_s,
@@ -97,12 +98,19 @@ class AsyncSandboxFleet:
     def _backend_label(self) -> str:
         return self._fleet.backend_label
 
-    def load_tasks(self, tasks: list[Any]) -> None:
-        self._fleet.load_tasks(tasks)
+    def load_tasks(self, tasks: Iterable[Task | dict] | TaskSource, *, image_field: FieldSpec = None,
+                   id_field: FieldSpec = None) -> None:
+        """Load tasks, rows or a source (see ``SandboxFleet.load_tasks``).
 
-    def add_tasks(self, tasks: list[Any]) -> list[Task]:
+        Synchronous: a source's ``load()`` runs on the calling thread, the
+        event loop's when called from a coroutine.
+        """
+        self._fleet.load_tasks(tasks, image_field=image_field, id_field=id_field)
+
+    def add_tasks(self, tasks: Iterable[Task | dict] | TaskSource, *, image_field: FieldSpec = None,
+                  id_field: FieldSpec = None) -> list[Task]:
         """Append tasks and extend the plan (see ``SandboxFleet.add_tasks``)."""
-        return self._fleet.add_tasks(tasks)
+        return self._fleet.add_tasks(tasks, image_field=image_field, id_field=id_field)
 
     def image_counts(self) -> dict[str, int]:
         return self._fleet.image_counts()

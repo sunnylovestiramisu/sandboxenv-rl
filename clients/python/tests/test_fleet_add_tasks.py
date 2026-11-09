@@ -216,16 +216,19 @@ def test_task_change_during_first_plan_is_in_the_plan(change):
 
 
 def test_dicts_without_an_id_are_refused_with_a_clear_error():
-    """Rows keyed only by instance_id used to become id "None" (and now collide)."""
+    """Rows with no id field used to become id "None" (and now collide). SWE-bench
+    rows keyed by instance_id are read by default (sources.DEFAULT_ID_FIELDS)."""
     fleet = _fleet()
     fleet.load_tasks([Task(id="a", image="img-a")])
-    rows = [{"instance_id": "x1", "image": "i"}, {"instance_id": "x2", "image": "i"}]
+    rows = [{"repo_name": "x1", "image": "i"}, {"repo_name": "x2", "image": "i"}]
     with pytest.raises(ValueError, match=r"index 0 has no 'task_id' or 'id'.*instance_id"):
         fleet.load_tasks(rows)
     assert [t.id for t in fleet.tasks] == ["a"]          # nothing replaced
     with pytest.raises(ValueError, match=r"index 1 has no 'task_id' or 'id'"):
-        fleet.add_tasks([{"id": "b", "image": "img-b"}, {"instance_id": "x3", "image": "i"}])
+        fleet.add_tasks([{"id": "b", "image": "img-b"}, {"repo_name": "x3", "image": "i"}])
     assert [t.id for t in fleet.tasks] == ["a"]          # nothing added
+    fleet.add_tasks([{"instance_id": "x1", "image": "i"}])
+    assert [t.id for t in fleet.tasks] == ["a", "x1"]
 
 
 @pytest.mark.parametrize("row", [{"id": "", "image": "i"}, {"id": None, "image": "i"},
