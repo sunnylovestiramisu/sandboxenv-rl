@@ -15,36 +15,72 @@
 package portproxy_test
 
 import (
+	"bufio"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
-// pathRestGen draws an escaped path suffix ("/seg/seg...") made of
-// characters an HTTP client may send in a path: unreserved, sub-delims,
-// ':' '@', and percent-escapes.
+// pathRestGen draws a path suffix ("/seg/seg...", at times with a query) as
+// a client may write it on the wire: unreserved, sub-delims, ':' '@',
+// percent-escapes (an escaped slash among them), and bytes Go's server
+// accepts though url.EscapedPath calls them invalid in a raw path ({ } | ^
+// " < > \ ` # and raw UTF-8). An empty first segment makes a path that starts
+// with "//".
 func pathRestGen() *rapid.Generator[string] {
 	atom := rapid.OneOf(
 		rapid.SampledFrom([]string{"a", "b", "z", "0", "-", "_", ".", "~"}),
-		rapid.SampledFrom([]string{"!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", ":", "@"}),
-		rapid.SampledFrom([]string{"%20", "%2F", "%41", "%21", "%25", "%3F"}),
+		rapid.SampledFrom([]string{"!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", ":", "@", "[", "]"}),
+		rapid.SampledFrom([]string{"%20", "%2F", "%2f", "%41", "%21", "%25", "%3F", "%7B"}),
+		rapid.SampledFrom([]string{"{", "}", "|", "^", "\"", "<", ">", "\\", "`", "#", "\xc3\xa9", "\xe2\x82\xac"}),
 	)
 	seg := rapid.Custom(func(t *rapid.T) string {
 		return strings.Join(rapid.SliceOfN(atom, 0, 6).Draw(t, "atoms"), "")
 	})
 	return rapid.Custom(func(t *rapid.T) string {
-		return "/" + strings.Join(rapid.SliceOfN(seg, 1, 4).Draw(t, "segs"), "/")
+		rest := "/" + strings.Join(rapid.SliceOfN(seg, 1, 4).Draw(t, "segs"), "/")
+		if rapid.Bool().Draw(t, "hasQuery") {
+			// httputil.ReverseProxy drops a query it cannot parse, one with
+			// ';' among them; PP-1 is about the path.
+			rest += "?" + strings.ReplaceAll(seg.Draw(t, "query"), ";", "")
+		}
+		return rest
 	})
 }
 
+// sameSegments reports whether got and want have the same segments, each
+// decoding to the same bytes, and the same query.
+func sameSegments(got, want string) bool {
+	gp, gq, _ := strings.Cut(got, "?")
+	wp, wq, _ := strings.Cut(want, "?")
+	g, w := strings.Split(gp, "/"), strings.Split(wp, "/")
+	if len(g) != len(w) || gq != wq {
+		return false
+	}
+	for i := range g {
+		gs, err1 := url.PathUnescape(g[i])
+		ws, err2 := url.PathUnescape(w[i])
+		if err1 != nil || err2 != nil || gs != ws {
+			return false
+		}
+	}
+	return true
+}
+
 // PP-1 (docs/plans/port-proxy/acceptance-criteria.md). Rule (Dispatch doc;
-// TestPathFormKeepsPathAsSent):
-// the daemon gets the path after the routing prefix exactly as sent. As a
-// differential: the path form delivers the same request-target as the
-// header form, which forwards r.URL untouched.
+// TestPathFormKeepsPathAsSent, TestRawBytesKeptAsSent): the daemon gets the
+// path after the routing prefix, and the header form's path, exactly as
+// sent. Each request line is written on a raw TCP connection, so no client
+// escapes it. A path that starts with "//" cannot be written as is (it would
+// read as an authority); for it the daemon must get the same segments and
+// query, each decoding to the same bytes. The routing prefix is matched on
+// the path as sent: with one of its separators escaped (%2F), the request
+// is not a path form and reaches no daemon, whatever the rest holds.
 func TestPathFormDeliversPathAsSentProperty(t *testing.T) {
 	s, base := pathSetup(t)
 	var got string
@@ -52,32 +88,31 @@ func TestPathFormDeliversPathAsSentProperty(t *testing.T) {
 		got = r.RequestURI
 		io.WriteString(w, "daemon")
 	}))
-	send := func(t *rapid.T, url string, hdr map[string]string) string {
+	send := func(t *rapid.T, target, extra string) string {
 		got = ""
-		req, err := http.NewRequest(http.MethodGet, url, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for k, v := range hdr {
-			req.Header.Set(k, v)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if string(b) != "daemon" {
-			t.Fatalf("GET %s: %d %q", url, resp.StatusCode, b)
+		if code, body := sendRaw(t, base, target, extra); body != "daemon" {
+			t.Fatalf("GET %q: %d %q", target, code, body)
 		}
 		return got
 	}
 	rapid.Check(t, func(rt *rapid.T) {
 		rest := pathRestGen().Draw(rt, "rest")
-		viaPath := send(rt, base+"/v1alpha/envs/env1/ports/8000"+rest, nil)
-		viaHeader := send(rt, base+rest, map[string]string{"X-Env-Id": "env1", "X-Env-Port": "8000"})
-		if viaPath != rest || viaHeader != rest {
+		ok := func(got string) bool { return got == rest }
+		if strings.HasPrefix(rest, "//") {
+			ok = func(got string) bool { return sameSegments(got, rest) }
+		}
+		viaPath := send(rt, "/v1alpha/envs/env1/ports/8000"+rest, "")
+		viaHeader := send(rt, rest, headerForm)
+		if !ok(viaPath) || !ok(viaHeader) {
 			rt.Fatalf("sent %q: path form delivered %q, header form %q", rest, viaPath, viaHeader)
+		}
+		segs := []string{"", "v1alpha", "envs", "env1", "ports", "8000"}
+		i := rapid.IntRange(1, len(segs)-2).Draw(rt, "escapedSeparator")
+		esc := rapid.SampledFrom([]string{"%2F", "%2f"}).Draw(rt, "escapedSlash")
+		mangled := strings.Join(segs[:i+1], "/") + esc + strings.Join(segs[i+1:], "/") + rest
+		got = ""
+		if code, body := sendRaw(rt, base, mangled, ""); body == "daemon" || got != "" {
+			rt.Fatalf("GET %q: %d %q, daemon got %q; an escaped slash must not end a routing segment", mangled, code, body, got)
 		}
 	})
 }
@@ -97,6 +132,97 @@ func TestPathFormKeepsSubDelimsAsSent(t *testing.T) {
 		resp.Body.Close()
 		if got != rest {
 			t.Errorf("sent %q after the prefix, daemon got %q", rest, got)
+		}
+	}
+}
+
+// sendRaw writes a GET for target on a fresh TCP connection, so no client
+// escapes or cleans the request-target, and returns the status and body.
+func sendRaw(t interface {
+	Helper()
+	Fatal(...any)
+}, base, target, extra string) (int, string) {
+	t.Helper()
+	host := strings.TrimPrefix(base, "http://")
+	c, err := net.Dial("tcp", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "GET "+target+" HTTP/1.1\r\nHost: "+host+"\r\n"+extra+"Connection: close\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, string(b)
+}
+
+const headerForm = "X-Env-Id: env1\r\nX-Env-Port: 8000\r\n"
+
+// PP-1: bytes Go's server accepts in a request-target but url.EscapedPath
+// escapes ({ } | ^, raw UTF-8) reach the daemon as sent in both forms, and an
+// escaped slash next to them stays escaped. A path that starts with "//"
+// cannot be written as is (it would read as an authority): only those bytes
+// are escaped, and the segments stay.
+func TestRawBytesKeptAsSent(t *testing.T) {
+	s, base := pathSetup(t)
+	var got, host string
+	s.router.RegisterPort("env1", 8000, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, host = r.RequestURI, r.Host
+		io.WriteString(w, "daemon")
+	}))
+	for _, c := range []struct{ rest, want string }{
+		{"/a{b}", "/a{b}"},
+		{"/a|b", "/a|b"},
+		{"/a^b", "/a^b"},
+		{"/caf\xc3\xa9", "/caf\xc3\xa9"},
+		{"/a{b%2Fc", "/a{b%2Fc"},
+		{"/a\"b<c>d\\e`f", "/a\"b<c>d\\e`f"},
+		{"/a{b?x={y}", "/a{b?x={y}"},
+		{"//a{b%2Fc", "//a%7Bb%2Fc"},
+		{"//evil.example/x", "//evil.example/x"},
+		{"/a#b%2Fc", "/a#b%2Fc"},
+		{"//a#b%2Fc", "//a%23b%2Fc"},
+	} {
+		for _, form := range []struct{ name, target, extra string }{
+			{"path form", "/v1alpha/envs/env1/ports/8000" + c.rest, ""},
+			{"header form", c.rest, headerForm},
+		} {
+			got, host = "", ""
+			code, body := sendRaw(t, base, form.target, form.extra)
+			if code != http.StatusOK || body != "daemon" || got != c.want || host != "127.0.0.1:8000" {
+				t.Errorf("%s: sent %q, got %d %q, daemon got %q (Host %q), want %q", form.name, c.rest, code, body, got, host, c.want)
+			}
+		}
+	}
+}
+
+// The routing prefix is matched on the path as sent: an escaped slash or a
+// stray byte inside it does not make a path form, and does not reach the
+// daemon.
+func TestRawBytesDoNotMoveRoutingPrefix(t *testing.T) {
+	s, base := pathSetup(t)
+	s.router.RegisterPort("env1", 8000, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "daemon")
+	}))
+	for _, c := range []struct {
+		target string
+		code   int
+		body   string
+	}{
+		{"/v1alpha%2Fenvs%2Fenv1%2Fports%2F8000/a{", http.StatusOK, "api"},
+		{"/v1alpha/envs%2Fenv1/ports/8000/a{", http.StatusOK, "api"},
+		{"/v1alpha/envs/env1%2Fports%2F8000/ports/1/a{", http.StatusBadRequest, ""},
+		{"/v1alpha/envs/env1{/ports/8000/a", http.StatusBadRequest, ""},
+		{"/v1alpha/envs/env1/ports/8000{/a", http.StatusBadRequest, ""},
+		{"/v1alpha/envs/env1/ports/8000%2F{", http.StatusBadRequest, ""},
+		{"/v1alpha/envs/caf\xc3\xa9/ports/8000/a", http.StatusBadRequest, ""},
+	} {
+		code, body := sendRaw(t, base, c.target, "")
+		if code != c.code || (c.body != "" && body != c.body) || body == "daemon" {
+			t.Errorf("GET %q: got %d %q, want %d %q", c.target, code, body, c.code, c.body)
 		}
 	}
 }

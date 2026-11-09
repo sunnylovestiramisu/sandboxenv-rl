@@ -215,6 +215,11 @@ user needs to know across them.
   84.2.1. filelock stays at 3.32.7, because each stable litellm from 1.104
   requires filelock<4.0. `lock.sh` now starts from the committed lock and
   passes its arguments to `uv pip compile`.
+- ate-env-api port proxy: both forms forward the path exactly as sent when it
+  holds bytes such as `{ } | ^` or raw UTF-8. They were re-escaped, and an
+  escaped slash next to them was decoded: `/a{b%2Fc` reached the daemon as
+  `/a%7Bb/c`. The path form now matches its routing prefix on the path as sent,
+  so an escaped slash in the prefix no longer routes to an environment.
 - swebench-loader `-park-each`: the last step deletes each environment right
   after its replay instead of suspending it (unless `-keep`). A 37,000
   environment run suspended them all, one more snapshot upload each. The

@@ -275,10 +275,11 @@ func Wants(r *http.Request) bool {
 // wrap the proxy routes without wrapping next. The path form is matched here
 // rather than on a ServeMux, so the daemon gets the path exactly as sent: a
 // mux would redirect a missing trailing slash, "//" and "..", and WebSocket
-// clients do not follow redirects.
+// clients do not follow redirects. Both forms route and forward the path of
+// the request-target as sent (see requestPath).
 func Dispatch(p *Proxy, next http.Handler, mw ...func(http.Handler) http.Handler) http.Handler {
 	var proxy http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPathForm(r.URL.EscapedPath()) {
+		if isPathForm(requestPath(r.URL)) {
 			p.ServePath(w, r)
 			return
 		}
@@ -288,7 +289,7 @@ func Dispatch(p *Proxy, next http.Handler, mw ...func(http.Handler) http.Handler
 		proxy = m(proxy)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if Wants(r) || isPathForm(r.URL.EscapedPath()) {
+		if Wants(r) || isPathForm(requestPath(r.URL)) {
 			proxy.ServeHTTP(w, r)
 			return
 		}
@@ -300,8 +301,10 @@ type target struct {
 	atespace string
 	id       string
 	port     int
-	// path and rawPath, when set, replace the request's path upstream (the
-	// path form strips its routing prefix).
+	// path and rawPath, when set, replace the request's path upstream:
+	// rawPath is the path as sent, byte for byte, and path its decoding.
+	// The path form strips its routing prefix; the header form keeps the
+	// whole path.
 	path, rawPath string
 	// dropAuthorization removes the Authorization header upstream: it
 	// carried the caller's credential for the API, not the daemon's.
@@ -352,13 +355,13 @@ func makeTarget(id, atespace, portStr, defaultAtespace string) (target, error) {
 	return t, nil
 }
 
-// pathPrefix splits an escaped path of the path form into its routing
+// pathPrefix splits raw, the path of the path form as sent, into its routing
 // segments and the rest. n is 0 when the path does not have that shape. The
-// split is by segment on the escaped path, the way a ServeMux matches, so an
+// split is by segment on the path as sent, the way a ServeMux matches, so an
 // escaped routing segment (%65nv1 for env1) still ends the prefix where it
 // should.
-func pathPrefix(escaped string) (id, atespace, portStr, rest string, n int) {
-	segs := strings.Split(escaped, "/")
+func pathPrefix(raw string) (id, atespace, portStr, rest string, n int) {
+	segs := strings.Split(raw, "/")
 	switch {
 	case len(segs) >= 6 && segs[0] == "" && segs[1] == "v1alpha" && segs[2] == "envs" && segs[4] == "ports":
 		id, portStr, n = segs[3], segs[5], 6
@@ -370,13 +373,13 @@ func pathPrefix(escaped string) (id, atespace, portStr, rest string, n int) {
 	return id, atespace, portStr, "/" + strings.Join(segs[n:], "/"), n
 }
 
-func isPathForm(escaped string) bool {
-	_, _, _, _, n := pathPrefix(escaped)
+func isPathForm(raw string) bool {
+	_, _, _, _, n := pathPrefix(raw)
 	return n > 0
 }
 
-func parsePath(escaped, defaultAtespace string) (target, error) {
-	id, atespace, portStr, rest, n := pathPrefix(escaped)
+func parsePath(raw, defaultAtespace string) (target, error) {
+	id, atespace, portStr, rest, n := pathPrefix(raw)
 	if n == 0 {
 		return target{}, errors.New("path is not /v1alpha/[atespaces/{atespace}/]envs/{id}/ports/{port}[/rest]")
 	}
@@ -400,11 +403,50 @@ func parsePath(escaped, defaultAtespace string) (target, error) {
 	if t.path, err = url.PathUnescape(rest); err != nil {
 		return t, fmt.Errorf("bad path escaping: %w", err)
 	}
-	// Keep rawPath even when it equals path: without it, url.EscapedPath
-	// re-escapes characters that are valid as sent (! ' ( ) *), and the
-	// daemon would get "/%21" for "/!". EscapedPath uses RawPath only when
-	// it is a valid encoding of Path.
+	// rewrite sends rawPath as it is (see setPath): url.EscapedPath would
+	// re-escape bytes that are valid as sent (! ' ( ) *) and, worse, drop a
+	// rawPath with bytes it calls invalid ({ } | ^, raw UTF-8), so that
+	// "/a{b%2Fc" would reach the daemon as "/a%7Bb/c", one segment more.
 	return t, nil
+}
+
+// requestPath returns the path of the request-target as the caller sent it.
+// Go's server keeps it in URL.RawPath when it differs from the default
+// escaping of URL.Path, and url.EscapedPath ignores a RawPath that holds
+// bytes the server accepts but EscapedPath would escape ({ } | ^ #, raw UTF-8),
+// so it is read here directly. A RawPath that does not decode to Path (set by
+// a handler that changed Path) is not trusted.
+func requestPath(u *url.URL) string {
+	if u.RawPath != "" {
+		if p, err := url.PathUnescape(u.RawPath); err == nil && p == u.Path {
+			return u.RawPath
+		}
+	}
+	return u.EscapedPath()
+}
+
+// setPath makes raw, the path as sent, the request-target path of u, byte
+// for byte; path is its decoding. url.RequestURI writes Opaque as it is,
+// except that an Opaque starting with "//" would read as an authority (it
+// gains the scheme, "http://..."), so such a path goes in RawPath instead.
+// There the bytes RawPath cannot hold raw ({ } | ^ " < > \ ` # and non-ASCII)
+// are percent-encoded and every other byte, escapes included, is kept, so the
+// daemon sees the same segments.
+func setPath(u *url.URL, path, raw string) {
+	u.Path = path
+	if !strings.HasPrefix(raw, "//") {
+		u.Opaque, u.RawPath = raw, ""
+		return
+	}
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; c >= 0x7f || c <= ' ' || strings.IndexByte("\"#<>\\^`{|}", c) >= 0 {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	u.Opaque, u.RawPath = "", b.String()
 }
 
 // ServePath forwards a path-form request to the environment port its path
@@ -414,7 +456,7 @@ func parsePath(escaped, defaultAtespace string) (target, error) {
 // needs no such check, because a browser sends custom headers to another
 // origin only after a CORS preflight, which the proxy never approves.
 func (p *Proxy) ServePath(w http.ResponseWriter, r *http.Request) {
-	t, err := parsePath(r.URL.EscapedPath(), p.opts.DefaultAtespace)
+	t, err := parsePath(requestPath(r.URL), p.opts.DefaultAtespace)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -443,6 +485,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if r.URL.Opaque == "" {
+		t.path, t.rawPath = r.URL.Path, requestPath(r.URL)
 	}
 	if !p.authenticate(w, r, &t) || !p.inScope(w, t) {
 		return
@@ -521,7 +566,7 @@ func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 	// What a client inside the environment would send.
 	pr.Out.Host = net.JoinHostPort("127.0.0.1", strconv.Itoa(t.port))
 	if t.path != "" {
-		pr.Out.URL.Path, pr.Out.URL.RawPath = t.path, t.rawPath
+		setPath(pr.Out.URL, t.path, t.rawPath)
 	}
 	for _, h := range []string{EnvIDHeader, EnvAtespaceHeader, EnvPortHeader, EnvAuthorizationHeader} {
 		pr.Out.Header.Del(h)
