@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -1242,3 +1243,84 @@ def test_provider_lifecycle_has_no_telemetry_side_effects():
                          text=True, timeout=60, check=False)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "clean"
+
+
+# -- serialize_handle / connect (nemo-gym's ConnectableProvider) -------------
+
+
+def _borrower(provider: SubstrateSandboxProvider, create: dict | None = None) -> SubstrateSandboxProvider:
+    """A second provider on the same fake, as another process would build it."""
+    return SubstrateSandboxProvider(
+        {"connection": {"api_url": provider._connection.api_url, "request_timeout_s": 5.0}, "create": create or {}}
+    )
+
+
+def test_serialize_handle_leaves_out_the_env_and_connect_rebuilds_the_handle():
+    async def t():
+        async with stack() as (provider, fake):
+            handle = await provider.create(
+                SandboxSpec(env={"SECRET": "s3cret"}, workdir="/task", provider_options={"atespace": "team-a"})
+            )
+            descriptor = await provider.serialize_handle(handle, scope="operate")
+            assert json.loads(json.dumps(descriptor)) == {
+                "sandbox_id": handle.sandbox_id,
+                "atespace": "team-a",
+                "workdir": "/task",
+                "ports": [],
+            }
+            borrower = _borrower(provider)
+            try:
+                rebuilt = await borrower.connect(descriptor)
+                assert rebuilt.sandbox_id == handle.sandbox_id
+                assert rebuilt.provider_name == "substrate"
+                result = await borrower.exec(rebuilt, "echo hi", env={"B": "1"})
+                assert (result.return_code, result.error_type) == (0, None)
+                start = fake.starts[-1]
+                assert start["env_id"] == handle.sandbox_id
+                assert start["cwd"] == "/task"
+                assert start["env"] == {"B": "1"}
+            finally:
+                await borrower.aclose()
+
+    run(t())
+
+
+def test_connect_refuses_a_missing_or_crashed_environment():
+    async def t():
+        async with stack() as (provider, fake):
+            with pytest.raises(ValueError, match="sandbox_id"):
+                await provider.connect({})
+            with pytest.raises(RuntimeError, match="does not exist"):
+                await provider.connect({"sandbox_id": "gym-gone"})
+            handle = await provider.create(SandboxSpec())
+            fake.set_status(handle.sandbox_id, EnvironmentStatus.CRASHED)
+            with pytest.raises(RuntimeError, match="CRASHED"):
+                await provider.connect(await provider.serialize_handle(handle))
+
+    run(t())
+
+
+def test_a_shared_sandbox_is_not_parked_when_idle():
+    async def t():
+        async with stack(PAUSE) as (provider, fake):
+            handle = await provider.create(SandboxSpec())
+            assert _parks(fake, handle.sandbox_id) == [LOCAL]
+            descriptor = await provider.serialize_handle(handle)
+            # The owner's own calls no longer park it: the borrower's calls do
+            # not pass through the owner's in-flight count.
+            await provider.exec(handle, "echo hi")
+            await asyncio.sleep(0.05)
+            assert _parks(fake, handle.sandbox_id) == [LOCAL]
+            borrower = _borrower(provider, PAUSE)
+            try:
+                rebuilt = await borrower.connect(descriptor)
+                await borrower.exec(rebuilt, "echo hi")
+                await asyncio.sleep(0.05)
+                assert _parks(fake, handle.sandbox_id) == [LOCAL]
+                # An explicit pause still parks it.
+                await borrower.pause(rebuilt)
+                assert len(_parks(fake, handle.sandbox_id)) == 2
+            finally:
+                await borrower.aclose()
+
+    run(t())

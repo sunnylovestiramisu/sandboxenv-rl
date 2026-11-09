@@ -252,6 +252,20 @@ Rules the provider keeps:
   requests sent through `endpoint()` go straight through the port proxy without the provider's
   in-flight tracking and would race with an idle suspend. Call `pause()` and `resume()` explicitly
   between turns when using `endpoint()`.
+- A sandbox shared with another process (`serialize_handle()` here, `connect()` there) is skipped
+  by automatic idle parking in both processes, for the same reason: the other process's calls do
+  not pass through this provider's in-flight tracking. `pause()` still parks it.
+
+### Sharing a sandbox with another process
+
+The provider implements nemo-gym's `ConnectableProvider`, thus `AsyncSandbox.serialize()` and
+`AsyncSandbox.connect()` work. Gym's Harbor environment server uses them to hand each episode's
+sandbox to the agent. The descriptor holds the environment id, its atespace, the working
+directory and the declared ports. Any process with the same `connection` settings can connect.
+The descriptor leaves out `SandboxSpec.env`, which can hold secrets: a borrower passes its own
+`env` on each exec. `connect()` refuses an environment that does not exist, is `CRASHED` or is
+being deleted. A parked one is fine, because the next guest call wakes it. Close the sandbox in
+the process that created it; a borrower disconnects.
 
 `status()` reports a parked sandbox as `PAUSED` (nemo-gym 0.7 and later; `RUNNING` before that),
 without waking it. The provider also implements nemo-gym's `SupportsSandboxPauseResume`:

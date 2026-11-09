@@ -423,6 +423,10 @@ class _Parking:
     # True once a park settled and no request went out since, so two idle
     # parks that both found the sandbox idle do not both call the API.
     parked: bool = False
+    # True once the sandbox is shared with another process (serialize_handle
+    # here, or connect in the borrower). That process's calls do not pass
+    # through this state, thus an idle park here could cut them.
+    shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -795,6 +799,82 @@ class SubstrateSandboxProvider:
                 stop_on_not_found=True,
             )
 
+    async def serialize_handle(
+        self, handle: SandboxHandle, *, scope: str | None = None
+    ) -> dict[str, Any]:
+        """A descriptor ``connect`` rebuilds the handle from, in any process with
+        this provider's connection config (nemo-gym's ``ConnectableProvider``).
+
+        An environment is reachable by id and atespace, thus no sandbox server
+        is needed to share one. ``scope`` is ignored: ate-env has no leases.
+        The descriptor leaves out ``SandboxSpec.env``, which can hold secrets;
+        a borrower passes its own ``env`` to each exec, as Gym's Harbor server
+        does with ``SandboxAccess.env``.
+
+        From here on this process does not park the sandbox when it is idle,
+        because the borrower's calls do not pass through this provider; an
+        explicit ``pause()`` still parks it."""
+        state = self._parking_state(handle)
+        state.shared = True
+        self._cancel_pending_park(state)
+        raw = handle.raw or {}
+        return {
+            "sandbox_id": handle.sandbox_id,
+            "atespace": self._atespace_of(raw),
+            "workdir": raw.get("workdir"),
+            "ports": list(raw.get("ports") or ()),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a handle from a ``serialize_handle`` descriptor (nemo-gym's
+        ``ConnectableProvider``).
+
+        Checks with the control plane that the environment exists and is not
+        crashed or being deleted; a parked one is fine, as the next guest call
+        wakes it. This process never parks it when idle. Raises ``ValueError``
+        for a descriptor without ``sandbox_id`` and ``RuntimeError`` for an
+        environment that cannot be used."""
+        sandbox_id = descriptor.get("sandbox_id")
+        if not isinstance(sandbox_id, str) or not sandbox_id:
+            raise ValueError(f"substrate descriptor needs a sandbox_id, got {descriptor!r}")
+        atespace = str(descriptor.get("atespace") or self._create.atespace)
+        ports = _validate_ports(descriptor.get("ports"))
+        try:
+            info = await asyncio.wait_for(
+                self._ate().get(sandbox_id, atespace=atespace),
+                timeout=self._connection.request_timeout_s,
+            )
+        except NotFoundError as exc:
+            raise RuntimeError(
+                f"substrate env {atespace}/{sandbox_id} does not exist: {_describe(exc)}"
+            ) from exc
+        except EnvError as exc:
+            raise RuntimeError(
+                f"connecting to substrate env {atespace}/{sandbox_id}: {_describe(exc)}"
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"connecting to substrate env {atespace}/{sandbox_id}: no answer from "
+                f"{self._connection.api_url} within {self._connection.request_timeout_s}s"
+            ) from exc
+        if info.status in (EnvironmentStatus.CRASHED, EnvironmentStatus.DELETING):
+            raise RuntimeError(
+                f"substrate env {atespace}/{sandbox_id} is {_status_name(info.status)}"
+            )
+        handle = SandboxHandle(
+            sandbox_id=sandbox_id,
+            provider_name=self.name,
+            raw={
+                "env_id": sandbox_id,
+                "atespace": atespace,
+                "workdir": descriptor.get("workdir"),
+                "env": {},
+                "ports": ports,
+            },
+        )
+        self._parking_state(handle).shared = True
+        return handle
+
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint
         (nemo-gym's ``SupportsSandboxEndpoint``).
@@ -997,6 +1077,8 @@ class SubstrateSandboxProvider:
         if self._park_mode is None or (handle.raw or {}).get("ports"):
             return
         state = self._parking_state(handle)
+        if state.shared:
+            return
         if state.inflight:
             # Another request holds the sandbox; the last one to finish
             # schedules the park.
