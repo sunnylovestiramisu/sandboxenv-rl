@@ -19,8 +19,9 @@
 # file (with the files next to it) are baked into the loader image (ko's
 # kodata directory), so the pod needs no bucket access; a
 # sidecar keeps the pod alive after the loader exits so the results can be
-# copied out with kubectl cp. The Job is deleted when the script exits, on
-# success or failure.
+# copied out with kubectl cp. The copy is retried; if it still fails, the Job
+# is kept and the script prints the command to fetch the file by hand.
+# Otherwise the Job is deleted when the script exits, on success or failure.
 #
 #   KO_DOCKER_REPO=gcr.io/PROJECT/repo \
 #   benchmarking/swebench/run-in-cluster.sh RUN_ID DATASET.jsonl [swebench-loader run flags...]
@@ -284,8 +285,15 @@ ARGS_JSON="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
 
 KUBECTL_ERR="$(mktemp)"
 # shellcheck disable=SC2329 # invoked by the EXIT trap
+KEEP_JOB=""
 cleanup() {
-  kc -n "${NS}" delete job "${JOB}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if [[ -n "${KEEP_JOB}" ]]; then
+    echo "keeping job ${JOB}: the events file was not copied out. Fetch it with" >&2
+    echo "  kubectl -n ${NS} cp -c keep ${POD}:/work/${RUN_ID}.jsonl ${OUT_DIR}/${RUN_ID}.jsonl" >&2
+    echo "then delete the job: kubectl -n ${NS} delete job ${JOB}" >&2
+  else
+    kc -n "${NS}" delete job "${JOB}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
   if [[ -n "${HARVEST_PID}" ]]; then
     kill "${HARVEST_PID}" 2>/dev/null || true
   fi
@@ -301,6 +309,7 @@ trap cleanup EXIT
 # never reads a part a harvest is still writing. atelet runs in ate-system
 # whatever NAMESPACE the loader uses.
 harvest_part() {
+  mkdir -p "${HARVEST_DIR}"
   local part="${HARVEST_DIR}/part-$1"
   NAMESPACE=ate-system SINCE="$(( 2 * HARVEST_INTERVAL_MIN ))m" "${HARVEST}" "${RUN_ID}" "${part}.tmp" >&2 || true
   if [[ -s "${part}.tmp" ]]; then
@@ -468,10 +477,23 @@ until EXIT="$(kc -n "${NS}" get pod "${POD}" -o jsonpath='{.status.containerStat
   sleep 10
 done
 echo "loader exit code ${EXIT}"
-# The events file first: it is the run's only copy of the results, and the
-# Job is deleted when this script exits.
-if ! kc -n "${NS}" cp -c keep "${POD}:/work/${RUN_ID}.jsonl" "${OUT_DIR}/${RUN_ID}.jsonl"; then
-  echo "no events file to copy; the loader exited before writing it" >&2
+# The events file first: it is the run's only copy of the results. The copy
+# is retried, because a cluster API server that times out once mid-copy is
+# common on a large cluster; if it still fails, the Job is kept so the file
+# can be fetched by hand (the keep sidecar holds the pod for 48 hours).
+copied=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if kc -n "${NS}" cp -c keep "${POD}:/work/${RUN_ID}.jsonl" "${OUT_DIR}/${RUN_ID}.jsonl" 2>"${KUBECTL_ERR}" \
+     && [[ -s "${OUT_DIR}/${RUN_ID}.jsonl" ]]; then
+    copied=1
+    break
+  fi
+  echo "events copy attempt ${attempt} failed: $(tail -1 "${KUBECTL_ERR}")" >&2
+  sleep 15
+done
+if [[ -z "${copied}" ]]; then
+  KEEP_JOB=1
+  echo "could not copy the events file after 10 attempts; the job is kept" >&2
   exit "$(( EXIT == 0 ? 1 : EXIT ))"
 fi
 echo "events in ${OUT_DIR}/${RUN_ID}.jsonl"
