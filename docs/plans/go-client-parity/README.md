@@ -159,15 +159,19 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
   `StartFailureCrashed` and `StartFailureNoCapacity` in `internal/apiservice` and
   `START_FAILURE_KEY` in `errors.py`; the client does not import them.
 - Every guest call captures trailers: `grpc.Trailer(&md)` on unary calls, `stream.Trailer()` after
-  the error on streams, in `env.go` and `process.go`. `fromGRPCError(err, md)` returns `StartError`
-  when the key is present, whatever the code, before the `ErrNotFound` and `ErrProcessExited` rules,
-  as `map_rpc_error` does.
-- `fromGRPCError` keeps the status error in the chain on every branch. Today the `ErrNotFound` and
-  `ErrProcessExited` branches format `status.Convert(err).Message()` with `%s`, so `errors.Is` finds
-  the sentinel and `status.Code(err)` returns `codes.Unknown`. PR 2 wraps the sentinel and the
-  status error together, `fmt.Errorf("env: %w: %w", ErrNotFound, err)`, so `errors.Is` still finds
-  the sentinel and `status.Code` reads `codes.NotFound` through `errors.As`. `Retryable` needs this
-  for NOT_FOUND, and so does a caller who switches on the code.
+  the error on streams. As built (#297), the process and file service clients run on a `trailerConn`
+  that wraps the connection (the client's own or a `GRPCConn`) and reads the trailer where `RecvMsg`
+  fails. A `Send` that fails with `io.EOF` carries no status: the call site must call `CloseAndRecv`
+  and map that error (`WriteFile`, `Stdin`). `Process.Output` returns a stream whose `Recv` maps its
+  errors too. `fromGRPCError` returns `StartError` when the key is present, whatever the code,
+  before the `ErrNotFound` and `ErrProcessExited` rules, as `map_rpc_error` does. `StartError` also
+  carries `EnvID`, as `SandboxStartError` carries `sandbox_id`.
+- `fromGRPCError` keeps the status error in the chain on every branch. Before PR 2 the `ErrNotFound`
+  and `ErrProcessExited` branches formatted `status.Convert(err).Message()` with `%s`, so
+  `errors.Is` found the sentinel and `status.Code(err)` returned `codes.Unknown`. As built (#297),
+  each branch returns an `rpcError` whose `Unwrap() []error` yields the sentinels and the status
+  error, so `errors.Is` still finds the sentinel and `status.Code` reads `codes.NotFound` through
+  `errors.As`. `Retryable` needs this for NOT_FOUND, and so does a caller who switches on the code.
 - `Retryable(err) bool`: true for `StartError`, UNAVAILABLE, DEADLINE_EXCEEDED, INTERNAL, ABORTED
   and NOT_FOUND on an environment; false for INVALID_ARGUMENT, PERMISSION_DENIED and the rest. The
   table is the one in `SubstrateEnvClientRuntime.exec_async` and becomes a parity vector in PR 7.
@@ -231,8 +235,10 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 
 - `proto/testdata/client-parity/`: `image_ref.json`, `executable.json`, `rpc_attrs.json` (one block
   per semconv mode), `error_mapping.json` (status code, message, trailer, expected class or
-  sentinel, retryable), `metric_families.json` (name, labels, buckets), `rpc_coverage.json` (each
-  `EnvironmentService` RPC and the Go and Python method that calls it).
+  sentinel, retryable; it pins the NOT_FOUND rule that reads "environment" or "actor" in the
+  message, which a server message change would flip in both clients), `metric_families.json` (name,
+  labels, buckets), `rpc_coverage.json` (each `EnvironmentService` RPC and the Go and Python method
+  that calls it).
 - `clients/go/parity_test.go` and `clients/python/tests/test_parity_vectors.py` read them; the
   Python test checks the method names by reflection. `attrs_test.go`, `executable_test.go` and the
   mirrored Python tables go.

@@ -30,18 +30,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
-
-// ErrNotFound is returned when an env, process, file, or directory does not exist.
-var ErrNotFound = errors.New("not found")
-
-// ErrProcessExited is returned when an operation needs a running process
-// (signalling it, writing to its stdin) but it has already exited.
-var ErrProcessExited = errors.New("process has exited")
 
 // DefaultAtespace is the atespace ate-env-api uses for an environment when
 // a request names none, and the one Client.Env uses for an empty atespace.
@@ -132,13 +123,15 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 
 	return &Client{
-		endpoint:   endpoint,
-		opts:       opts,
-		connAuth:   opts.GRPCConn == nil && opts.AuthToken != "",
-		grpcConn:   grpcConn,
-		grpc:       ateenvv1alpha.NewEnvironmentServiceClient(grpcConn),
-		process:    ateenvv1alpha.NewProcessServiceClient(grpcConn),
-		filesystem: ateenvv1alpha.NewFileSystemServiceClient(grpcConn),
+		endpoint: endpoint,
+		opts:     opts,
+		connAuth: opts.GRPCConn == nil && opts.AuthToken != "",
+		grpcConn: grpcConn,
+		grpc:     ateenvv1alpha.NewEnvironmentServiceClient(grpcConn),
+		// Guest calls read their trailer for a start failure (see
+		// StartError).
+		process:    ateenvv1alpha.NewProcessServiceClient(trailerConn{grpcConn}),
+		filesystem: ateenvv1alpha.NewFileSystemServiceClient(trailerConn{grpcConn}),
 		tracer:     newClientTracer(opts),
 	}, nil
 }
@@ -389,19 +382,4 @@ func (c *Client) Env(atespace, id string) *Env {
 		atespace: atespace,
 		client:   c,
 	}
-}
-
-func fromGRPCError(err error) error {
-	if err == nil {
-		return nil
-	}
-	switch status.Code(err) {
-	case codes.NotFound:
-		return fmt.Errorf("env: %w: %s", ErrNotFound, status.Convert(err).Message())
-	case codes.FailedPrecondition:
-		if strings.Contains(status.Convert(err).Message(), "has exited") {
-			return fmt.Errorf("env: %w: %s", ErrProcessExited, status.Convert(err).Message())
-		}
-	}
-	return fmt.Errorf("env: %w", err)
 }

@@ -28,6 +28,17 @@ user needs to know across them.
 - Go client: `env.DefaultAtespace`. The client no longer imports `internal/ate`, and with it
   `internal/routertls` and Substrate's API package (`go.ate.dev/substrate/api/ateapi/v1`);
   `hack/verify/go-client-deps.sh` keeps it that way in the Go CI job.
+- Go client: a guest call (a process or file call) that failed because the
+  environment cannot start returns a `*env.StartError` with the `Reason`
+  (`env.StartFailureCrashed`, `env.StartFailureNoCapacity`), the status `Code`
+  and the `EnvID`, from the `ate-env-start-failure` trailer ate-env-api sets,
+  as the Python client's `SandboxStartError`. It is read on unary and streaming
+  calls (the `Recv` of `Process.Output` included), on the client's own
+  connection and on a `GRPCConn`. `env.Retryable(err)` reports whether the work
+  can succeed on a fresh environment, with the Python client's table. New
+  sentinels `env.ErrInvalidArgument`, `env.ErrPermissionDenied` and
+  `env.ErrFailedPrecondition` (an `ErrProcessExited` error also wraps
+  `ErrFailedPrecondition`).
 - `ate-env manifest template --sidecar-env NAME=VALUE`: a variable that only
   the `--sidecar` processes get. The container carries it as
   `ATE_SIDECAR_ENV_NAME`; the guest takes it out of its own environment before
@@ -202,6 +213,11 @@ user needs to know across them.
 
 ### Changed
 
+- Go client: every error keeps the gRPC status in its chain, thus
+  `status.Code(err)` now reports `codes.NotFound` for an `env.ErrNotFound`
+  error, and `codes.FailedPrecondition` for an `env.ErrProcessExited` error,
+  instead of `codes.Unknown`. The `Recv` of `Process.Output` returns the SDK's
+  errors instead of the raw status error; `status.Code(err)` still reads it.
 - Releases after v0.1.0 no longer build or publish the OpenHands agent-server
   layer (`oh-agent-server-layer`). Build it from `integrations/openhands/layer`
   and push it to your own registry (see `integrations/openhands/README.md`).

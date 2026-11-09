@@ -78,7 +78,7 @@ func (p *Process) Wait(ctx context.Context) (*ateenvv1alpha.Process, error) {
 			return nil, errors.New("env: output stream ended before the process exited")
 		}
 		if err != nil {
-			return nil, fromGRPCError(err)
+			return nil, err
 		}
 		if exit := msg.GetExit(); exit != nil {
 			return exit, nil
@@ -117,7 +117,9 @@ func (p *Process) Kill(ctx context.Context) (*ateenvv1alpha.Process, error) {
 // messages. req may be nil for a snapshot of the output so far; its
 // process_id is always set to this process. With follow, the stream ends
 // with an exit message once the process has exited and all output has been
-// delivered. Cancel ctx to stop early.
+// delivered. Cancel ctx to stop early. Recv (and RecvMsg) returns io.EOF at
+// the end of the stream and otherwise the errors of every other call: a StartError when
+// the environment cannot start, an error wrapping a sentinel, ...
 func (p *Process) Output(ctx context.Context, req *ateenvv1alpha.StreamProcessOutputRequest) (grpc.ServerStreamingClient[ateenvv1alpha.ProcessOutput], error) {
 	if req == nil {
 		req = &ateenvv1alpha.StreamProcessOutputRequest{}
@@ -129,7 +131,29 @@ func (p *Process) Output(ctx context.Context, req *ateenvv1alpha.StreamProcessOu
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
-	return stream, nil
+	return outputStream{stream}, nil
+}
+
+// outputStream maps the errors of Recv and RecvMsg as every other call
+// does.
+type outputStream struct {
+	grpc.ServerStreamingClient[ateenvv1alpha.ProcessOutput]
+}
+
+func (s outputStream) Recv() (*ateenvv1alpha.ProcessOutput, error) {
+	msg, err := s.ServerStreamingClient.Recv()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fromGRPCError(err)
+	}
+	return msg, err
+}
+
+func (s outputStream) RecvMsg(m any) error {
+	err := s.ServerStreamingClient.RecvMsg(m)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fromGRPCError(err)
+	}
+	return err
 }
 
 // Stdin opens a writer to the process's standard input. Writes are delivered
@@ -186,7 +210,9 @@ func (w *stdinWriter) send(req *ateenvv1alpha.WriteProcessInputRequest) error {
 	if err := w.stream.Send(req); err != nil {
 		w.closed = true
 		if errors.Is(err, io.EOF) {
-			_, err = w.stream.CloseAndRecv()
+			if _, err = w.stream.CloseAndRecv(); err == nil {
+				return errShortWrite
+			}
 		}
 		return fromGRPCError(err)
 	}

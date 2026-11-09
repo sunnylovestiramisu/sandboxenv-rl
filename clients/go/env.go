@@ -140,7 +140,7 @@ func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Ti
 			break
 		}
 		if err != nil {
-			return nil, fromGRPCError(err)
+			return nil, err
 		}
 		switch out := msg.GetOutput().(type) {
 		case *ateenvv1alpha.ProcessOutput_Stdout:
@@ -265,7 +265,7 @@ func collectOutput(ctx context.Context, proc *Process, exitCode int) (*ShellResp
 			break
 		}
 		if err != nil {
-			return nil, fromGRPCError(err)
+			return nil, err // Output's Recv maps it already
 		}
 		switch out := msg.GetOutput().(type) {
 		case *ateenvv1alpha.ProcessOutput_Stdout:
@@ -385,6 +385,17 @@ func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.File
 	if err != nil {
 		return fromGRPCError(err)
 	}
+	// A Send that fails with io.EOF means the server already ended the
+	// stream; its status, and the start failure trailer, come from
+	// CloseAndRecv. A server that ended it with OK took a short write.
+	sendErr := func(err error) error {
+		if errors.Is(err, io.EOF) {
+			if _, err = stream.CloseAndRecv(); err == nil {
+				return errShortWrite
+			}
+		}
+		return fromGRPCError(err)
+	}
 
 	buf := make([]byte, 64*1024)
 	n, readErr := r.Read(buf)
@@ -399,15 +410,15 @@ func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.File
 		SeekOffset: seekOffset,
 	}
 	if err := stream.Send(firstReq); err != nil {
-		return fromGRPCError(err)
+		return sendErr(err)
 	}
 
 	if !errors.Is(readErr, io.EOF) {
 		for {
 			n, err := r.Read(buf)
 			if n > 0 {
-				if sendErr := stream.Send(&ateenvv1alpha.WriteFileRequest{Chunk: buf[:n]}); sendErr != nil {
-					return fromGRPCError(sendErr)
+				if err := stream.Send(&ateenvv1alpha.WriteFileRequest{Chunk: buf[:n]}); err != nil {
+					return sendErr(err)
 				}
 			}
 			if errors.Is(err, io.EOF) {

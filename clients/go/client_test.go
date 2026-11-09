@@ -51,6 +51,7 @@ import (
 type fixture struct {
 	router  *fakerouter.Router
 	control *fakecontrol.Server
+	service *apiservice.Server
 	client  *env.Client
 	guest   string // guest workdir
 	apiURL  string
@@ -120,7 +121,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { client.Close() })
 
-	return &fixture{router: router, control: control, client: client, guest: t.TempDir(), apiURL: srv.URL}
+	return &fixture{router: router, control: control, service: service, client: client, guest: t.TempDir(), apiURL: srv.URL}
 }
 
 // create makes a env whose guest handler serves from a temp dir.

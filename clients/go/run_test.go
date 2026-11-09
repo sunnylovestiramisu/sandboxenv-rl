@@ -55,8 +55,10 @@ type fakeProcesses struct {
 	// pollEntered, when set, makes each GetProcess signal it, then wait
 	// for the call's ctx to end.
 	pollEntered chan struct{}
-	// outputDelay delays each StreamProcessOutput.
+	// outputDelay delays each StreamProcessOutput; outputCode, when set,
+	// fails it with that code.
 	outputDelay    time.Duration
+	outputCode     codes.Code
 	exitCode       int32
 	stdout, stderr string
 
@@ -109,8 +111,12 @@ func (f *fakeProcesses) StreamProcessOutput(req *ateenvv1alpha.StreamProcessOutp
 	f.mu.Lock()
 	f.outputReqs = append(f.outputReqs, req)
 	stdout, stderr, exited, code, delay := f.stdout, f.stderr, f.exited[req.GetProcessId()], f.exitCode, f.outputDelay
+	outputCode := f.outputCode
 	f.mu.Unlock()
 	time.Sleep(delay)
+	if outputCode != codes.OK {
+		return status.Error(outputCode, "router: no healthy upstream")
+	}
 	if stdout != "" {
 		if err := stream.Send(&ateenvv1alpha.ProcessOutput{Output: &ateenvv1alpha.ProcessOutput_Stdout{Stdout: []byte(stdout)}}); err != nil {
 			return err
@@ -277,6 +283,23 @@ func TestRunPollStdinFailureKills(t *testing.T) {
 	}
 	if killed, _ := f.snapshot(); len(killed) != 1 {
 		t.Fatalf("an abandoned process must be killed once, got %v", killed)
+	}
+}
+
+// A polled Run whose output read fails after the exit returns that error
+// mapped once: one "env:" prefix, the code readable with status.Code.
+func TestRunPollOutputReadErrorMappedOnce(t *testing.T) {
+	f := &fakeProcesses{pollsUntilExit: 1, outputCode: codes.Unavailable}
+	e := newFakeProcessEnv(t, f)
+	_, err := e.Run(t.Context(), env.ShellRequest{Command: "true", Poll: true})
+	if err == nil {
+		t.Fatal("Run succeeded, want the output read's error")
+	}
+	if n := strings.Count(err.Error(), "env:"); n != 1 {
+		t.Fatalf("error %q has %d \"env:\" prefixes, want 1", err, n)
+	}
+	if status.Code(err) != codes.Unavailable || !env.Retryable(err) {
+		t.Fatalf("status.Code = %v, Retryable = %v; want Unavailable and true", status.Code(err), env.Retryable(err))
 	}
 }
 
