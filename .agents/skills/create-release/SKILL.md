@@ -14,12 +14,12 @@ Use this skill when preparing, drafting, and publishing a release of `sandboxenv
 
 Every `sandboxenv-rl` release produces four core deliverables:
 
-| Deliverable                                                                    | Distribution Channel                                                                                                                                                             | Verification / Security                                                                    |
-| :----------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
-| **Go CLI (`ate-env`)**                                                         | GitHub Release static binaries (`ate-env_<tag>_<os>_<arch>`, `chmod +x`)                                                                                                         | `SHA256SUMS_${TAG}.txt` & Cosign Sigstore bundles (`.sigstore.json`)                       |
-| **Container Images** (`ate-env-api`, `ate-env-guest`, `oh-agent-server-layer`) | GitHub Container Registry (`ghcr.io/ai-on-gke/sandboxenv-rl/*`)                                                                                                                  | Multi-arch (`linux/amd64`, `linux/arm64`), pinned by digest, and signed with Cosign OIDC   |
-| **Python Client SDK (`ate-env-rl`)**                                           | PyPI when `vars.PYPI_PUBLISH_ENABLED=true`, or Git tag install when PyPI is skipped (`clients/python`; packages under `integrations/` are in-repo examples and are not released) | `setuptools-scm>=8` & PyPA OIDC Trusted Publishing (`id-token: write`, environment `pypi`) |
-| **gRPC Contracts & Protos**                                                    | Git repository tags & GitHub Release notes                                                                                                                                       | Protocol buffer wire compatibility                                                         |
+| Deliverable                                           | Distribution Channel                                                                                                                                                             | Verification / Security                                                                    |
+| :---------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
+| **Go CLI (`ate-env`)**                                | GitHub Release static binaries (`ate-env_<tag>_<os>_<arch>`, `chmod +x`)                                                                                                         | `SHA256SUMS_${TAG}.txt` & Cosign Sigstore bundles (`.sigstore.json`)                       |
+| **Container Images** (`ate-env-api`, `ate-env-guest`) | GitHub Container Registry (`ghcr.io/ai-on-gke/sandboxenv-rl/*`)                                                                                                                  | Multi-arch (`linux/amd64`, `linux/arm64`), pinned by digest, and signed with Cosign OIDC   |
+| **Python Client SDK (`ate-env-rl`)**                  | PyPI when `vars.PYPI_PUBLISH_ENABLED=true`, or Git tag install when PyPI is skipped (`clients/python`; packages under `integrations/` are in-repo examples and are not released) | `setuptools-scm>=8` & PyPA OIDC Trusted Publishing (`id-token: write`, environment `pypi`) |
+| **gRPC Contracts & Protos**                           | Git repository tags & GitHub Release notes                                                                                                                                       | Protocol buffer wire compatibility                                                         |
 
 ## Release Procedure Overview
 
@@ -100,11 +100,10 @@ This command:
 2. Queries PR details (labels, author, title) and extracts explicit `## Release note` and `## What`
    blocks from PR descriptions.
 3. Computes the PEP 440 Python version (`$VERSION`, e.g. `0.1.0` or `0.1.0rc1`), checks whether
-   `vars.PYPI_PUBLISH_ENABLED` is enabled on the repository, reads the pinned OpenHands agent server
-   version (`$OH_AGENT_SERVER_VERSION`) from `integrations/openhands/layer/requirements.in`,
-   extracts the `## Unreleased` section from `CHANGELOG.md`, and builds the `$SERVER_DEPENDENCIES`
-   Markdown table from `go.mod` (including the resolved `go.ate.dev/substrate` commit link),
-   `.ko.yaml`, and `integrations/openhands/layer/requirements.in`.
+   `vars.PYPI_PUBLISH_ENABLED` is enabled on the repository, extracts the `## Unreleased` section
+   from `CHANGELOG.md`, and builds the `$SERVER_DEPENDENCIES` Markdown table from `go.mod`
+   (including the resolved `go.ate.dev/substrate` commit link), `.ko.yaml`, and
+   `integrations/openhands/layer/requirements.in`.
 4. Compiles a deduplicated list of non-bot contributors and outputs
    `hack/release/release-context.md`.
 
@@ -122,10 +121,9 @@ This command:
      - _Observability & Benchmarking_ Link every bullet point to its PR
        (`* Description of feature or fix (#<pr_number>)`).
    - **Full Changelog**: Include the categorized list or compare URL from the generated notes.
-   - **Installation**: Substitute `$TAG` and `$OH_AGENT_SERVER_VERSION` (for
-     `oh-agent-server-layer:<agent-server-version>-<tag>`) into the CLI and GHCR/`cosign verify`
-     blocks (adjusting `ai-on-gke/sandboxenv-rl` to `<owner>/<repo>` if cutting a release on a
-     fork). For `#### Python Client SDK`:
+   - **Installation**: Substitute `$TAG` into the CLI and GHCR/`cosign verify` blocks (adjusting
+     `ai-on-gke/sandboxenv-rl` to `<owner>/<repo>` if cutting a release on a fork). For
+     `#### Python Client SDK`:
      - **When PyPI publishing is enabled** (`vars.PYPI_PUBLISH_ENABLED=true` and not skipped):
        substitute `$VERSION` into `pip install "ate-env-rl==$VERSION"`.
      - **When PyPI publishing is skipped or not configured** (the user asked to skip PyPI or
@@ -167,9 +165,8 @@ This command:
 The tag push triggers the `publish` job in `.github/workflows/release.yaml`:
 
 - **Container Build & Sign**: Builds multi-arch images (`linux/amd64`, `linux/arm64`) for
-  `oh-agent-server-layer`, `ate-env-api`, and `ate-env-guest`, pushes them to GHCR (updating
-  `:latest` only on stable tags without a `-` pre-release suffix), and signs them with keyless
-  Cosign OIDC.
+  `ate-env-api` and `ate-env-guest`, pushes them to GHCR (updating `:latest` only on stable tags
+  without a `-` pre-release suffix), and signs them with keyless Cosign OIDC.
 - **CLI Compilation & Signing**: Compiles `ate-env` for Linux and macOS (`amd64`, `arm64`) with
   baked-in image digests, writes `images_${TAG}.txt` and `SHA256SUMS_${TAG}.txt`, and generates
   `.sigstore.json` Cosign bundles (`cosign sign-blob --bundle`).

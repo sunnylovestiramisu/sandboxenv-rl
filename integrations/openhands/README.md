@@ -55,12 +55,11 @@ The package pins `openhands-sdk` to the agent-server version in the layer (see
 
 ## 2. Build the layer
 
-Each release of this repo publishes the layer as
-`ghcr.io/ai-on-gke/sandboxenv-rl/oh-agent-server-layer`, multi-arch and signed, tagged
-`<agent-server version>-<release tag>`. The digest is in the release notes and in the release's
-`images_<tag>.txt`; [docs/release.md](../../docs/release.md#verify-a-signature) shows how to verify it.
-Use that digest in section 3. Build the layer yourself for another registry or another agent-server
-version:
+Releases after v0.1.0 do not publish a layer image. Build it from
+[`integrations/openhands/layer`](layer) and push it to your own registry, then use its digest in
+section 3. v0.1.0 published `ghcr.io/ai-on-gke/sandboxenv-rl/oh-agent-server-layer:1.55.0-v0.1.0`;
+that image gets no updates (it predates the #267 security re-lock of the layer's dependencies), and
+an org admin can delete the package.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \

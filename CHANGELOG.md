@@ -174,6 +174,11 @@ user needs to know across them.
 
 ### Changed
 
+- Releases after v0.1.0 no longer build or publish the OpenHands agent-server
+  layer (`oh-agent-server-layer`). Build it from `integrations/openhands/layer`
+  and push it to your own registry (see `integrations/openhands/README.md`).
+  The v0.1.0 image (`oh-agent-server-layer:1.55.0-v0.1.0`) gets no updates: it
+  predates the #267 security re-lock. An org admin can delete the package.
 - Built against Substrate `274605f1` (2026-11-05), from `475f49b0`. The
   control plane API is unchanged for ate-env (`MintActorCertificate`, which
   ate-env never called, is gone). Three runtime changes reach a template.

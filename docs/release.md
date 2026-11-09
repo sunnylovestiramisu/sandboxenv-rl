@@ -5,7 +5,7 @@ A release of `sandboxenv-rl` is anchored to a semantic version tag `vX.Y.Z` (or 
 | Deliverable | Distribution Channel | Verification / Security |
 | :--- | :--- | :--- |
 | **Go CLI (`ate-env`)** | GitHub Release static binaries (`ate-env_<tag>_<os>_<arch>`, download and `chmod +x`) for Linux and macOS (`amd64`, `arm64`) | `SHA256SUMS_<tag>.txt` & Cosign Sigstore bundles (`.sigstore.json`) |
-| **Container Images** (`ate-env-api`, `ate-env-guest`, `oh-agent-server-layer`) | GitHub Container Registry (`ghcr.io/ai-on-gke/sandboxenv-rl/*`) | Multi-arch (`linux/amd64`, `linux/arm64`), pinned by digest, and signed with Cosign keyless signatures bound to GitHub Actions OIDC |
+| **Container Images** (`ate-env-api`, `ate-env-guest`) | GitHub Container Registry (`ghcr.io/ai-on-gke/sandboxenv-rl/*`) | Multi-arch (`linux/amd64`, `linux/arm64`), pinned by digest, and signed with Cosign keyless signatures bound to GitHub Actions OIDC |
 | **Python Client SDK (`ate-env-rl`)** | PyPI when `vars.PYPI_PUBLISH_ENABLED=true`, or Git tag install otherwise (`clients/python`; packages under `integrations/` are in-repo reference integrations/examples and are not released to PyPI) | Built with `setuptools-scm>=8` and published via PyPA OIDC Trusted Publishing (`id-token: write`, environment `pypi`) |
 | **gRPC Contracts & Protos** | Git repository tags & GitHub Release notes | Wire-compatible Protocol Buffers (`proto/ateenv/v1alpha`) |
 
@@ -24,19 +24,9 @@ A build from source (`go install ...@latest`, `go build`) has no baked-in defaul
 
 ## The OpenHands Runtime Layer
 
-The release publishes the runtime layer that [`integrations/openhands`](../integrations/openhands/README.md) mounts into task images at `/opt/oh`: the OpenHands agent server with its own isolated Python environment.
+Releases after v0.1.0 do not publish the runtime layer that [`integrations/openhands`](../integrations/openhands/README.md) mounts into task images at `/opt/oh`. Build it from [`integrations/openhands/layer`](../integrations/openhands/layer) and push it to your own registry, as the integration's README shows. The integration (not published to PyPI) pins `openhands-sdk` to the same version as the layer's agent server, thus build the layer from the same checkout as the integration.
 
-- Built from [`integrations/openhands/layer`](../integrations/openhands/layer) with `docker buildx` for `linux/amd64` and `linux/arm64` (QEMU runs `arm64` stages on the `amd64` runner).
-- Dependencies are hash-locked and base images are pinned by digest. The build verifies that the installed agent-server, SDK, and tools match the version specified in `layer/requirements.in`. The image index carries no provenance attestation, matching the `ko` images; the Cosign signature records where it comes from.
-- Tagged `<agent-server version>-<release tag>` (e.g. `1.55.0-v0.1.0`) after signing, with no `:latest` tag. Stable releases of `ate-env-api` and `ate-env-guest` update `:latest`, whereas pre-release tags containing `-` (e.g. `v0.1.0-rc1`) leave `:latest` untouched.
-- Use the digest from the release notes or `images_<tag>.txt` in the base template:
-
-```bash
-ate-env manifest template --template oh-agent-server \
-  --layer oh=ghcr.io/ai-on-gke/sandboxenv-rl/oh-agent-server-layer@sha256:<digest>=/opt/oh ...
-```
-
-The in-repo reference integration under [`integrations/openhands`](../integrations/openhands/README.md) (not published to PyPI) pins `openhands-sdk` to the same version as the layer's agent-server; always pair the layer image with the matching release tag checkout.
+Release v0.1.0 published `ghcr.io/ai-on-gke/sandboxenv-rl/oh-agent-server-layer:1.55.0-v0.1.0`; that image gets no updates (it predates the #267 security re-lock of the layer's dependencies), and an org admin can delete the package.
 
 ## Pin by Digest
 
@@ -53,7 +43,7 @@ cosign verify \
   ghcr.io/ai-on-gke/sandboxenv-rl/ate-env-guest@sha256:<digest>
 ```
 
-The same command verifies `ate-env-api` and `oh-agent-server-layer`; replace only the image reference. A valid signature proves the image was built by this repository's `release` workflow from a tag: the certificate identity names `.github/workflows/release.yaml` at a `refs/tags/` ref, so a signature from another workflow or a branch run does not verify.
+The same command verifies `ate-env-api`; replace only the image reference. A valid signature proves the image was built by this repository's `release` workflow from a tag: the certificate identity names `.github/workflows/release.yaml` at a `refs/tags/` ref, so a signature from another workflow or a branch run does not verify.
 
 The workflow signs with Cosign 3 (installed by `sigstore/cosign-installer` v4), which writes the standardized Sigstore bundle format and stores it as an OCI 1.1 referring artifact next to the image. Verify with Cosign 3 or newer; a Cosign 2 client does not find these signatures.
 
@@ -88,7 +78,7 @@ The release cutting process can be run directly by a maintainer or delegated to 
 ```bash
 python3 hack/release/create-release.py context --tag v0.1.0 --output hack/release/release-context.md
 ```
-Review `hack/release/release-context.md` and use `hack/release/release-template.md` to draft `hack/release/RELEASE_NOTES_v0.1.0.md`. Categorize changes into Highlights (Core Runtime, Python SDK), verify breaking changes against `CHANGELOG.md` and PR notes, and substitute `$TAG`, `$OH_AGENT_SERVER_VERSION`, `$VERSION` (when PyPI publishing is enabled; otherwise replace the PyPI `pip install` block with the Git-tag `pip install` snippet from `release-template.md`), and `$SERVER_DEPENDENCIES` (the pre-rendered `go.mod` / `.ko.yaml` / runtime layer pin table, including the exact `go.ate.dev/substrate` commit). Both `release-context.md` and `RELEASE_NOTES_*.md` are gitignored scratch files.
+Review `hack/release/release-context.md` and use `hack/release/release-template.md` to draft `hack/release/RELEASE_NOTES_v0.1.0.md`. Categorize changes into Highlights (Core Runtime, Python SDK), verify breaking changes against `CHANGELOG.md` and PR notes, and substitute `$TAG`, `$VERSION` (when PyPI publishing is enabled; otherwise replace the PyPI `pip install` block with the Git-tag `pip install` snippet from `release-template.md`), and `$SERVER_DEPENDENCIES` (the pre-rendered `go.mod` / `.ko.yaml` / OpenHands agent server pin table, including the exact `go.ate.dev/substrate` commit). Both `release-context.md` and `RELEASE_NOTES_*.md` are gitignored scratch files.
 
 #### Push Tag and Create Draft Release
 Perform a dry-run check (verifies clean checkout, `origin/main` ancestry, tag format, and unpublished status):
@@ -102,15 +92,13 @@ python3 hack/release/create-release.py draft --tag v0.1.0 --notes-file hack/rele
 If the `publish` job has already appended an `## Images` table to the Draft Release, re-running `create-release.py draft` to edit prose automatically preserves that `## Images` section.
 
 #### How the `publish` Job Executes & Republishing on Partial Failure
-When the tag push triggers [`.github/workflows/release.yaml`](../.github/workflows/release.yaml), the `publish` job runs in five ordered stages:
+When the tag push triggers [`.github/workflows/release.yaml`](../.github/workflows/release.yaml), the `publish` job runs in three ordered stages:
 
-1. Builds `oh-agent-server-layer` for `linux/amd64` and `linux/arm64` and pushes it by digest only, with no tag (the slowest step).
-2. Builds and pushes `ate-env-api` and `ate-env-guest` via [`hack/release/ko-publish.sh`](../hack/release/ko-publish.sh) with `${TAG}` (plus `latest` on stable tags).
-3. Signs all three GHCR digests in one `cosign sign` step immediately after push.
-4. Tags `oh-agent-server-layer` as `<agent-server version>-<release tag>` pointing at the signed digest.
-5. Cross-compiles `ate-env` for four platforms with the digests baked in, signs the binaries, `images_<tag>.txt`, and `SHA256SUMS_<tag>.txt` into `.sigstore.json` bundles, uploads all 12 files to the Draft Release, and replaces or appends the `## Images` section.
+1. Builds and pushes `ate-env-api` and `ate-env-guest` via [`hack/release/ko-publish.sh`](../hack/release/ko-publish.sh) with `${TAG}` (plus `latest` on stable tags).
+2. Signs both GHCR digests in one `cosign sign` step immediately after push.
+3. Cross-compiles `ate-env` for four platforms with the digests baked in, signs the binaries, `images_<tag>.txt`, and `SHA256SUMS_<tag>.txt` into `.sigstore.json` bundles, uploads all 12 files to the Draft Release, and replaces or appends the `## Images` section.
 
-If a step fails, the job stops there: a failed layer build leaves no tag and no release (at most an untagged layer index in GHCR); after step 2, a tag points at an unsigned image only until step 3 finishes; if step 4 or 5 fails, the images are signed, while the layer tag, CLI assets, or `## Images` block are filled in on republish.
+If a step fails, the job stops there: after step 1, a tag points at an unsigned image only until step 2 finishes; if step 3 fails, the images are signed, while the CLI assets or `## Images` block are filled in on republish.
 
 Monitor progress with:
 ```bash
@@ -135,7 +123,7 @@ Before cutting the first release, configure repository rules and environment gat
 ### GitHub Container Registry (GHCR)
 GitHub Container Registry packages are created on the first push by the workflow's `GITHUB_TOKEN`:
 1. Allow GitHub Actions to create packages under organization settings (**Packages**).
-2. After the first release, open each package (`ate-env-api`, `ate-env-guest`, `oh-agent-server-layer`) and confirm it is public and linked to this repository so anonymous pulls and repository permissions apply.
+2. After the first release, open each package (`ate-env-api`, `ate-env-guest`) and confirm it is public and linked to this repository so anonymous pulls and repository permissions apply.
 
 ### PyPI Publishing Operations (Optional)
 Both PR validation (`ci-release` in [`nix/ci.nix`](../nix/ci.nix)) and release publication (`publish-pypi` in [`.github/workflows/release.yaml`](../.github/workflows/release.yaml)) invoke [`hack/release/build-dists.sh`](../hack/release/build-dists.sh) to build sdist and wheel distributions only for `clients/python` (`ate-env-rl`) via `pyproject-build --no-isolation`, stamping the version from the Git tag via `setuptools-scm>=8` and checking out `refs/tags/<tag>` explicitly. Packages under `integrations/` are in-repo reference integrations/examples and are not published to PyPI.
@@ -156,10 +144,9 @@ Automatic PyPI upload on release publication is **opt-in** via the `PYPI_PUBLISH
 
 - **Hermetic Nix Environment**: Release workflows execute CLI cross-compilation, container image builds, and Python packaging within the repository's Nix environment (`flake.lock` and `uv.lock`). Python distributions are built with `pyproject-build --no-isolation` using Nix-provided `build`, `setuptools`, `setuptools-scm`, and `wheel` rather than dynamic runtime `pip` installations.
 - **Checksums**: Only a single versioned checksum file (`SHA256SUMS_${TAG}.txt`) is generated and uploaded alongside `.sigstore.json` Cosign bundles.
-- **Base images & BuildKit/QEMU pins**:
+- **Base image pins**:
   - The guest base image is pinned by digest in [`.ko.yaml`](../.ko.yaml) (a `bash` image so templates whose container is the guest itself have a shell for `shell()`; rootfs-image templates use only the static binary). Bump this pin deliberately and call it out in release notes.
   - The API image uses `ko`'s default distroless base.
-  - The OpenHands layer pins its base images by digest in its Dockerfile and its Python dependencies by hash in `layer/requirements.txt`. Both the QEMU binfmt image and the BuildKit image in `release.yaml` are also pinned by digest; **Dependabot covers the Dockerfile base images, not those two `release.yaml` pins**. To bump either one, resolve the new digest with `crane digest <image>:<tag>` and update the tag and digest together.
 - **Action pinning & cache isolation**: All GitHub Actions are pinned by full commit SHA with a trailing version comment (`zizmor` enforces this). To bump an action, resolve the tag's commit via `git ls-remote --tags https://github.com/<owner>/<action> v<x.y.z>` and update the SHA and comment together. Release builds run with `persist-credentials: false` and Go module caching disabled so a release build cannot consume a cache seeded by another branch run.
 - **Development vs. release images**: `make images` builds `ate-env-api` and `ate-env-guest` for a private development registry (`ATE_ENV_IMAGE_REPO`); always point users at the signed release digests.
 

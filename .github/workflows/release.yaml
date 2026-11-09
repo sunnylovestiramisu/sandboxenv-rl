@@ -15,8 +15,8 @@
 # Release workflow for Agent Substrate Environments (sandboxenv-rl).
 #
 # Deliverables:
-#  1. Container images: ate-env-api, ate-env-guest, and oh-agent-server-layer pushed to
-#     GitHub Container Registry (GHCR), pinned by digest and signed with Cosign keyless signatures.
+#  1. Container images: ate-env-api and ate-env-guest pushed to GitHub Container Registry
+#     (GHCR), pinned by digest and signed with Cosign keyless signatures.
 #  2. Go CLI: ate-env static binaries cross-compiled for Linux and macOS (amd64 / arm64), built
 #     into dist/ with baked-in image defaults, single SHA256SUMS_${TAG}.txt, and Cosign signatures,
 #     attached to the GitHub Release.
@@ -113,63 +113,14 @@ jobs:
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # The OpenHands runtime layer (integrations/openhands/layer) is a Dockerfile
-      # build, not a Go binary, thus buildx builds it. QEMU runs its linux/arm64
-      # stages on the amd64 runner; the binfmt image is pinned by digest.
-      #
-      # Order: the slow layer build runs first and pushes by digest only, with no
-      # tag. The ko images are pushed next and signed at once, together with the
-      # layer, and the layer gets its tag only after the signature exists. Thus a
-      # failed layer build leaves no tag and no release behind, and no tag points
-      # at an image without a signature longer than the push-to-sign step.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        with:
-          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-          platforms: arm64
-
-      # The docker-container builder runs BuildKit, which builds and pushes the
-      # signed layer; its image is pinned by digest, not the mutable
-      # buildx-stable-1 tag.
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: image=docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
-
-      - name: Build and push the OpenHands layer (by digest, no tag yet)
-        id: layer
+      # Do not remove this step as dead code. Since #179 no setup action logs in
+      # to GHCR: ko (in nix develop) pushes the images and cosign sign pushes
+      # their signatures with the credentials this step writes to
+      # ~/.docker/config.json.
+      - name: Log in to GHCR
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^openhands-agent-server==\([0-9][0-9.]*\)$/\1/p' integrations/openhands/layer/requirements.in)
-          if [[ -z "${version}" ]]; then
-            echo "no openhands-agent-server==<version> line in integrations/openhands/layer/requirements.in" >&2
-            exit 1
-          fi
-          echo "${GH_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-          # --provenance=false: a plain image index, like the ko images; the cosign
-          # signature below records where the image comes from. push-by-digest:
-          # the index is pushed without a tag; "Tag the OpenHands layer" adds it.
-          # The metadata file goes to RUNNER_TEMP: an untracked file in the
-          # checkout makes Go stamp the ko images with vcs.modified=true.
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --build-arg "AGENT_SERVER_VERSION=${version}" \
-            --provenance=false \
-            --output "type=image,name=${IMAGE_PREFIX}/oh-agent-server-layer,push-by-digest=true,name-canonical=true,push=true" \
-            --metadata-file "${RUNNER_TEMP}/layer-metadata.json" \
-            integrations/openhands/layer
-          digest=$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/layer-metadata.json")
-          if [[ "${digest}" != sha256:* ]]; then
-            echo "no image digest in the buildx metadata: ${digest}" >&2
-            exit 1
-          fi
-          layer="${IMAGE_PREFIX}/oh-agent-server-layer@${digest}"
-          {
-            echo "layer=${layer}"
-            echo "layer_tag=${IMAGE_PREFIX}/oh-agent-server-layer:${version}-${TAG}"
-          } >> "$GITHUB_OUTPUT"
-          echo "oh-agent-server-layer: ${layer}"
+        run: echo "${GH_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
       - name: Build and push the images
         id: images
@@ -189,23 +140,7 @@ jobs:
         env:
           API_IMAGE: ${{ steps.images.outputs.api }}
           GUEST_IMAGE: ${{ steps.images.outputs.guest }}
-          LAYER_IMAGE: ${{ steps.layer.outputs.layer }}
-        run: cosign sign --yes "$API_IMAGE" "$GUEST_IMAGE" "$LAYER_IMAGE"
-
-      # A single source makes imagetools copy the index as is: the tag points at
-      # the signed digest. The step checks that, and fails if it does not.
-      - name: Tag the OpenHands layer
-        env:
-          LAYER_IMAGE: ${{ steps.layer.outputs.layer }}
-          LAYER_TAG: ${{ steps.layer.outputs.layer_tag }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create --tag "$LAYER_TAG" "$LAYER_IMAGE"
-          tagged=$(docker buildx imagetools inspect "$LAYER_TAG" --format '{{.Manifest.Digest}}')
-          if [[ "${tagged}" != "${LAYER_IMAGE##*@}" ]]; then
-            echo "${LAYER_TAG} points at ${tagged}, not the signed ${LAYER_IMAGE##*@}" >&2
-            exit 1
-          fi
+        run: cosign sign --yes "$API_IMAGE" "$GUEST_IMAGE"
 
       - name: Build the CLI with the image digests as defaults
         shell: nix develop -c bash -eo pipefail {0}
@@ -213,7 +148,6 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           API_IMAGE: ${{ steps.images.outputs.api }}
           GUEST_IMAGE: ${{ steps.images.outputs.guest }}
-          LAYER_IMAGE: ${{ steps.layer.outputs.layer }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -227,7 +161,6 @@ jobs:
           {
             echo "ate-env-api=${API_IMAGE}"
             echo "ate-env-guest=${GUEST_IMAGE}"
-            echo "oh-agent-server-layer=${LAYER_IMAGE}"
           } > "dist/images_${TAG}.txt"
           (cd dist && sha256sum ate-env_* images_* > "SHA256SUMS_${TAG}.txt")
           ls -l dist
@@ -247,8 +180,6 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           API_IMAGE: ${{ steps.images.outputs.api }}
           GUEST_IMAGE: ${{ steps.images.outputs.guest }}
-          LAYER_IMAGE: ${{ steps.layer.outputs.layer }}
-          LAYER_TAG: ${{ steps.layer.outputs.layer_tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -271,10 +202,8 @@ jobs:
             echo
             echo "- \`${API_IMAGE}\`"
             echo "- \`${GUEST_IMAGE}\`"
-            echo "- \`${LAYER_IMAGE}\`"
             echo
-            echo "The \`ate-env\` binaries attached to this release default \`manifest --api-image\` and \`manifest template --guest-image\` to the first two digests."
-            echo "The third is the OpenHands runtime layer, for \`ate-env manifest template --layer oh=${LAYER_IMAGE}=/opt/oh\` (see \`integrations/openhands/README.md\`)."
+            echo "The \`ate-env\` binaries attached to this release default \`manifest --api-image\` and \`manifest template --guest-image\` to these digests."
             if [[ -n "${sub_ver}" ]]; then
               echo "Built against \`go.ate.dev/substrate ${sub_ver}\`; deploy \`ate-system\` and \`--worker-image\` (\`ateworker-gvisor\`) from the matching Substrate revision."
             fi

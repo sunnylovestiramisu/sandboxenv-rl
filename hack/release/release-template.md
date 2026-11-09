@@ -44,9 +44,6 @@ docker pull ghcr.io/ai-on-gke/sandboxenv-rl/ate-env-api:$TAG
 
 # Guest agent init/exec daemon
 docker pull ghcr.io/ai-on-gke/sandboxenv-rl/ate-env-guest:$TAG
-
-# OpenHands agent server layer (tagged <agent-server-version>-$TAG; see ## Images below for the exact tag and digest)
-docker pull ghcr.io/ai-on-gke/sandboxenv-rl/oh-agent-server-layer:$OH_AGENT_SERVER_VERSION-$TAG
 ```
 
 Verify image signatures with Cosign:

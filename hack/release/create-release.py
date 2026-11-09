@@ -131,7 +131,7 @@ def resolve_substrate_pin(sub_ver: str | None) -> tuple[str, str]:
     return sub_ver, f"[`{sub_ver}`](https://github.com/agent-substrate/substrate/releases/tag/{sub_ver})"
 
 
-def build_server_dependencies_table(repo_root: Path, tag: str, oh_ver: str | None) -> str:
+def build_server_dependencies_table(repo_root: Path, oh_ver: str | None) -> str:
     """Builds a Markdown table of server, cluster, and image dependencies for release notes."""
     go_ver, reqs = parse_go_mod(repo_root)
     _, sub_cell = resolve_substrate_pin(reqs.get("go.ate.dev/substrate"))
@@ -198,7 +198,7 @@ def build_server_dependencies_table(repo_root: Path, tag: str, oh_ver: str | Non
         rows.append((
             "**OpenHands Agent Server**",
             f"`{oh_ver}`",
-            f"Baked into `oh-agent-server-layer:{oh_ver}-{tag}`",
+            "`integrations/openhands/layer` (not published; users build the layer into their own registry)",
         ))
 
     lines = [
@@ -459,7 +459,7 @@ def handle_context(args: argparse.Namespace) -> None:
     oh_ver = detect_openhands_layer_version(repo_root)
     py_ver = pep440_version(tag)
     _, pypi_status = detect_pypi_publish_status(repo, skip_pypi=args.skip_pypi)
-    server_deps_md = build_server_dependencies_table(repo_root, tag, oh_ver)
+    server_deps_md = build_server_dependencies_table(repo_root, oh_ver)
     changelog_unreleased = extract_changelog_unreleased(repo_root)
 
     # Assemble structured context output
@@ -470,7 +470,6 @@ def handle_context(args: argparse.Namespace) -> None:
         f"- **Target Tag**: `{tag}`",
         f"- **PEP 440 Python Version (`$VERSION`)**: `{py_ver}`",
         f"- **PyPI Publishing (`vars.PYPI_PUBLISH_ENABLED`)**: `{pypi_status}`",
-        f"- **OpenHands Agent Server Version (`$OH_AGENT_SERVER_VERSION`)**: `{oh_ver or 'see integrations/openhands/layer/requirements.in'}`",
         f"- **Target Commitish**: `{args.target_commitish or 'default branch (HEAD)'}`",
         f"- **Previous Tag**: `{args.previous_tag or 'auto-detected by GitHub'}`",
         "",
@@ -690,7 +689,7 @@ def handle_draft(args: argparse.Namespace) -> None:
     print(f"   Draft URL: {rel_url}")
     print("\nNext Automated CI Actions (kicked off by tag push):")
     print("  1. GitHub Actions workflow .github/workflows/release.yaml is building:")
-    print("     - Multi-arch container images: ate-env-api, ate-env-guest, oh-agent-server-layer")
+    print("     - Multi-arch container images: ate-env-api, ate-env-guest")
     print("     - Signing images with Cosign and pushing to GHCR")
     print("     - Cross-compiling ate-env CLI binaries for Linux and macOS (amd64 / arm64)")
     print("     - Generating SHA256SUMS_${TAG}.txt checksums and Cosign signatures")
