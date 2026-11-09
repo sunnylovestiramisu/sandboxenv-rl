@@ -25,7 +25,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/agent-substrate/env/internal/ate"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/trace"
@@ -42,6 +41,13 @@ var ErrNotFound = errors.New("not found")
 // ErrProcessExited is returned when an operation needs a running process
 // (signalling it, writing to its stdin) but it has already exited.
 var ErrProcessExited = errors.New("process has exited")
+
+// DefaultAtespace is the atespace ate-env-api uses for an environment when
+// a request names none, and the one Client.Env uses for an empty atespace.
+// It is the same string as the server's default (internal/ate's
+// DefaultAtespace and the Python client's DEFAULT_ATESPACE); the client
+// keeps its own copy so that importing it pulls in no Substrate package.
+const DefaultAtespace = "ate-env"
 
 // ClientOptions configures a Client.
 type ClientOptions struct {
@@ -372,7 +378,7 @@ func (c *Client) WarmImage(ctx context.Context, req *ateenvv1alpha.WarmImageRequ
 // Env returns a handle to an environment without checking that it exists.
 func (c *Client) Env(atespace, id string) *Env {
 	if atespace == "" {
-		atespace = ate.DefaultAtespace
+		atespace = DefaultAtespace
 	}
 	return &Env{
 		id:       id,

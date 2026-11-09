@@ -25,6 +25,9 @@ user needs to know across them.
   or above the rate, and when the candidate has no classification.
 - ate-env-api: `-wake-state-read-cap` (default 5 s) bounds each control-plane
   state read during a wake; 0 or less means the default.
+- Go client: `env.DefaultAtespace`. The client no longer imports `internal/ate`, and with it
+  `internal/routertls` and Substrate's API package (`go.ate.dev/substrate/api/ateapi/v1`);
+  `hack/verify/go-client-deps.sh` keeps it that way in the Go CI job.
 - `ate-env manifest template --sidecar-env NAME=VALUE`: a variable that only
   the `--sidecar` processes get. The container carries it as
   `ATE_SIDECAR_ENV_NAME`; the guest takes it out of its own environment before

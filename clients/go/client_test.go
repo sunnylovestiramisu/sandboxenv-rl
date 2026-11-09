@@ -203,6 +203,14 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// The client's DefaultAtespace is a copy of the server's (the client imports
+// no internal package outside tests); the two must stay equal.
+func TestDefaultAtespaceMatchesTheServer(t *testing.T) {
+	if env.DefaultAtespace != ate.DefaultAtespace {
+		t.Errorf("env.DefaultAtespace = %q, ate.DefaultAtespace = %q", env.DefaultAtespace, ate.DefaultAtespace)
+	}
+}
+
 func TestClientServerInfo(t *testing.T) {
 	f := newFixture(t)
 	info, err := f.client.ServerInfo(t.Context())

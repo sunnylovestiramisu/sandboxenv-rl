@@ -50,6 +50,10 @@ tools, and Python fleet scheduling. See [README.md](./README.md) and
   and `clients/` call generated stubs and must not import `guest/` in production (`guest/` and
   `cmd/ate-env-guest` must not import `internal/ate` or `go.ate.dev/substrate`); because
   `ate-env-guest` runs inside task images without control-plane dependencies (not enforced).
+- `clients/go` is the public Go SDK; outside tests it imports only `proto/ateenv/v1alpha` from this
+  repository, and nothing under `internal/`, `go.ate.dev/` or `k8s.io/`; because an external module
+  that imports the client must not pull the Substrate control-plane module (enforced by
+  `hack/verify/go-client-deps.sh` in the Go CI job). Its tests keep the fixture's imports.
 - `internal/apiservice` owns on-demand `ActorTemplate` derivation; `apiservice.Server` calls
   `DeriveImageTemplate` and `ImageTemplateName` and callers must not build derived templates outside
   them (base templates via `ate-env manifest template`, `buildActorTemplate` in

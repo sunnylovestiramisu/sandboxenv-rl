@@ -28,7 +28,7 @@ CLI_LDFLAGS := -X main.version=$(VERSION) -X main.defaultAPIImage=$(ATE_ENV_API_
 PRETTIER_VERSION := 3.8.3
 PRETTIER ?= npx --yes prettier@$(PRETTIER_VERSION)
 
-.PHONY: build build-cli install test vet clean images python-protos python-test nemo-gym-test verify-boilerplate verify-gofmt verify-protos verify-docs format-docs \
+.PHONY: build build-cli install test vet clean images python-protos python-test nemo-gym-test verify-boilerplate verify-go-client-deps verify-gofmt verify-protos verify-docs format-docs \
 	help ci ci-go ci-python coverage ci-openhands ci-harbor ci-dafny ci-e2e smoke check-substrate-head check-pins update-pins protos lint-actions-locally dev-shell
 
 help: ## Show this help message
@@ -103,6 +103,10 @@ vet:
 
 verify-boilerplate:
 	hack/verify/boilerplate.sh
+
+# Fail when the Go client depends on internal/, go.ate.dev/ or k8s.io/ packages.
+verify-go-client-deps:
+	hack/verify/go-client-deps.sh
 
 # Fail when any tracked Go file is not gofmt-formatted; prints the offenders.
 verify-gofmt:

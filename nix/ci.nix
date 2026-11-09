@@ -195,6 +195,7 @@ let
       echo "--> Format & boilerplate..."
       make verify-gofmt
       make verify-boilerplate
+      make verify-go-client-deps
       make PRETTIER=prettier verify-docs
       echo "--> Protobuf stub verification..."
       make verify-protos

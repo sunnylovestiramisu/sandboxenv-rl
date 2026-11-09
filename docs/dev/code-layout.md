@@ -68,6 +68,14 @@ client logic used by the API server to manage actors and templates (`cmd/ate-env
 `clients/go`, `apiservice`, `hostcheck`, and `routertls`). External clients talk to `ate-env-api`,
 never to Substrate directly.
 
+Outside its tests, `clients/go` imports only `proto/ateenv/v1alpha` from this repository: nothing
+under `internal/`, `go.ate.dev/` or `k8s.io/`, so an external module that imports it does not pull
+the control plane's dependencies. A value it shares with the server (such as `DefaultAtespace`) is a
+copy, checked equal by a test. `hack/verify/go-client-deps.sh` enforces this in the Go CI job.
+
+A feature that one Go consumer needs (the SWE-bench loader, for example) goes into `clients/go` when
+a second consumer could use it, not into the consumer; the loader is not the place for client logic.
+
 ### `internal/` vs. `guest/`
 
 Put code in `internal/` if only this repository's binaries use it, and in-actor services in `guest/`
