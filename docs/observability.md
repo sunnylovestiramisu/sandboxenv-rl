@@ -168,7 +168,7 @@ fleet.report.write(os.environ["REPORT_DIR"])   # <strategy>_<n>tasks_<YYYYMMDD-H
   environment:
     substrate: atespace=ate-env  endpoint=localhost:7777  strategy=sliding  concurrency=8  tasks=200  images=12
   ----------------------------------------
-  ensure_template        0.01s  (n=12, max=0.00s)
+  ensure_template        0.01s  (n=12, max=0.01s)
   acquire               41.20s  (n=200, max=1.90s)
   process               95.33s  (n=200, max=2.41s)
   release                6.02s  (n=200, max=0.12s)

@@ -22,12 +22,15 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import re
 import subprocess
 import sys
 import textwrap
 import urllib.request
 
 import pytest
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 from ate_env_rl import AsyncSandboxFleet, FleetConfig, SandboxFleet, Task, observability
 from ate_env_rl.config import ObservabilityConfig, ValidationError
@@ -186,6 +189,106 @@ def test_report_clamps_negative_phase_duration():
     assert rep.to_dict()["phases"]["acquire"] == {"count": 2, "total_s": 2.0, "max_s": 2.0}
     rep.add_phase("plan", -1.0)
     assert rep.phases["plan"] == [1, 0.0, 0.0]
+
+
+def test_report_phase_bounds_hold_in_to_dict_for_short_phases():
+    """AC-7: the rounded phase stats keep 0 <= max_s <= total_s <= count * max_s.
+
+    Rounded separately, 3 phases of 0.004 s gave total_s 0.01 and max_s 0.0.
+    """
+    rep = RunReport("naive")
+    for _ in range(3):
+        rep.add_phase("acquire", 0.004)
+    rep.add_phase("plan", 0.004)
+    phases = rep.to_dict()["phases"]
+    for p in phases.values():
+        assert 0 <= p["max_s"] <= p["total_s"] <= p["count"] * p["max_s"], p
+    assert phases["acquire"] == {"count": 3, "total_s": 0.01, "max_s": 0.01}
+    assert phases["plan"] == {"count": 1, "total_s": 0.01, "max_s": 0.01}
+
+
+def _summary_rows(text: str) -> dict[str, tuple[str, int, str]]:
+    """Phase rows of summary(): name -> (total, n, max) as printed."""
+    rows = {}
+    for m in re.finditer(r"^  (\S+)\s+(\S+)s  \(n=(\d+), max=(\S+)s\)$", text, re.M):
+        rows[m[1]] = (m[2], int(m[3]), m[4])
+    return rows
+
+
+def test_report_summary_rows_match_to_dict(tmp_path):
+    """The .txt and .json from one write() show the same phase values.
+
+    summary() formatted the raw stats, so 3 phases of 0.004 s printed
+    max=0.00s next to "max_s": 0.01 in the JSON.
+    """
+    rep = RunReport("naive")
+    for _ in range(3):
+        rep.add_phase("acquire", 0.004)
+    base = rep.write(tmp_path)
+    txt = base.with_name(base.name + ".txt").read_text()
+    js = json.loads(base.with_name(base.name + ".json").read_text())
+    assert js["phases"]["acquire"] == {"count": 3, "total_s": 0.01, "max_s": 0.01}
+    assert _summary_rows(txt) == {"acquire": ("0.01", 3, "0.01")}
+
+
+def test_report_infinite_phase_duration_writes(tmp_path):
+    """An infinite duration does not make to_dict() or write() raise (math.ceil(inf))."""
+    rep = RunReport("naive")
+    rep.add_phase("acquire", float("inf"))
+    rep.add_phase("plan", 0.004)
+    phases = rep.to_dict()["phases"]
+    assert phases["acquire"] == {"count": 1, "total_s": float("inf"), "max_s": float("inf")}
+    base = rep.write(tmp_path)
+    js = json.loads(base.with_name(base.name + ".json").read_text())
+    assert js["phases"]["acquire"]["max_s"] == float("inf")
+    assert js["phases"]["plan"] == {"count": 1, "total_s": 0.01, "max_s": 0.01}
+    assert _summary_rows(base.with_name(base.name + ".txt").read_text())["acquire"] == (
+        "inf", 1, "inf"
+    )
+
+
+# Durations around the 0.01 s rounding step (where rounding total_s and max_s
+# apart breaks the bound), negative ones (clamped) and the wide range of P-8.
+# Runs of one duration on the 0.01 s grid reach total_s == count * max_s,
+# where the float product can land just under the rounded total (3 * 0.29).
+_durations = st.one_of(
+    st.floats(0, 0.03),
+    st.sampled_from([0.004, 0.005, 0.0049999, 0.0050001]),
+    st.integers(0, 100).map(lambda k: k / 100),
+    st.floats(-1e3, 1e4, allow_nan=False),
+)
+_phase_runs = st.tuples(
+    st.sampled_from(["acquire", "process", "release", "reap", "teardown", "custom"]),
+    _durations,
+    st.integers(1, 5),
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.lists(_phase_runs, max_size=20))
+@example([("acquire", 0.004, 3)])  # #273: total_s 0.01, max_s 0.0
+@example([("acquire", 0.29, 3)])  # 3 * 0.29 == 0.8699999999999999 < round(total_s) 0.87
+def test_phase_stats_consistent(runs):
+    """P-8: every phase keeps 0 <= max_s <= total_s <= count * max_s, raw and in to_dict()."""
+    ops = [(name, dur) for name, dur, n in runs for _ in range(n)]
+    rep = RunReport("naive")
+    for name, dur in ops:
+        rep.add_phase(name, dur)
+    phases = rep.to_dict()["phases"]
+    assert set(phases) == {name for name, _ in ops}
+    for name, (count, total, mx) in rep.phases.items():
+        assert count == sum(1 for n, _ in ops if n == name)
+        assert 0 <= mx <= total <= count * mx * (1 + 1e-12)
+        p = phases[name]
+        assert p["count"] == count
+        assert 0 <= p["max_s"] <= p["total_s"] <= p["count"] * p["max_s"], p
+        # Rounding moves each value by less than 0.01 s.
+        assert abs(p["max_s"] - mx) < 0.01 and abs(p["total_s"] - total) < 0.01 + 1e-9, (p, total, mx)
+    # summary() prints the to_dict() values, so the .txt and .json agree.
+    rows = _summary_rows(rep.summary())
+    assert rows == {
+        name: (f"{p['total_s']:.2f}", p["count"], f"{p['max_s']:.2f}") for name, p in phases.items()
+    }
 
 
 def test_report_task_done_clamps_negative_duration():

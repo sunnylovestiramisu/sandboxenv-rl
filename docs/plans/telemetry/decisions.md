@@ -321,3 +321,10 @@ Append-only. Each entry: date, who, what, why.
   the driver: it relies on Substrate registering the actor name before a delete can miss it, or
   cleaning up such an actor itself. The AC-15.8 path (a cancelled `warm_pool` call) makes the same
   assumption.
+- 2026-11-08, recorded from #279: AC-7. The bound `0 <= max_s <= total_s <= count * max_s` now holds
+  for the rounded `to_dict()` values, not only for `phases`: `to_dict()` rounded `total_s` and
+  `max_s` to 0.01 separately, so 3 phases of 0.004 s reported `total_s` 0.01 and `max_s` 0.0 (#273).
+  `max_s` rounds up to the next 0.01 and `total_s` is kept in `[max_s, count * max_s]`, which can
+  leave it one float step off the 0.01 grid; `summary()` prints the same values, so the `.txt` and
+  `.json` of one `write()` agree. P-8 is no longer proposed: `test_phase_stats_consistent` checks
+  it, and the AC-7 command runs it.

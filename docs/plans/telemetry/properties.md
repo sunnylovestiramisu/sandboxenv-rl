@@ -2,13 +2,15 @@
 
 Status: checked against `main` at `c0c41ac` (2026-11-03), which includes #221's fix for AC-15. Most
 property tests here are proposed and not in the repository: `pgregory.net/rapid` is not in `go.mod`,
-and the Hypothesis tests named "Proposed test" do not exist. Two parts exist:
+and the Hypothesis tests named "Proposed test" do not exist. Three parts exist:
 
 - `clients/python/tests/test_warm_pool_accounting.py` (#221): the P-9 to P-11 stateful test
   `test_warm_pool_accounting` and 40 plain interleaving tests. `hypothesis` is in the `dev` extra
   since #221.
 - [verify/](./verify/README.md): hand-written Dafny models of P-1 to P-11 and of the two bugs review
   found in #221's first version. CI checks their results (AC-20).
+- `clients/python/tests/test_observability.py` (#279): the P-8 Hypothesis test
+  `test_phase_stats_consistent`.
 
 The tests named as "example coverage on `main`" exist and run in CI.
 
@@ -195,12 +197,17 @@ execs started concurrently from several threads, exactly one `ate_env_client.exe
 ### P-8: Phase statistics stay consistent
 
 _For any_ sequence of `add_phase(name, d)` calls, with any names and any finite durations including
-negative ones, every phase keeps `0 <= max_s <= total_s <= count * max_s`.
+negative ones, every phase keeps `0 <= max_s <= total_s <= count * max_s`, in `phases` and in the
+rounded `to_dict()` values.
 
 **Validates: AC-7.3**
 
-- Generators: `st.lists(st.tuples(phase_name(), st.floats(-1e3, 1e4, allow_nan=False)))`.
-- Proposed test: Hypothesis `test_phase_stats_consistent`.
+- Generators: `st.lists(st.tuples(phase_name(), duration, st.integers(1, 5)))`, each duration
+  repeated that many times; `duration` mixes `st.floats(0, 0.03)`, values next to the 0.01 s
+  rounding step, multiples of 0.01 up to 1 s and `st.floats(-1e3, 1e4, allow_nan=False)`.
+- Test: Hypothesis `test_phase_stats_consistent` (#279). A generator of only `st.floats(-1e3, 1e4)`
+  seldom reaches the rounding step; repeats of a multiple of 0.01 reach `total_s == count * max_s`,
+  where the float product can land under the rounded total (3 \* 0.29).
 - Example coverage on `main`: `test_report_clamps_negative_phase_duration`.
 
 ### P-16: The report matches its operations
@@ -584,6 +591,13 @@ P-2).
 document stated. Reproduced: `add_phase("acquire", 2.0); add_phase("acquire", -5.0)` gave
 `count=2, total_s=-3.0, max_s=2.0`. Latent, because every caller uses `time.monotonic()`. Amendment:
 `add_phase` and `task_done` clamp negative values to 0 (AC-7). `main` has the clamp.
+
+**P-8, rounding in `to_dict()`.** The property held for `phases` but not for the values a report
+prints: `to_dict()` rounded `total_s` and `max_s` to 0.01 separately. Reproduced on `main` at
+`beedf88` (#273): 3 phases of 0.004 s gave `{"count": 3, "total_s": 0.01, "max_s": 0.0}`, so
+`total_s <= count * max_s` failed. The example tests all used durations of 0.5 s or more, which
+round exactly. Amendment: `max_s` rounds up to 0.01 and `total_s` is kept in
+`[max_s, count * max_s]` (AC-7).
 
 **P-1, the bound.** The property first said `MAX_FAMILIES + 1`. A Hypothesis run found 65 distinct
 repos plus one unparseable input give 66 values (64 families, `other`, `unknown`). The spec was

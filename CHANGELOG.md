@@ -220,6 +220,13 @@ user needs to know across them.
   escaped slash next to them was decoded: `/a{b%2Fc` reached the daemon as
   `/a%7Bb/c`. The path form now matches its routing prefix on the path as sent,
   so an escaped slash in the prefix no longer routes to an environment.
+- Python client: `RunReport.to_dict()` keeps every phase's
+  `0 <= max_s <= total_s <= count * max_s`. It rounded `total_s` and `max_s`
+  to 0.01 separately, so 3 phases of 0.004 s reported `total_s` 0.01 and
+  `max_s` 0.0. `max_s` now rounds up to the next 0.01 and `total_s` stays
+  between `max_s` and `count * max_s`, which can leave it one float step off
+  the 0.01 grid (5 x 0.09 s gives 0.44999999999999996). `summary()` prints
+  the same rounded values (#273).
 - swebench-loader `-park-each`: the last step deletes each environment right
   after its replay instead of suspending it (unless `-keep`). A 37,000
   environment run suspended them all, one more snapshot upload each. The
