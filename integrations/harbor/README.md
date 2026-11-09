@@ -31,7 +31,7 @@ Each setting is a constructor kwarg and an `--ek key=value` flag (repeatable).
 | `template_prefix` | `harbor-` | Resource class templates are named `<prefix>c<cpus>-m<memory_mb>` |
 | `registry` | `$SUBSTRATE_ENV_HARBOR_REGISTRY` | Where images built from `environment/Dockerfile` are pushed |
 | `build` | `local` | `local` (docker buildx), `cloud-build` (gcloud builds submit) or `none` (prebuilt `docker_image` only) |
-| `platform` | `linux/amd64` | Build platform; the worker nodes' architecture |
+| `platform` | `linux/amd64` | Build platform, `build=local` only; the worker nodes' architecture |
 | `create_timeout_sec` | `600` | Create plus the first guest answer |
 | `exec_timeout_sec` | `86400` | Bound on a command Harbor runs without a timeout, such as the verifier's test command; the guest's own default would be one hour |
 | `workdir` | none | Working directory when neither the task nor the Dockerfile sets one |
@@ -57,7 +57,8 @@ snapshots taken from it.
   and skipped when that tag already exists; `--force-build` rebuilds. Builds
   are deduplicated per tag inside the process. `build=local` needs docker with
   buildx and a login to the registry; `build=cloud-build` needs `gcloud` and
-  a project. Only `platform` is built.
+  a project. `build=local` builds only `platform`; `build=cloud-build` uses
+  Cloud Build's default platform.
 - To run a whole dataset without building at trial time, prebuild it once:
   `harbor admin upload-images -t <tasks-dir> -r <repo> --tag <tag> --push
   --update-config` writes `docker_image` tags into the task files; the
@@ -90,9 +91,11 @@ applied) select the base:
   same command shape.
 - Under the default `auto` policy a missing class template falls back to
   `template` with a warning that names the registration command. Under
-  `--cpus limit` or `--memory limit` the trial fails instead. `ignore` uses
-  `template` without looking at the task's resources. `storage_mb` has no
-  counterpart and is ignored; GPU and TPU tasks are rejected before start.
+  `--cpus limit` or `--memory limit` the trial fails instead. `ignore` drops
+  that dimension from the class name (`--cpus ignore` alone selects
+  `harbor-m<memory_mb>`); `template` applies when both are ignored or the task
+  sets neither. `storage_mb` has no counterpart and is ignored; GPU and TPU
+  tasks are rejected before start.
 
 ## What a trial looks like
 
@@ -110,7 +113,8 @@ applied) select the base:
    image's own user runs as is (root on a root image, the common case and what
    the verifier asks for); another user runs through `sudo -n`, or `su` when the
    image runs as root, with the command's environment inlined because sudo
-   resets it; otherwise the call fails and says so.
+   resets it; otherwise the call fails and says so. When the image has no
+   `id`, the user is unknown and every command runs as is.
 3. Files: `upload_file` keeps the mode and creates the parent directory;
    `upload_dir` and `download_dir` stage a tar archive under `scratch_dir`,
    which keeps modes, symlinks and empty directories.
@@ -164,5 +168,7 @@ The suite runs against an in-process fake `ate-env-api` (`tests/fakes.py`).
 Unit tests run commands on this machine under temporary paths. `tests/test_trial.py`
 drives `harbor run` itself, as a subprocess, with each environment a container
 started from the task's image through the same fake; it needs a docker daemon
-and is skipped without one. `tests/test_e2e.py` runs the same trial against a
-live `ate-env-api` when `SUBSTRATE_E2E_API_URL` is set.
+and is skipped without one, as is `tests/test_tools_layer_docker.py` (the
+tool paths inside a login shell, against a real image). `tests/test_e2e.py`
+runs the same trial against a live `ate-env-api` when `SUBSTRATE_E2E_API_URL`
+is set.

@@ -75,8 +75,9 @@ builds on your machine.
 Substrate requires CPU and memory limits on every template, so each (cpus,
 memory_mb) pair a task asks for needs a base template named for it. The script
 prints one `ate-env manifest template` command per class the dataset uses; the
-flags after `--` go on each, at least the guest image and the snapshots bucket
-from your deployment:
+flags after `--` go on each, at least the guest image from your deployment;
+add `--snapshots-bucket` only when the deployment uses per-template snapshot
+locations:
 
 ```bash
 integrations/harbor/hack/register-templates.sh ./tb2/terminal-bench -- \
@@ -93,7 +94,7 @@ examples/harbor/run-tb2.sh -p ./tb2/terminal-bench -a oracle -n 10
 ```
 
 `run-tb2.sh` is `harbor run` with the provider selected and its settings read
-from the environment (`HB_BUILD`, `HB_TEMPLATE`, `HB_ATESPACE`,
+from the environment (`HB_BUILD`, `HB_PLATFORM`, `HB_TEMPLATE`, `HB_ATESPACE`,
 `SUBSTRATE_ENV_HARBOR_REGISTRY`); every flag is passed through. The `oracle`
 agent runs each task's reference solution and needs no model: its rewards are
 the dataset's ground truth, which makes it the right first run and the right
@@ -140,7 +141,7 @@ commands and the download of `/logs/verifier`.
 
 | Measure | ate-env, plain create, `-n 10` | ate-env, plain create, `-n 50` | ate-env, warm pool | Docker |
 |---|---|---|---|---|
-| Environment setup, p50 / p95 | 2.6 s / 3.9 s | 2.2 s / 7.6 s | deferred (plan decision D-8) | not run: the measuring machine has no `docker compose` plugin |
+| Environment setup, p50 / p95 | 2.6 s / 3.9 s | 2.2 s / 7.6 s | not implemented: the provider creates per trial; a `SandboxFleet` pool lives in one process and a second `harbor run` cannot adopt it | not comparable: on 2026-11-06 Harbor's Docker provider on the measuring machine (Docker Desktop) started the containers (setup p50 2.8 s at `-n 10`) but every trial failed at the log download |
 | Verifier phase, p50 / p95 | 1.7 s / 1.7 s | 1.7 s / 1.7 s | | |
 | Trial, p50 / p95 | 6.4 s / 7.7 s | 6.5 s / 11.5 s | | |
 | Job wall time | 7.9 s | 11.9 s | | |
@@ -153,7 +154,8 @@ the actors on that cluster have no egress.
 
 | Symptom | Cause and fix |
 |---|---|
-| `InvalidArgument: image ... is not pinned by digest` | A tag reached the API: `docker` is not on PATH, so the tag could not be resolved. Install docker or pin the digest in `task.toml`. |
+| `'<image>' is a tag and ate-env needs a digest` | The provider resolves tags with `docker buildx imagetools inspect` and `docker` is not on PATH. Install docker, or pin the digest in `task.toml`. |
+| `cannot resolve '<image>' to a digest; does the image exist?` | `docker buildx imagetools inspect` found no such tag in the registry. Push the image or fix the tag in `task.toml`, or pin the digest. |
 | `FailedPrecondition: base actor template "harbor-c..." not found` | Register the class template (step 4). Under the `auto` policy this is a warning and the run goes on with `default-template`. |
 | The create succeeds, then `did not answer within 600s` | The nodes cannot pull the image from the registry, the image has no `sh`, or port 80 is taken inside it. Check the derived template's state and the worker pod logs. |
 | `apt-get` or `curl` fail inside the task | No egress from the actors (prerequisites). |
