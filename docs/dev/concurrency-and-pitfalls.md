@@ -89,11 +89,13 @@ Serialize derived template creation and recovery with `imageTemplateLocks`, and 
   Substrate leaves terminal `golden_snapshot_status.error_message` failures unretried, and deleting
   an in-use template strips rootfs volumes upon resume.
 - **Mechanism**: `ensureImageTemplate` holds a per-template read lock (`imageTemplateLocks`) through
-  `CreateActor`. `getOrCreateImageTemplate` reuses an existing template when `sameImageDigest`
-  matches across repository paths, returns `codes.FailedPrecondition` on mismatch, and treats
-  `codes.AlreadyExists` as success after the same-digest check on the winner. If a golden snapshot
-  failed `>= failedTemplateRecreateAfter` (10m) ago, `ensureImageTemplate` upgrades to a write lock
-  and calls `recreateFailedImageTemplate` (checking zero `templateUsers`) to recreate by UID.
+  `CreateActor`. The lock is held in one process only, so it does not serialize replicas (see "Known
+  limitations" in `docs/plans/ate-env-api/acceptance-criteria.md`). `getOrCreateImageTemplate`
+  reuses an existing template when `sameImageDigest` matches across repository paths, returns
+  `codes.FailedPrecondition` on mismatch, and treats `codes.AlreadyExists` as success after the
+  same-digest check on the winner. If a golden snapshot failed `>= failedTemplateRecreateAfter`
+  (10m) ago, `ensureImageTemplate` upgrades to a write lock and calls `recreateFailedImageTemplate`
+  (checking zero `templateUsers`) to recreate by UID.
 
 ## Client connection pooling and event loops
 

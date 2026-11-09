@@ -190,7 +190,9 @@ Key non-obvious points:
   from `imageTemplateLocks` in `internal/apiservice/templaterecover.go`) through actor creation. If
   a derived template's golden snapshot build failed at least `failedTemplateRecreateAfter` (10
   minutes) ago and no non-golden actor uses it (`templateUsers`), `recreateFailedImageTemplate`
-  acquires the write lock, deletes the failed template by UID, and recreates it from base.
+  acquires the write lock, deletes the failed template by UID, and recreates it from base. The lock
+  is in one process; across replicas see "Known limitations" in
+  [the ate-env-api acceptance criteria](plans/ate-env-api/acceptance-criteria.md#known-limitations).
 - The base template must exist beforehand (`codes.FailedPrecondition` if missing); any runtime
   layers declared on the base template carry over into the derived template.
 - If an existing derived template runs an image with the same digest under another repository path

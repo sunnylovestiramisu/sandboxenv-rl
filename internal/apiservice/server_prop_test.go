@@ -236,9 +236,10 @@ func TestConcurrentCreateOnCollidingDigestFailsPrecondition(t *testing.T) {
 }
 
 // AE-5 (docs/plans/ate-env-api/acceptance-criteria.md). Rule (recreateFailedImageTemplate and imageTemplateLock docs): concurrent
-// creates on a derived template whose golden snapshot failed long enough ago
-// all succeed; the template is recreated at most once (one delete, one
-// create) and only when no actor that a recreate harms uses it; afterwards
+// creates in one process (one replica; see "Known limitations" in that file)
+// on a derived template whose golden snapshot failed long enough ago all
+// succeed; the template is recreated at most once (one delete, one create)
+// and only when no actor that a recreate harms uses it; afterwards
 // exactly one derived template exists, and every actor the creates made
 // references it (RequireTemplate: no actor is created while it is absent).
 func TestPropConcurrentRecreate(t *testing.T) {
