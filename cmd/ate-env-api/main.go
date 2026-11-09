@@ -133,6 +133,7 @@ func main() {
 		authTokenFile     = flag.String("auth-token-file", "", "file with a bearer token required from gRPC, MCP and port-proxy callers; re-read when the file changes")
 		wakeBudget        = flag.Duration("wake-budget", apiservice.DefaultWakeBudget, "how long a guest gRPC call waits for a suspended environment to wake before failing; cold image pulls, cross-region snapshot reads and the template's wakeup probe exceed the router's own hold of about 10 s. A port-proxy request waits on the router instead and gets 503 with Retry-After while the wake goes on; this budget applies to it only when the router refuses the tunnel itself")
 		wakeRunningBudget = flag.Duration("wake-running-budget", apiservice.DefaultWakeRunningBudget, "how long a guest call waits when the environment is already RUNNING but the router still answers Unavailable (guest not yet listening vs. path down)")
+		wakeStateReadCap  = flag.Duration("wake-state-read-cap", apiservice.DefaultWakeStateReadCap, "how long a control-plane state read may take during a wake before being cut; slower reads leave the state unknown and the wait probes again; 0 or less means the default")
 		warmMaxProbes     = flag.Int("warm-max-probes-per-node", apiservice.DefaultWarmMaxProbesPerNode, "most WarmImage probe environments in flight per node of one worker selector, across calls: a round takes nodes x probes_per_node slots on its selector before it creates its probes and gives them back once they are deleted, so a pre-flight that fans out one WarmImage per image puts at most this many first boots (image unpacks) on a node at once; a request's probes_per_node above it is refused, and a round that waits for slots is logged")
 		wakeNoCapGrace    = flag.Duration("wake-no-capacity-grace", 0, "when positive, fail a guest call with RESOURCE_EXHAUSTED (trailer ate-env-start-failure: no-capacity) once the router has said for this long that no worker has room for the environment, instead of waiting the whole --wake-budget; 0 (the default) keeps waiting, since capacity can come back as nodes scale up or other environments stop")
 		allowedHosts      = flag.String("allowed-hosts", "", "comma-separated host names that HTTP callers may send in the Host header, next to IP addresses, localhost, names under .localhost and the names of --service-name, which are always allowed; a leading *. allows the names below it. Other names get 403, which blocks DNS rebinding against the listener, the MCP endpoint and the port proxy. gRPC requests are not checked")
@@ -246,6 +247,7 @@ func main() {
 	apisvc.WakeBudget = *wakeBudget
 	apisvc.WakeRunningBudget = *wakeRunningBudget
 	apisvc.WakeNoCapacityGrace = *wakeNoCapGrace
+	apisvc.WakeStateReadCap = *wakeStateReadCap
 	apisvc.WarmMaxProbesPerNode = *warmMaxProbes
 	apisvc.Info = apiservice.ServerInfo{
 		Version:   buildVersion(),

@@ -45,7 +45,9 @@ import (
 // unpacking other images takes more than two minutes while still making
 // progress, so the budget is five minutes: that restore, or the probe
 // timeout plus the pull. A crashed or deleted environment still fails at
-// once, not after the budget.
+// once, not after the budget. With reads slower than the cap the state stays
+// unknown and the wait ends at WakeBudget; the crash and running fail-fasts
+// do not fire then.
 const DefaultWakeBudget = 5 * time.Minute
 
 // DefaultWakeRunningBudget bounds the wait when the control plane already
@@ -60,6 +62,15 @@ const (
 	wakeRetryInitialBackoff = 200 * time.Millisecond
 	wakeRetryMaxBackoff     = 2 * time.Second
 )
+
+// DefaultWakeStateReadCap bounds one control-plane state read of a wake
+// (Server.WakeStateReadCap, which the -wake-state-read-cap flag sets,
+// overrides it). The control dial sets
+// no keepalive and no per-call timeout, so without the cap a read that hangs
+// without an error would hold the wait, with no probe, until the wake
+// budget. A read cut at the cap leaves the state unknown, and the wait
+// probes again.
+const DefaultWakeStateReadCap = 5 * time.Second
 
 // StartFailureKey is the trailing metadata key on a guest call that failed
 // because the environment cannot start, so clients can tell that failure
@@ -111,6 +122,25 @@ func setStartFailure(ctx context.Context, reason string) {
 // state is read once per attempt, and the backoff caps attempts at roughly
 // one per two seconds, so a full four-minute wait costs about 120
 // control-plane reads.
+//
+// Each state read gets at most WakeStateReadCap (DefaultWakeStateReadCap), what is left
+// of WakeBudget and, while a run of no-room answers has not yet lasted
+// WakeNoCapacityGrace, what is left of the grace, whichever ends first. So a
+// slow state read no longer holds the wait past WakeBudget, and no longer
+// delays the probe that ends a no-capacity run past the grace; the read after
+// that last probe may still take up to the cap. A read that hangs without
+// an error is cut at the cap, so the wait probes again instead of sitting
+// with no probe until WakeBudget. With reads slower than the cap the state
+// stays unknown and the wait ends at WakeBudget; the crash and running
+// fail-fasts do not fire then. A read that runs out of its time, or that
+// the control plane answers with a transient error (Unavailable,
+// DeadlineExceeded, or ResourceExhausted such as a quota), leaves the state
+// unknown, and the wait backs off and probes again within the budget. An
+// unknown state keeps a RUNNING run, so the running budget still counts from
+// that run's first attempt; otherwise the attempt counts as one outside
+// RUNNING, CRASHED and DELETING. The first such read error of a wait is
+// logged once. Any other read error, NotFound
+// for a deleted environment included, ends the wait with that error.
 //
 // Two failures end the wait early, because waiting cannot fix them, and mark
 // the call's trailers with StartFailureKey: an actor the control plane moved
@@ -169,6 +199,8 @@ func (s *Server) awaitWake(ctx context.Context, atespace, id string,
 	// the router parks a probe for its parking budget before it answers
 	// no-room, so that wait counts toward the grace.
 	var noCapacitySince time.Time
+	lastStateText := ""    // the last state the control plane reported, for errors
+	loggedReadErr := false // a transient state-read error was logged
 	backoff := wakeRetryInitialBackoff
 	for attempt := 1; ; attempt++ {
 		probeStart := time.Now()
@@ -193,11 +225,70 @@ func (s *Server) awaitWake(ctx context.Context, atespace, id string,
 				identityNote(s.RouterIdentity), err, routertls.RejectionAdvice)
 		}
 		waited = true
-		st, serr := readStatus(ctx)
+		// The read gets what is left of the wake budget and, when this
+		// answer starts or continues a run of no-room answers that has not
+		// yet lasted the grace, what is left of the grace, so a slow control
+		// plane cannot hold the wait past the budget or delay the probe that
+		// ends the run past the grace. It never gets more than the per-read
+		// cap, so a read that hangs without an error does not hold the wait
+		// with no probe.
+		// readBound names the bound that set readBy, for the log line.
+		readBy, readBound := start.Add(budget), "wake budget"
+		if grace := s.WakeNoCapacityGrace; grace > 0 && routerNoCapacity(err) {
+			runStart := noCapacitySince
+			if runStart.IsZero() {
+				runStart = probeStart
+			}
+			if graceEnd := runStart.Add(grace); graceEnd.After(probeDone) && graceEnd.Before(readBy) {
+				readBy, readBound = graceEnd, "no-capacity grace"
+			}
+		}
+		readCap := s.WakeStateReadCap
+		if readCap <= 0 {
+			readCap = DefaultWakeStateReadCap
+		}
+		readStart := time.Now()
+		if capEnd := readStart.Add(readCap); capEnd.Before(readBy) {
+			readBy, readBound = capEnd, "per-read cap"
+		}
+		readCtx, cancelRead := context.WithDeadline(ctx, readBy)
+		st, serr := readStatus(readCtx)
+		cancelRead()
 		if serr != nil {
-			return serr
+			if ctx.Err() != nil {
+				return status.FromContextError(ctx.Err()).Err()
+			}
+			// A read cut short by readBy (the budget, the grace, or the
+			// per-read cap) fails with DeadlineExceeded.
+			if !transientControlPlaneError(serr) {
+				return serr
+			}
+			if !loggedReadErr {
+				loggedReadErr = true
+				if readCtx.Err() != nil {
+					log.Printf("waking environment %s/%s: state read failed with %s at attempt %d; retrying with the state unknown (logged once per wait): cut at its read deadline of %s, set by the %s (per-read cap %s)",
+						atespace, id, status.Code(serr), attempt, readBy.Sub(readStart), readBound, readCap)
+				} else {
+					log.Printf("waking environment %s/%s: state read failed with %s at attempt %d; retrying with the state unknown (logged once per wait): %v",
+						atespace, id, status.Code(serr), attempt, serr)
+				}
+			}
+			// The state is unknown: a RUNNING run goes on, with its
+			// running budget; otherwise go on as for a state outside
+			// RUNNING, CRASHED and DELETING, so only the wake budget and the
+			// router's no-room answers bound this attempt.
+			st = nil
 		}
 		state := st.GetState()
+		stateText := shortState(state)
+		switch {
+		case st != nil:
+			lastStateText = stateText
+		case lastStateText != "":
+			stateText = "last seen " + lastStateText
+		default:
+			stateText = "UNKNOWN"
+		}
 		if state == ateapipb.ActorState_ACTOR_STATE_CRASHED {
 			s.finishCreate(atespace, id, telemetry.ReadyStatusCrashed)
 			setStartFailure(ctx, StartFailureCrashed)
@@ -210,14 +301,17 @@ func (s *Server) awaitWake(ctx context.Context, atespace, id string,
 			// It will not wake; the port proxy answers 404 for it too.
 			return status.Errorf(codes.NotFound, "environment %s/%s is being deleted", atespace, id)
 		}
-		allowed, since, which := budget, start, "wake budget"
-		if state == ateapipb.ActorState_ACTOR_STATE_RUNNING {
+		switch {
+		case state == ateapipb.ActorState_ACTOR_STATE_RUNNING:
 			if runningSince.IsZero() {
 				runningSince = time.Now()
 			}
-			allowed, since, which = runningBudget, runningSince, "running budget"
-		} else {
+		case st != nil:
 			runningSince = time.Time{}
+		}
+		allowed, since, which := budget, start, "wake budget"
+		if !runningSince.IsZero() {
+			allowed, since, which = runningBudget, runningSince, "running budget"
 		}
 		if routerNoCapacity(err) && state != ateapipb.ActorState_ACTOR_STATE_RUNNING {
 			if noCapacitySince.IsZero() {
@@ -240,10 +334,10 @@ func (s *Server) awaitWake(ctx context.Context, atespace, id string,
 		if remaining <= 0 {
 			outcome = telemetry.WakeOutcomeTimeout
 			return status.Errorf(codes.Unavailable, "environment %s/%s did not answer within the %s of %s while %s (%d attempts): %v",
-				atespace, id, which, allowed, shortState(state), attempt, err)
+				atespace, id, which, allowed, stateText, attempt, err)
 		}
 		if attempt == 1 {
-			log.Printf("waiting for environment %s/%s to wake (state %s, %s %s)", atespace, id, shortState(state), which, allowed)
+			log.Printf("waiting for environment %s/%s to wake (state %s, %s %s)", atespace, id, stateText, which, allowed)
 		}
 		select {
 		case <-ctx.Done():
@@ -252,6 +346,17 @@ func (s *Server) awaitWake(ctx context.Context, atespace, id string,
 		}
 		backoff = min(backoff*2, wakeRetryMaxBackoff)
 	}
+}
+
+// transientControlPlaneError reports whether a control-plane read failed in a
+// way that a later read can fix: the control plane was unreachable, slow, or
+// rate-limited the read.
+func transientControlPlaneError(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:
+		return true
+	}
+	return false
 }
 
 func identityNote(id string) string {

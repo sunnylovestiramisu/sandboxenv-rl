@@ -81,6 +81,10 @@ type Server struct {
 	// unpacks) on a node at once. A request's probes_per_node above it is
 	// refused. Zero means DefaultWarmMaxProbesPerNode.
 	WarmMaxProbesPerNode int
+	// WakeStateReadCap bounds one control-plane state read of a wake; see
+	// ensureAwake. Zero or less means DefaultWakeStateReadCap; the
+	// -wake-state-read-cap flag sets it.
+	WakeStateReadCap time.Duration
 	// Info is the build and configuration GetServerInfo reports.
 	Info ServerInfo
 	// RouterTLS, when set, is the client TLS configuration for the router's

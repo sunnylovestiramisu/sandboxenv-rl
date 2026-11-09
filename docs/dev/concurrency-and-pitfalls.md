@@ -63,7 +63,15 @@ Verify readiness within wake budgets, fail fast on unrecoverable errors, and evi
   `internal/ate/client.go` (`Delete`, `evictGuest`).
 - **Wake budgets**: Traffic to a suspended actor resumes it in `atenet`. `ensureAwake` polls
   `GetProcess("ate-env-wake-probe")` under `DefaultWakeBudget` (5m) and `DefaultWakeRunningBudget`
-  (20s once `RUNNING`), returning `Canceled` or `DeadlineExceeded` probe errors immediately.
+  (20s once `RUNNING`), returning `Canceled` or `DeadlineExceeded` probe errors immediately. The
+  state read after an `Unavailable` probe gets the rest of `WakeBudget`, and of
+  `WakeNoCapacityGrace` during a no-room run, but never more than `WakeStateReadCap`
+  (`-wake-state-read-cap`, default `DefaultWakeStateReadCap`, 5s): the control dial sets no
+  keepalive and no per-call timeout, so a read that hangs without an error is cut there.
+  `Unavailable`, `DeadlineExceeded` or `ResourceExhausted` from that read, or a read cut at its
+  deadline, leaves the state unknown, and the wait goes on. When all reads are cut, the wait probes
+  once per `-wake-state-read-cap` plus backoff and ends at `-wake-budget` with `Unavailable` "while
+  UNKNOWN".
 - **Fail-fast start errors**: `ensureAwake` exits early on unrecoverable states:
   `routertls.RejectedCertificate` returns `codes.FailedPrecondition` with
   `routertls.RejectionAdvice` and no trailer, `CRASHED` returns `codes.FailedPrecondition` with

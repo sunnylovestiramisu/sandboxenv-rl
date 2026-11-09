@@ -7,6 +7,8 @@ user needs to know across them.
 ## Unreleased
 
 ### Added
+- ate-env-api: `-wake-state-read-cap` (default 5 s) bounds each control-plane
+  state read during a wake; 0 or less means the default.
 - `ate-env manifest template --sidecar-env NAME=VALUE`: a variable that only
   the `--sidecar` processes get. The container carries it as
   `ATE_SIDECAR_ENV_NAME`; the guest takes it out of its own environment before
@@ -284,6 +286,16 @@ user needs to know across them.
   whose guest is not found at boot, and when its guest volume's image is not
   pinned by digest, as a base that runs the guest as its image already must
   be.
+- ate-env-api: a guest call that waits for its environment to wake keeps
+  waiting through a transient control-plane error on the state read
+  (`Unavailable`, `DeadlineExceeded`, or `ResourceExhausted` such as a quota)
+  instead of failing at once with it. A slow state read no longer holds the
+  wait past `-wake-budget`, and no longer delays the probe that ends a
+  no-capacity run past `-wake-no-capacity-grace`. A state read that hangs
+  without an error is cut at `-wake-state-read-cap`, and the wait probes again
+  instead of sitting with no probe until `-wake-budget`. When all reads are
+  cut, the wait probes once per `-wake-state-read-cap` plus backoff and ends at
+  `-wake-budget` with `Unavailable` "while UNKNOWN".
 - ate-env-api: a guest call whose caller context cancels or expires while its
   wake probe is parked at the router returns `Canceled` or `DeadlineExceeded`
   instead of treating the unwoken environment as awake and recording

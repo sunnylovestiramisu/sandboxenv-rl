@@ -1,12 +1,14 @@
 # ate-env-api: acceptance criteria
 
 Status: `AE-1` and `AE-2` met by #244, which fixed two bugs that property tests found against them.
-`AE-3`, `AE-5` (`AE-5` per replica) and `WF-1` to `WF-6` plus `WF-8` met on `main` (`#86` wake
-budgets, `#202` the five-minute default, and `#222` fail-fast on crash and no capacity). `WF-7` met
-by #255, which fixed a wake-probe cancellation bug found by property and state-machine tests in
+`AE-3`, `AE-5` (`AE-5` per replica), `WF-1`, `WF-2` and `WF-8` met on `main` (`#86` wake budgets,
+`#202` the five-minute default, and `#222` fail-fast on crash and no capacity). `WF-7` met by #255,
+which fixed a wake-probe cancellation bug found by property and state-machine tests in
 `internal/apiservice`. `AE-4` met by #278, which also holds a base that already mounts the guest to
-the guest-slot rule. Every criterion in this file is scoped to the Go `ate-env-api` server and names
-the tests that check it on every pull request in the Go job (`go test -race ./...`).
+the guest-slot rule. `WF-3` to `WF-6` met by #275, which keeps a wake going through a transient
+control-plane error on the state read and bounds that read by the wake budget and the no-capacity
+grace. Every criterion in this file is scoped to the Go `ate-env-api` server and names the tests
+that check it on every pull request in the Go job (`go test -race ./...`).
 
 ## Derived image templates
 
@@ -84,24 +86,25 @@ generated those inputs.
 A guest call to an environment that is suspended or still starting waits in `ensureAwake`
 ([internal/apiservice/wakeretry.go](../../../internal/apiservice/wakeretry.go)). The loop
 (`awaitWake`) probes `ProcessService.GetProcess` through the `atenet` router, reads the actor's
-status from the control plane when the probe answers `Unavailable`, and backs off. Three flags bound
+status from the control plane when the probe answers `Unavailable`, and backs off. Four flags bound
 the wait: `-wake-budget` (`DefaultWakeBudget`, 5 minutes), `-wake-running-budget`
-(`DefaultWakeRunningBudget`, 20 seconds from the first attempt in the current `RUNNING` run), and
-`-wake-no-capacity-grace` (disabled at `0`). Terminal start failures attach `StartFailureKey`
+(`DefaultWakeRunningBudget`, 20 seconds from the first attempt in the current `RUNNING` run),
+`-wake-no-capacity-grace` (disabled at `0`), and `-wake-state-read-cap` (`DefaultWakeStateReadCap`,
+5 seconds), which caps each state read. Terminal start failures attach `StartFailureKey`
 (`ate-env-start-failure`) in unary and streaming gRPC response trailers.
 
 ### Criteria
 
-| ID   | Criterion                                                                                                                                                                                                                            | Status        | Tests                                                                                                                                                                       |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WF-1 | A probe the guest answers (any status code except `Unavailable`, `Canceled`, or `DeadlineExceeded`) ends the wait at once with no error and records `ate_env_api_create_to_ready_seconds{status="ok"}` when tracked.                 | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`                                                                                                            |
-| WF-2 | An unreachable guest whose actor is `CRASHED` ends the wait at once with `FailedPrecondition` and the control plane's crash reason when set. `DELETING` ends the wait at once with `NotFound`. No later probe runs.                  | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`                                                                                                            |
-| WF-3 | `ResourceExhausted` occurs only with a positive `WakeNoCapacityGrace`, after a contiguous run of router no-capacity answers (while the actor is outside `RUNNING`, `CRASHED`, and `DELETING`) that lasted at least the grace period. | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`                                                                                                            |
-| WF-4 | Once a no-capacity run reaches `WakeNoCapacityGrace` at a probe's answer, that probe is the last one, and the probe that ends the run starts within `WakeNoCapacityGrace` plus 1 ms.                                                 | met on `main` | `TestAwaitWakeProperties`                                                                                                                                                   |
-| WF-5 | A timeout (`Unavailable`) occurs only once `WakeBudget` expires overall or `WakeRunningBudget` expires from the start of the current contiguous `RUNNING` run.                                                                       | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`, `TestEnsureAwakeExactBudgetsInSynctest`                                                                   |
-| WF-6 | The wait never runs past `WakeBudget` by more than one probe latency.                                                                                                                                                                | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeExactBudgetsInSynctest`                                                                                                          |
-| WF-7 | Caller cancellation or deadline expiry during a parked probe or backoff ends the wait at once with `Canceled` or `DeadlineExceeded` and never records `ate_env_api_create_to_ready_seconds{status="ok"}` or `wake_wait` as `woke`.   | met by #255   | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`, `TestEnsureAwakeExactBudgetsInSynctest`, `TestAwaitWakePropagatesProbeCancelAndDeadlineWithLiveCallerCtx` |
-| WF-8 | Unary and streaming guest calls attach `StartFailureKey` (`ate-env-start-failure`) set to `StartFailureCrashed` on `WF-2` crash and `StartFailureNoCapacity` on `WF-3` no-capacity exhaustion, and omit it on `WF-5` wake timeouts.  | met on `main` | `TestCrashedWhileWakingCarriesTheCrashReason`, `TestCrashedWhileWakingMarksStreamingTrailers`, `TestNoCapacityFailsAfterTheGrace`, `TestNoCapacityWaitsWithoutAGrace`       |
+| ID   | Criterion                                                                                                                                                                                                                                                                                                                     | Status        | Tests                                                                                                                                                                                                                                                                                             |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WF-1 | A probe the guest answers (any status code except `Unavailable`, `Canceled`, or `DeadlineExceeded`) ends the wait at once with no error and records `ate_env_api_create_to_ready_seconds{status="ok"}` when tracked.                                                                                                          | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`                                                                                                                                                                                                                                  |
+| WF-2 | An unreachable guest whose actor is `CRASHED` ends the wait at once with `FailedPrecondition` and the control plane's crash reason when set. `DELETING` ends the wait at once with `NotFound`. No later probe runs.                                                                                                           | met on `main` | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`                                                                                                                                                                                                                                  |
+| WF-3 | `ResourceExhausted` occurs only with a positive `WakeNoCapacityGrace`, after a contiguous run of router no-capacity answers (while the control plane does not report the actor `RUNNING`, `CRASHED`, or `DELETING`) that lasted at least the grace period.                                                                    | met by #275   | `TestAwaitWakeProperties`, `TestAwaitWakeRetriesTransientStateReadErrors`, `TestEnsureAwakeSynctestStateMachine`                                                                                                                                                                                  |
+| WF-4 | Once a no-capacity run reaches `WakeNoCapacityGrace` at a probe's answer, that probe is the last one, and the probe that ends the run starts within `WakeNoCapacityGrace` plus 1 ms.                                                                                                                                          | met by #275   | `TestAwaitWakeProperties`, `TestAwaitWakeStateReadBoundedByNoCapacityGrace`                                                                                                                                                                                                                       |
+| WF-5 | A timeout (`Unavailable`) occurs only once `WakeBudget` expires overall or `WakeRunningBudget` expires from the start of the current contiguous `RUNNING` run. A state read that leaves the state unknown keeps that run. A state read that hangs without an error is cut at the 5 s per-read cap, and the wait probes again. | met by #275   | `TestAwaitWakeProperties`, `TestAwaitWakeRetriesTransientStateReadErrors`, `TestAwaitWakeTransientReadKeepsRunningBudget`, `TestAwaitWakeStateReadCappedPerRead`, `TestEnsureAwakeRetriesTransientGetActorErrors`, `TestEnsureAwakeSynctestStateMachine`, `TestEnsureAwakeExactBudgetsInSynctest` |
+| WF-6 | The wait never runs past `WakeBudget` by more than one probe latency.                                                                                                                                                                                                                                                         | met by #275   | `TestAwaitWakeProperties`, `TestAwaitWakeStateReadBoundedByWakeBudget`, `TestEnsureAwakeExactBudgetsInSynctest`                                                                                                                                                                                   |
+| WF-7 | Caller cancellation or deadline expiry during a parked probe or backoff ends the wait at once with `Canceled` or `DeadlineExceeded` and never records `ate_env_api_create_to_ready_seconds{status="ok"}` or `wake_wait` as `woke`.                                                                                            | met by #255   | `TestAwaitWakeProperties`, `TestEnsureAwakeSynctestStateMachine`, `TestEnsureAwakeExactBudgetsInSynctest`, `TestAwaitWakePropagatesProbeCancelAndDeadlineWithLiveCallerCtx`                                                                                                                       |
+| WF-8 | Unary and streaming guest calls attach `StartFailureKey` (`ate-env-start-failure`) set to `StartFailureCrashed` on `WF-2` crash and `StartFailureNoCapacity` on `WF-3` no-capacity exhaustion, and omit it on `WF-5` wake timeouts.                                                                                           | met on `main` | `TestCrashedWhileWakingCarriesTheCrashReason`, `TestCrashedWhileWakingMarksStreamingTrailers`, `TestNoCapacityFailsAfterTheGrace`, `TestNoCapacityWaitsWithoutAGrace`                                                                                                                             |
 
 ### What the property and `synctest` tests found
 
@@ -113,13 +116,29 @@ the wait: `-wake-budget` (`DefaultWakeBudget`, 5 minutes), `-wake-running-budget
   `status="ok"` and `ate_env_api_wake_wait_seconds` with `outcome="woke"`. Caught by pairing
   `pgregory.net/rapid` with `testing/synctest` (`internal/internaltest/synctestrapid`) across parked
   probes and caller cancellations.
+- **WF-3 to WF-6.** After an `Unavailable` probe, `awaitWake` read the actor's state with the
+  caller's `ctx` and returned any error from that read. A control-plane blip (`Unavailable`,
+  `DeadlineExceeded`) ended the wake at once, before any budget, with an error the caller could not
+  tell from a timeout; a control-plane `ResourceExhausted` (a quota) ended it as if the no-capacity
+  grace had run out. The read had no deadline of its own, so its latency could push the wait past
+  `WakeBudget` and the probe that ends a no-capacity run past the grace. An audit (#273) found all
+  three; `TestAwaitWakeProperties` missed them because its `readStatus` fake always answered at once
+  with a state. It now draws a latency for each read and, sometimes, a control-plane `Unavailable`,
+  `DeadlineExceeded`, `ResourceExhausted`, `NotFound` or `Internal` instead of the state. Review of
+  #275 found that a read that hangs without an error still held the wait, with no probe, until
+  `WakeBudget`; each read is now capped at 5 seconds, and the property draws the cap.
 
 ### How the wake tests check them
 
 - `TestAwaitWakeProperties` (`internal/apiservice/wakeretry_property_test.go`) runs 2,000 generated
   timelines inside `synctestrapid.Check`, drawing budgets, optional `WakeNoCapacityGrace`, probe
-  latencies, router answers, actor states, and caller cancellation or deadline instants on
-  `testing/synctest`'s fake clock.
+  latencies, router answers, actor states, state-read latencies and control-plane errors, a per-read
+  cap of 50 ms to 4 s against read latencies of up to 3 s, and caller cancellation or deadline
+  instants on `testing/synctest`'s fake clock. It checks that every state read ends by its exact
+  deadline (the earliest of the wake budget, the grace end, and the cap).
+- `TestEnsureAwakeRetriesTransientGetActorErrors` (`internal/apiservice/wakeretry_synctest_test.go`)
+  fails two `GetActor` calls with `fakecontrol.FailGets` and checks that the code survives
+  `ate.Client.Get` and `toGRPCError`, and that the wake probes again and succeeds.
 - `TestEnsureAwakeSynctestStateMachine` (`internal/apiservice/wakeretry_synctest_test.go`) drives
   concurrent `ensureAwake` callers through `ate.NewControlClient(ctrl.Client())` and an in-bubble
   gRPC connection inside `synctestrapid.Repeat`, checking `WF-5` budget bounds, `WF-7` caller

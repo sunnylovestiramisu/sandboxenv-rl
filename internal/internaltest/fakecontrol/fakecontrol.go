@@ -18,7 +18,7 @@
 // status, and, like Substrate v0.6.0, an actor in any state can be deleted
 // (a CRASHED one too, unless KeepCrashed mirrors today's refusal). Tests
 // inject the failures of a control plane under load with FailCreates,
-// FailResumes and FailDeletes.
+// FailResumes, FailDeletes and, on state reads, FailGets.
 package fakecontrol
 
 import (
@@ -116,6 +116,9 @@ type Server struct {
 	// creates and deletes count the CreateActor and DeleteActor calls,
 	// failed ones too; maxActors is the most actors that existed at once.
 	creates, deletes, maxActors int
+	// failGets makes the next GetActor calls fail, as a control plane under
+	// load does; see FailGets.
+	failGets injectedFailure
 }
 
 // injectedFailure fails the next n calls of one RPC with code and msg.
@@ -220,6 +223,15 @@ func (s *Server) MaxActors() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.maxActors
+}
+
+// FailGets makes the next n GetActor calls fail with code, leaving the actor
+// as it was, as a state read that the control plane drops, times out or
+// rate-limits does.
+func (s *Server) FailGets(n int, code codes.Code) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failGets = injectedFailure{n: n, code: code, msg: "injected get failure"}
 }
 
 // New returns an empty fake control server.
@@ -706,6 +718,9 @@ func clone(a *ateapipb.Actor) *ateapipb.Actor {
 func (s *Server) GetActor(ctx context.Context, req *ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.failGets.take(); err != nil {
+		return nil, err
+	}
 	a, err := s.get(req.GetActor())
 	if err != nil {
 		return nil, err

@@ -527,6 +527,70 @@ func (sm *ensureAwakeSM) Check(rt *rapid.T) {
 	}
 }
 
+// A transient GetActor error during a wake goes through the real chain
+// (fakecontrol.GetActor, ate.Client.Get, toGRPCError) with its code kept, so
+// ensureAwake leaves the state unknown, probes again, and wakes once the
+// guest answers. The first failed read is logged once, with its code.
+func TestEnsureAwakeRetriesTransientGetActorErrors(t *testing.T) {
+	prevOut := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted} {
+		t.Run(code.String(), func(t *testing.T) {
+			var logs strings.Builder
+			log.SetOutput(&logs)
+			defer log.SetOutput(io.Discard)
+			synctest.Test(t, func(bt *testing.T) {
+				ctrl := newSynctestControl(bt)
+				ctrl.FailGets(2, code)
+				srv := New(ate.NewControlClient(ctrl.Client()), "127.0.0.1:1", "")
+				srv.WakeBudget = time.Minute
+				srv.WakeNoCapacityGrace = 10 * time.Second
+
+				var probeMu sync.Mutex
+				probes := 0
+				probeInterceptor := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+					probeMu.Lock()
+					defer probeMu.Unlock()
+					probes++
+					if probes >= 3 {
+						return status.Error(codes.NotFound, "process not found") // the guest answers
+					}
+					return status.Error(codes.Unavailable, "guest unreachable: 503")
+				}
+				conn, err := grpc.NewClient(
+					"passthrough:///synctest-guest",
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+					grpc.WithUnaryInterceptor(probeInterceptor),
+				)
+				if err != nil {
+					bt.Fatalf("grpc.NewClient: %v", err)
+				}
+				bt.Cleanup(func() { _ = conn.Close() })
+
+				if err := srv.ensureAwake(context.Background(), conn, DefaultAtespace, synctestEnvID); err != nil {
+					bt.Fatalf("ensureAwake = %v after %d probes, want the guest's answer (nil)", err, probes)
+				}
+				if probes != 3 {
+					bt.Fatalf("probes = %d, want 3: two failed reads, then the guest's answer", probes)
+				}
+				// Both injected failures were spent on the wake's reads.
+				if st, err := srv.actorState(context.Background(), DefaultAtespace, synctestEnvID); err != nil || st != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+					bt.Fatalf("state after the wake = %s, %v; want SUSPENDED, nil", st, err)
+				}
+			})
+			out := logs.String()
+			if n := strings.Count(out, "state read failed"); n != 1 {
+				t.Fatalf("logged %d state-read failures, want 1 for 2 failed reads:\n%s", n, out)
+			}
+			if want := "failed with " + code.String() + " at attempt 1;"; !strings.Contains(out, want) {
+				t.Fatalf("log does not contain %q (the code must survive ate.Client.Get and toGRPCError):\n%s", want, out)
+			}
+		})
+	}
+}
+
 func TestEnsureAwakeSynctestStateMachine(t *testing.T) {
 	prevOut := log.Writer()
 	log.SetOutput(io.Discard)

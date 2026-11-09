@@ -416,7 +416,10 @@ kubectl get pods -n ate-env
 `--wake-budget` (default 5m; cold image pulls and cross-region snapshot reads exceed the router's own
 parking budget) and, once the control plane reports the environment RUNNING, up to
 `--wake-running-budget` (default 20s). Both are flags of the `ate-env-api` binary; `ate-env manifest`
-does not set them, thus add them to the Deployment's arguments to change them. `--wake-budget` must
+does not set them, thus add them to the Deployment's arguments to change them. Each control-plane
+state read inside that wait is cut at `--wake-state-read-cap` (default 5s; a flag of the same binary).
+When the control plane answers slower than that, the state stays unknown, the crash and no-capacity
+fail-fasts do not fire, and the call fails with `Unavailable` at `--wake-budget`; raise the cap then. `--wake-budget` must
 be longer than the image pull plus the template's wakeup-probe timeout (`ate-env manifest template
 --wakeup-timeout`), because the control plane reports RUNNING only after the probe passes. The 5m
 default covers the 120 s timeout of a `--sidecar-readyz` template plus three minutes for the pull;
