@@ -7,6 +7,22 @@ user needs to know across them.
 ## Unreleased
 
 ### Added
+- `swebench-loader report` and `bench report`: `fault_classification` in
+  `report.json` (top level and per job), in `stats.jsonl` (an
+  `infra_fault_rate` measurement on the trial row and a `fault_classification`
+  row) and in `comparison.md` (an `Infra Fault Rate` column). Each failed
+  rollout lands in one of three tiers: infrastructure before the episode
+  (`create_timeout`, `no_capacity`, `image_pull_unpack`, `transport_error`,
+  `other`), policy during it (`nonzero_exit`, `command_timeout`, `guest_oom`,
+  left out of the rate) and infrastructure during it (`wake_resume_failure`,
+  `sandbox_crash`, `snapshot_restore_failure`, `eviction_preemption`,
+  `other`), with the faults a retry recovered and one example error per
+  category; an `other` row is an error no matcher names yet.
+  `infra_fault_rate` is the infrastructure drops over all rollouts, held
+  against a `target_rate` of 2%. A report written before the field exists
+  has no classification and the renderers say so. `swebench-loader report
+  -thresholds` takes `max_infra_fault_rate`, which fails the comparison at
+  or above the rate, and when the candidate has no classification.
 - ate-env-api: `-wake-state-read-cap` (default 5 s) bounds each control-plane
   state read during a wake; 0 or less means the default.
 - `ate-env manifest template --sidecar-env NAME=VALUE`: a variable that only
@@ -216,6 +232,10 @@ user needs to know across them.
 
 ### Fixed
 
+- swebench-loader: a step the guest kills at its timeout (exit 137 at or
+  past the deadline) fails the task and stops the trajectory, as
+  `run_fleet_bench.py` does on its `TimeoutError`. Before, the Go arm marked
+  the step ok and ran on, so the two arms disagreed on `failed`.
 - `integrations/nemo-gym`: `exec(user=...)` no longer raises `ValueError`.
   NeMo Gym `main` sends `user` on many commands (the Harbor environment
   server's default user, `user="root"` from the transfer helpers), and each

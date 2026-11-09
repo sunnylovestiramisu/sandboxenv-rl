@@ -612,3 +612,89 @@ func TestPreflightCoverageValidateEnforcesStatesAndConsistency(t *testing.T) {
 		t.Errorf("normalized empty coverage: %v", err)
 	}
 }
+
+func TestFaultClassificationSchemaAndValidation(t *testing.T) {
+	raw := mustRead(t, "testdata/report.json")
+	rep, err := DecodeJSONStrict[Report](bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("DecodeJSONStrict: %v", err)
+	}
+	rep.FaultClassification = &FaultClassification{
+		AllRollouts:       100,
+		InfraDropped:      1,
+		Tier1Dropped:      1,
+		Tier2Policy:       2,
+		Tier3Dropped:      0,
+		RecoveredRetries:  3,
+		PostRolloutErrors: 1,
+		InfraFaultRate:    0.01,
+		TargetRate:        DefaultInfraFaultRateTarget,
+		MeetsTarget:       true,
+		Categories: []FaultCategorySummary{
+			{
+				Tier:       FaultTierBeforeEpisode,
+				Category:   FaultCatNoCapacity,
+				Dropped:    1,
+				Recovered:  0,
+				Events:     1,
+				ExampleErr: "no worker has room",
+			},
+			{
+				Tier:       FaultTierPolicy,
+				Category:   FaultCatNonZeroExit,
+				Dropped:    2,
+				Recovered:  0,
+				Events:     2,
+				ExampleErr: "exit 1, expected 0",
+			},
+			{
+				Tier:       FaultTierDuringEpisode,
+				Category:   FaultCatWakeResumeFailure,
+				Dropped:    0,
+				Recovered:  3,
+				Events:     0,
+				ExampleErr: "wake succeeded after 2 attempts",
+			},
+		},
+	}
+	if err := rep.Validate(); err != nil {
+		t.Fatalf("Validate valid FaultClassification: %v", err)
+	}
+	roundTripJSON(t, "report.schema.json", rep)
+
+	badSum := *rep.FaultClassification
+	badSum.InfraDropped = 5 // != Tier1Dropped + Tier3Dropped
+	if err := badSum.Validate(); err == nil {
+		t.Fatal("expected Validate error when infra_dropped != tier1_dropped + tier3_dropped")
+	}
+
+	badDrops := *rep.FaultClassification
+	badDrops.Tier2Policy = badDrops.AllRollouts // 1 + 100 + 0 > 100
+	if err := badDrops.Validate(); err == nil {
+		t.Fatal("expected Validate error when the tier drops exceed all_rollouts")
+	}
+
+	badTier := *rep.FaultClassification
+	badTier.Categories = []FaultCategorySummary{{Tier: "tier4_unknown", Category: "x"}}
+	if err := badTier.Validate(); err == nil {
+		t.Fatal("expected Validate error for invalid fault tier")
+	}
+
+	// The category list is closed: "other" is a member, a made-up name is not.
+	withOther := *rep.FaultClassification
+	withOther.Categories = append([]FaultCategorySummary(nil), rep.FaultClassification.Categories...)
+	withOther.Categories = append(withOther.Categories, FaultCategorySummary{
+		Tier: FaultTierDuringEpisode, Category: FaultCatOther, Dropped: 0, Events: 1, ExampleErr: "no space left on device",
+	})
+	if err := withOther.Validate(); err != nil {
+		t.Fatalf("Validate with an other category: %v", err)
+	}
+	rep.FaultClassification = &withOther
+	roundTripJSON(t, "report.schema.json", rep)
+
+	badCat := *rep.FaultClassification
+	badCat.Categories = []FaultCategorySummary{{Tier: FaultTierBeforeEpisode, Category: "disk_full"}}
+	if err := badCat.Validate(); err == nil {
+		t.Fatal("expected Validate error for a category outside the closed list")
+	}
+}

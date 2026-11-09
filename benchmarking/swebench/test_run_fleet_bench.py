@@ -419,6 +419,10 @@ def test_cross_language_render_plan_and_go_report_compatibility(tmp_path):
         assert summary["tasks"] == 12
         assert summary["rewarded"] == 12
         assert summary["reward_rate"] == pytest.approx(1.0)
+        assert summary["fault_classification"]["all_rollouts"] == 12
+        assert summary["fault_classification"]["infra_dropped"] == 0
+        assert summary["fault_classification"]["infra_fault_rate"] == pytest.approx(0.0)
+        assert summary["fault_classification"]["meets_target"] is True
         if strategy == "none":
             assert summary["labels"]["park"] == "delete"
             assert summary.get("paused_sandboxes", 0) == 0
@@ -449,6 +453,75 @@ def test_cross_language_render_plan_and_go_report_compatibility(tmp_path):
         assert col in comp_proc.stdout
     comp_data = json.loads(comp_json.read_text(encoding="utf-8"))
     assert len(comp_data) == 4
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go toolchain required for cross-language report check")
+def test_timed_out_step_stamps_timeout_and_classifies_command_timeout(tmp_path):
+    """A step whose exec times out gets timeout=true, fails the rollout, and the Go report counts a command_timeout."""
+    swe_manifest = _write_swe_manifest(tmp_path / "swe-2.jsonl", count=2)
+
+    class _TimeoutInspectRuntime(_GradedMockRuntime):
+        def exec(self, command, cwd="", env=None, timeout_s=120.0):
+            cmd_str = command if isinstance(command, str) else " ".join(command)
+            if "pwd" in cmd_str:
+                return ExecResult(exit_code=None, stdout="", stderr="", timed_out=True)
+            return super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+
+    class _TimeoutInspectDriver(_GradedMockDriver):
+        def build_runtime(self, instance: Any, data_plane: str = "mock") -> tuple[Any, Any | None]:
+            return _TimeoutInspectRuntime(), None
+
+    out_jsonl = tmp_path / "timeout.jsonl"
+    rc = rfb.run_benchmark(
+        [
+            "--backend=mock",
+            f"--dataset={swe_manifest}",
+            "--trajectory=swebench-smoke",
+            "--run-id=py-timeout",
+            "--mode=eval",
+            "--strategy=none",
+            "--width=2",
+            f"--out={out_jsonl}",
+        ],
+        custom_driver=_TimeoutInspectDriver(),
+    )
+    assert rc == 1
+    events = [json.loads(line) for line in out_jsonl.read_text(encoding="utf-8").splitlines()]
+    inspect_evs = [e for e in events if e["event"] == "step" and e["name"] == "inspect"]
+    assert len(inspect_evs) == 2
+    for e in inspect_evs:
+        assert e["ok"] is False
+        assert e["timeout"] is True
+        assert "timed out" in e["err"]
+        assert "exit" not in e
+    task_evs = [e for e in events if e["event"] == "task"]
+    assert len(task_evs) == 2
+    assert all(e["ok"] is False for e in task_evs)
+    assert not any(e["event"] == "step" and e["name"] == "grade" for e in events)
+
+    summary_json = tmp_path / "timeout-summary.json"
+    subprocess.run(
+        [
+            "go",
+            "run",
+            "./cmd/benchmarking/swebench-loader",
+            "report",
+            str(out_jsonl),
+            "-json",
+            str(summary_json),
+        ],
+        cwd=_REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fc = json.loads(summary_json.read_text(encoding="utf-8"))["fault_classification"]
+    assert fc["all_rollouts"] == 2
+    assert fc["tier2_policy"] == 2
+    assert fc["infra_dropped"] == 0
+    assert fc["meets_target"] is True
+    cats = {(c["tier"], c["category"]): c for c in fc["categories"]}
+    assert cats[("tier2_policy", "command_timeout")]["dropped"] == 2
 
 
 class _RealWarmPoolStubDriver(_GradedMockDriver):

@@ -1439,6 +1439,8 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
                             first_ev["step"] = step_num
                         if s_err is not None:
                             first_ev["err"] = str(s_err)
+                            if isinstance(s_err, TimeoutError):
+                                first_ev["timeout"] = True
                         if first_kind == "ttfi":
                             first_ev["metrics"] = {
                                 "sdk_slot_wait_ms": round(slot_wait_ms, 1),
@@ -1466,6 +1468,8 @@ def run_benchmark(argv: list[str] | None = None, *, custom_driver: Any | None = 
                     if s_err is not None:
                         ok = False
                         step_ev["err"] = str(s_err)
+                        if isinstance(s_err, TimeoutError):
+                            step_ev["timeout"] = True
                     elif s_spec.get("reward"):
                         if sp["kind"] == "command":
                             rew_val, detail = grade_command_output(

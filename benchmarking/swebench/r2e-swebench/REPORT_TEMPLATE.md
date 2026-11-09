@@ -29,6 +29,10 @@ version tables from `system_description.json` (`bench measure -k8s`) and the pre
 >     calendar wall, plus `<prewarm_wall_s> s` upfront prewarm).
 >   - **Max concurrency observed**: `<active_sandboxes>` concurrent in-flight sandboxes
 >     (`standing_pool=<n>`).
+>   - **Infra fault rate (Trellis `<2.0%` M2 target)**: `<infra_fault_rate>%`
+>     (`<infra_dropped>/<all_rollouts>` dropped rollouts: `tier1=<tier1_dropped>` before episode,
+>     `tier3=<tier3_dropped>` during episode -> `<PASS | FAIL>`; `tier2=<tier2_policy>` policy
+>     outcomes excluded; `<recovered_retries>` faults recovered by retry).
 >   - **`TTFI` — `cmd started`** (sandbox requested -> container restored & 1st cmd started,
 >     `p50 / p90`): `<ttfi_p50> / <ttfi_p90> ms`.
 >   - **`TTFC` — `cmd complete`** (sandbox requested -> 1st cmd complete, `p50 / p90`):
@@ -161,13 +165,21 @@ column is `p50/p95/p99` (or `p50` where noted) in **milliseconds (`ms`)**:
   command started inside the guest (join `events/*.jsonl` `ttfi`/`wake` start `ts - dur_ms` to
   `atelet_restores.jsonl` `time`, or sum `handle_claim` + demand-wake routing + `atelet` `total`
   restore).
+- **`Infra fault` (`< <target_pct>%`, from `fault_classification.target_rate`)**: Share of rollouts
+  dropped due to Tier 1 (before episode:
+  `create_timeout`, `no_capacity`, `image_pull_unpack`, `transport_error`, `other`) or Tier 3
+  (during episode: `wake_resume_failure`, `sandbox_crash`, `snapshot_restore_failure`,
+  `eviction_preemption`, `other`) infrastructure faults out of `all_rollouts` (`report.json`
+  `fault_classification.infra_fault_rate` vs `< 2.0%` Trellis M2 target). Excludes Tier 2 policy
+  failures and faults recovered by retry. An `other` row is an infrastructure error no matcher
+  named yet: quote its `example_err` in the findings.
 - **`TTFC` — `cmd complete` (`ms`)**: Sandbox requested -> 1st command complete
   (`stats[event="ttfi"]` on `none` or `stats[event="wake"]` on warm-pool strategies, including
   `step=baseline` execution inside the sandbox).
 
-| Arm     | Client     | Strategy     |       Active / Pool | Tasks (fail) |   Reward | Wall (`s`: arm [`r2e`/`swe`]) | Tasks/min | Warm hit | Prewarm `Create` (`ms`) | Prewarm `Suspend` (`ms`) | `Handle` claim (`ms`) | `TTFI` — `cmd started` (`p50/p90/p95 ms`) | `TTFC` — `cmd complete` (`ms`) | `TTFC` — `cmd complete` (`p50 ms`: `r2e` / `swe`) |     `Delete` (`ms`) |
-| :------ | :--------- | :----------- | ------------------: | -----------: | -------: | ----------------------------: | --------: | -------: | ----------------------: | -----------------------: | --------------------: | ----------------------------------------: | -----------------------------: | ------------------------------------------------: | ------------------: |
-| `<arm>` | `<client>` | `<strategy>` | `<active> / <pool>` |  `<n> (<f>)` | `<rate>` |     `<sec> (<r2e_s>/<swe_s>)` |   `<tpm>` | `<pct>%` |     `<p50>/<p95>/<p99>` |      `<p50>/<p95>/<p99>` |   `<p50>/<p95>/<p99>` |                       `<p50>/<p90>/<p95>` |            `<p50>/<p95>/<p99>` |                             `<r2e_p50>/<swe_p50>` | `<p50>/<p95>/<p99>` |
+| Arm     | Client     | Strategy     |       Active / Pool | Tasks (fail) | Infra fault (`< <target_pct>%`)    |   Reward | Wall (`s`: arm [`r2e`/`swe`]) | Tasks/min | Warm hit | Prewarm `Create` (`ms`) | Prewarm `Suspend` (`ms`) | `Handle` claim (`ms`) | `TTFI` — `cmd started` (`p50/p90/p95 ms`) | `TTFC` — `cmd complete` (`ms`) | `TTFC` — `cmd complete` (`p50 ms`: `r2e` / `swe`) |     `Delete` (`ms`) |
+| :------ | :--------- | :----------- | ------------------: | -----------: | :--------------------------------- | -------: | ----------------------------: | --------: | -------: | ----------------------: | -----------------------: | --------------------: | ----------------------------------------: | -----------------------------: | ------------------------------------------------: | ------------------: |
+| `<arm>` | `<client>` | `<strategy>` | `<active> / <pool>` |  `<n> (<f>)` | `<pct>% (<PASS\|FAIL>, <d>/<a>)`   | `<rate>` |     `<sec> (<r2e_s>/<swe_s>)` |   `<tpm>` | `<pct>%` |     `<p50>/<p95>/<p99>` |      `<p50>/<p95>/<p99>` |   `<p50>/<p95>/<p99>` |                       `<p50>/<p90>/<p95>` |            `<p50>/<p95>/<p99>` |                             `<r2e_p50>/<swe_p50>` | `<p50>/<p95>/<p99>` |
 
 ### 3.2 Where time is spent: layer attribution (`Go` vs `Python` vs `ate` infra vs guest workload)
 
@@ -258,7 +270,20 @@ operation does not occur in the selected strategy (for example `ttfc` on `100%` 
 
 ## 4. Failures, findings, and caveats
 
-- **Failures and retries**: `<0 failures and 0 retries, or count + root-cause layer per error>`.
+Populate directly from `report.json` `fault_classification` (and `jobs.{r2e,swe}.fault_classification`
+for per-shard attribution; Trellis and M2 are defined in
+[docs/glossary.md](../../../docs/glossary.md)). `infra_fault_rate = (tier1_dropped + tier3_dropped) / all_rollouts`
+excludes Tier 2 policy outcomes (`nonzero_exit`, `command_timeout`, `guest_oom`) and transient
+faults recovered by retry (`recovered_retries`):
+
+- **Trellis M2 reliability check (`< 2.0%` `infra_fault_rate`)**: `<arm>: <infra_fault_rate>%`
+  (`<infra_dropped>/<all_rollouts>` dropped: `tier1=<tier1_dropped>`, `tier3=<tier3_dropped>` ->
+  `<PASS | FAIL>`; `tier2_policy=<tier2_policy>`, `recovered_retries=<recovered_retries>`).
+
+| Arm     | Tier                                                                                                    | Category     | Dropped rollouts | Recovered by retry | Events | Example error          |
+| :------ | :------------------------------------------------------------------------------------------------------ | :----------- | ---------------: | -----------------: | -----: | :--------------------- |
+| `<arm>` | `<Tier 1 (before episode, infra) \| Tier 2 (during episode, policy) \| Tier 3 (during episode, infra)>` | `<category>` |            `<n>` |              `<n>` |  `<n>` | `<example_err or "-">` |
+
 - **Findings**:
   `<2-3 bullets on strategy wall-clock vs standing-pool trade-off and Go vs Go-direct vs Python overhead>`.
 - **Caveats**:

@@ -1517,12 +1517,38 @@ func (r *runner) replay(ctx context.Context, e *environment, step int) {
 		}
 		ev := r.event(EventStep, e, step, dur, err)
 		ev.Name = s.Name
+		var (
+			timedOut    bool
+			stepTimeout time.Duration
+		)
 		if s.Run != "" && err == nil {
 			ev.Exit = intp(res.ExitCode)
+			// The guest kills a command at its timeout with SIGKILL and the
+			// process API carries no timeout flag, so the loader infers one
+			// from exit 137 at or past the deadline, as the Python SDK's
+			// ExecResult.timed_out does. An OOM kill is 137 too, but it
+			// rarely lands exactly at the deadline.
+			stepTimeout = time.Duration(s.Timeout)
+			if stepTimeout <= 0 {
+				stepTimeout = r.cfg.StepTimeout
+			}
+			timedOut = stepTimeout > 0 && res.ExitCode == 137 && dur >= stepTimeout
+			if timedOut {
+				ev.Timeout = &timedOut
+			}
 		}
 		switch {
 		case err != nil:
 			ok = false
+		case timedOut:
+			// A step the guest killed at its timeout fails the task, reward
+			// step or not, as run_fleet_bench.py does on its TimeoutError:
+			// the trajectory did not run to its end, so there is no verdict.
+			// The report classifies it as a tier 2 command_timeout.
+			ok = false
+			ev.OK = false
+			ev.Err = fmt.Sprintf("step %q timed out after %s", s.Name, stepTimeout)
+			ev.Tail = tail(res.Stdout+res.Stderr, 2000)
 		case s.Reward:
 			reward = intp(0)
 			if res.ExitCode == 0 {
@@ -1844,8 +1870,25 @@ func (r *Runner) runOpenLoop(ctx context.Context, rec *Recorder) error {
 			Task:     tIdx,
 			DurMS:    cDur,
 			OK:       err == nil,
+			Err:      errString(err),
 		})
 		if err != nil {
+			// One task event per attempted rollout, also when the create
+			// fails: the fault classification counts all_rollouts from task
+			// events, so a rollout that never got an environment must still
+			// be in the denominator and in the dropped count.
+			rec.Emit(Event{
+				RunID:      r.Config.RunID,
+				Job:        r.Config.JobName,
+				Event:      EventTask,
+				Instance:   in.InstanceID,
+				Image:      in.Image,
+				Task:       tIdx,
+				DurMS:      DurMS(time.Since(tStart)),
+				SlotWaitMS: slotWait,
+				OK:         false,
+				Err:        err.Error(),
+			})
 			return
 		}
 		_, execErr := r.Client.Exec(ctx, h.Name, "pytest -q", 30*time.Second)
@@ -2025,6 +2068,22 @@ func (r *Runner) runScheduledTask(
 			DurMS:    createDur,
 			OK:       false,
 			Err:      err.Error(),
+		})
+		// One task event per attempted rollout, also when the create fails;
+		// see Runner.runOpenLoop.
+		rec.Emit(Event{
+			RunID:      r.Config.RunID,
+			Job:        jobName,
+			Worker:     worker,
+			Event:      EventTask,
+			Instance:   st.InstanceID,
+			Image:      st.Image,
+			Step:       step,
+			Task:       taskNum,
+			DurMS:      DurMS(time.Since(taskStart)),
+			SlotWaitMS: slotWaitMS,
+			OK:         false,
+			Err:        err.Error(),
 		})
 		return err
 	}

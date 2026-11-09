@@ -15,6 +15,7 @@
     "measurements_ref": { "type": "string" },
     "measurements": { "type": "object" },
     "validity": { "$ref": "#/$defs/ReportValidity" },
+    "fault_classification": { "$ref": "#/$defs/FaultClassification" },
     "jobs": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/JobReportSummary" }
@@ -37,6 +38,69 @@
         }
       }
     },
+    "FaultCategorySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tier", "category", "dropped", "recovered", "events"],
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["tier1_before_episode", "tier2_policy", "tier3_during_episode"]
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "create_timeout",
+            "no_capacity",
+            "image_pull_unpack",
+            "transport_error",
+            "nonzero_exit",
+            "command_timeout",
+            "guest_oom",
+            "wake_resume_failure",
+            "sandbox_crash",
+            "snapshot_restore_failure",
+            "eviction_preemption",
+            "other"
+          ]
+        },
+        "dropped": { "type": "integer", "minimum": 0 },
+        "recovered": { "type": "integer", "minimum": 0 },
+        "events": { "type": "integer", "minimum": 0 },
+        "example_err": { "type": "string" }
+      }
+    },
+    "FaultClassification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "all_rollouts",
+        "infra_dropped",
+        "tier1_dropped",
+        "tier2_policy",
+        "tier3_dropped",
+        "recovered_retries",
+        "infra_fault_rate",
+        "target_rate",
+        "meets_target"
+      ],
+      "properties": {
+        "all_rollouts": { "type": "integer", "minimum": 0 },
+        "infra_dropped": { "type": "integer", "minimum": 0 },
+        "tier1_dropped": { "type": "integer", "minimum": 0 },
+        "tier2_policy": { "type": "integer", "minimum": 0 },
+        "tier3_dropped": { "type": "integer", "minimum": 0 },
+        "recovered_retries": { "type": "integer", "minimum": 0 },
+        "post_rollout_errors": { "type": "integer", "minimum": 0 },
+        "infra_fault_rate": { "type": "number", "minimum": 0 },
+        "target_rate": { "type": "number", "exclusiveMinimum": 0 },
+        "meets_target": { "type": "boolean" },
+        "categories": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FaultCategorySummary" }
+        }
+      }
+    },
     "JobReportSummary": {
       "type": "object",
       "additionalProperties": false,
@@ -47,6 +111,7 @@
         "rewarded": { "type": "integer", "minimum": 0 },
         "reward_rate": { "type": "number", "minimum": 0 },
         "steps": { "type": "integer", "minimum": 0 },
+        "fault_classification": { "$ref": "#/$defs/FaultClassification" },
         "metrics": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/MetricSummary" }

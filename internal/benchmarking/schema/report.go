@@ -275,18 +275,150 @@ func (m MetricSummary) Validate(name string) error {
 	return nil
 }
 
+// FaultTier classifies an error or retry into one of three reliability
+// tiers (docs/glossary.md, "Benchmark reporting").
+type FaultTier string
+
+const (
+	// FaultTierBeforeEpisode covers infrastructure faults before the episode runs
+	// (create timeout, no capacity, image pull/unpack failure, transport error).
+	FaultTierBeforeEpisode FaultTier = "tier1_before_episode"
+	// FaultTierPolicy covers agent/workload policy outcomes during the episode
+	// (non-zero exit, command timeout, in-guest OOM). Excluded from infra_fault_rate.
+	FaultTierPolicy FaultTier = "tier2_policy"
+	// FaultTierDuringEpisode covers infrastructure faults during the episode
+	// (wake/ResumeActor failure, sandbox crash, snapshot/restore failure, eviction/preemption).
+	FaultTierDuringEpisode FaultTier = "tier3_during_episode"
+
+	// DefaultInfraFaultRateTarget is the reliability target: under 2% of the
+	// rollouts dropped by an infrastructure fault (docs/glossary.md).
+	DefaultInfraFaultRateTarget = 0.02
+)
+
+// Canonical fault categories within each FaultTier. The list is closed: the
+// JSON schema's enum and Validate reject any other string, so a new kind of
+// error shows up as FaultCatOther with its example_err instead of being
+// absorbed into a named category.
+const (
+	// Tier 1: before the episode (infra).
+	FaultCatCreateTimeout   = "create_timeout"
+	FaultCatNoCapacity      = "no_capacity"
+	FaultCatImagePullUnpack = "image_pull_unpack"
+	FaultCatTransportError  = "transport_error"
+
+	// Tier 2: during the episode (policy, excluded from infra_fault_rate).
+	FaultCatNonZeroExit    = "nonzero_exit"
+	FaultCatCommandTimeout = "command_timeout"
+	FaultCatGuestOOM       = "guest_oom"
+
+	// Tier 3: during the episode (infra).
+	FaultCatWakeResumeFailure      = "wake_resume_failure"
+	FaultCatSandboxCrash           = "sandbox_crash"
+	FaultCatSnapshotRestoreFailure = "snapshot_restore_failure"
+	FaultCatEvictionPreemption     = "eviction_preemption"
+
+	// FaultCatOther is the infrastructure error no matcher of its tier
+	// (tier 1 or tier 3) recognized. It counts in infra_dropped; its
+	// example_err is what the taxonomy grows from.
+	FaultCatOther = "other"
+)
+
+// knownFaultCategories is the closed set Validate accepts.
+var knownFaultCategories = map[string]bool{
+	FaultCatCreateTimeout:          true,
+	FaultCatNoCapacity:             true,
+	FaultCatImagePullUnpack:        true,
+	FaultCatTransportError:         true,
+	FaultCatNonZeroExit:            true,
+	FaultCatCommandTimeout:         true,
+	FaultCatGuestOOM:               true,
+	FaultCatWakeResumeFailure:      true,
+	FaultCatSandboxCrash:           true,
+	FaultCatSnapshotRestoreFailure: true,
+	FaultCatEvictionPreemption:     true,
+	FaultCatOther:                  true,
+}
+
+// FaultCategorySummary aggregates dropped rollouts, recovered retries, raw failed
+// events, and one representative error string for a (Tier, Category) bucket.
+type FaultCategorySummary struct {
+	Tier       FaultTier `json:"tier"`
+	Category   string    `json:"category"`
+	Dropped    int       `json:"dropped"`
+	Recovered  int       `json:"recovered"`
+	Events     int       `json:"events"`
+	ExampleErr string    `json:"example_err,omitempty"`
+}
+
+// FaultClassification summarizes rollout-level reliability in the three
+// fault tiers against the infra_fault_rate target (DefaultInfraFaultRateTarget).
+// MeetsTarget is InfraFaultRate < TargetRate, and false when AllRollouts is 0.
+type FaultClassification struct {
+	AllRollouts       int                    `json:"all_rollouts"`
+	InfraDropped      int                    `json:"infra_dropped"`
+	Tier1Dropped      int                    `json:"tier1_dropped"`
+	Tier2Policy       int                    `json:"tier2_policy"`
+	Tier3Dropped      int                    `json:"tier3_dropped"`
+	RecoveredRetries  int                    `json:"recovered_retries"`
+	PostRolloutErrors int                    `json:"post_rollout_errors,omitempty"`
+	InfraFaultRate    float64                `json:"infra_fault_rate"`
+	TargetRate        float64                `json:"target_rate"`
+	MeetsTarget       bool                   `json:"meets_target"`
+	Categories        []FaultCategorySummary `json:"categories,omitempty"`
+}
+
+// Validate checks FaultClassification invariants.
+func (fc *FaultClassification) Validate() error {
+	if fc == nil {
+		return nil
+	}
+	if fc.AllRollouts < 0 || fc.InfraDropped < 0 || fc.Tier1Dropped < 0 || fc.Tier2Policy < 0 || fc.Tier3Dropped < 0 || fc.RecoveredRetries < 0 || fc.PostRolloutErrors < 0 {
+		return errors.New("fault_classification: counts must be >= 0")
+	}
+	if fc.InfraDropped != fc.Tier1Dropped+fc.Tier3Dropped {
+		return fmt.Errorf("fault_classification: infra_dropped (%d) != tier1_dropped (%d) + tier3_dropped (%d)", fc.InfraDropped, fc.Tier1Dropped, fc.Tier3Dropped)
+	}
+	if drops := fc.Tier1Dropped + fc.Tier2Policy + fc.Tier3Dropped; drops > fc.AllRollouts {
+		return fmt.Errorf("fault_classification: tier1_dropped + tier2_policy + tier3_dropped (%d) > all_rollouts (%d)", drops, fc.AllRollouts)
+	}
+	if fc.InfraFaultRate < 0 || math.IsNaN(fc.InfraFaultRate) || math.IsInf(fc.InfraFaultRate, 0) {
+		return errors.New("fault_classification: infra_fault_rate must be finite and >= 0")
+	}
+	if fc.TargetRate <= 0 || math.IsNaN(fc.TargetRate) || math.IsInf(fc.TargetRate, 0) {
+		return errors.New("fault_classification: target_rate must be finite and > 0")
+	}
+	for i, c := range fc.Categories {
+		switch c.Tier {
+		case FaultTierBeforeEpisode, FaultTierPolicy, FaultTierDuringEpisode:
+		default:
+			return fmt.Errorf("fault_classification: categories[%d].tier %q is invalid", i, c.Tier)
+		}
+		if strings.TrimSpace(c.Category) == "" {
+			return fmt.Errorf("fault_classification: categories[%d].category is required", i)
+		}
+		if !knownFaultCategories[c.Category] {
+			return fmt.Errorf("fault_classification: categories[%d].category %q is not a known category", i, c.Category)
+		}
+		if c.Dropped < 0 || c.Recovered < 0 || c.Events < 0 {
+			return fmt.Errorf("fault_classification: categories[%d] counts must be >= 0", i)
+		}
+	}
+	return nil
+}
+
 // Report is the top-level report.json artifact.
 type Report struct {
-	SchemaVersion     string                      `json:"schema_version"`
-	RunID             string                      `json:"run_id"`
-	ScenarioName      string                      `json:"scenario_name"`
-	Tag               string                      `json:"tag,omitempty"`
-	GeneratedAt       string                      `json:"generated_at"`
-	SystemDescription *SystemDescription          `json:"system_description,omitempty"`
-	MeasurementsRef   string                      `json:"measurements_ref,omitempty"`
-	Validity          ReportValidity              `json:"validity"`
-	Jobs              map[string]JobReportSummary `json:"jobs,omitempty"`
-	CustomMetrics     map[string]MetricSummary    `json:"custom_metrics,omitempty"`
+	SchemaVersion       string                      `json:"schema_version"`
+	RunID               string                      `json:"run_id"`
+	ScenarioName        string                      `json:"scenario_name"`
+	Tag                 string                      `json:"tag,omitempty"`
+	GeneratedAt         string                      `json:"generated_at"`
+	SystemDescription   *SystemDescription          `json:"system_description,omitempty"`
+	MeasurementsRef     string                      `json:"measurements_ref,omitempty"`
+	Validity            ReportValidity              `json:"validity"`
+	FaultClassification *FaultClassification        `json:"fault_classification,omitempty"`
+	Jobs                map[string]JobReportSummary `json:"jobs,omitempty"`
+	CustomMetrics       map[string]MetricSummary    `json:"custom_metrics,omitempty"`
 }
 
 // ReportValidity records whether the run passed all validity gates and why.
@@ -297,12 +429,13 @@ type ReportValidity struct {
 
 // JobReportSummary summarizes per-job results in Report.
 type JobReportSummary struct {
-	Tasks      int                      `json:"tasks"`
-	Failed     int                      `json:"failed"`
-	Rewarded   int                      `json:"rewarded"`
-	RewardRate float64                  `json:"reward_rate"`
-	Steps      int                      `json:"steps,omitempty"`
-	Metrics    map[string]MetricSummary `json:"metrics,omitempty"`
+	Tasks               int                      `json:"tasks"`
+	Failed              int                      `json:"failed"`
+	Rewarded            int                      `json:"rewarded"`
+	RewardRate          float64                  `json:"reward_rate"`
+	Steps               int                      `json:"steps,omitempty"`
+	FaultClassification *FaultClassification     `json:"fault_classification,omitempty"`
+	Metrics             map[string]MetricSummary `json:"metrics,omitempty"`
 }
 
 // Validate checks Report invariants.
@@ -327,12 +460,18 @@ func (r *Report) Validate() error {
 			return fmt.Errorf("report.system_description: %w", err)
 		}
 	}
+	if err := r.FaultClassification.Validate(); err != nil {
+		return fmt.Errorf("report: %w", err)
+	}
 	for job, js := range r.Jobs {
 		if js.Tasks < 0 || js.Failed < 0 || js.Rewarded < 0 || js.Steps < 0 {
 			return fmt.Errorf("report: jobs[%q] counts must be >= 0", job)
 		}
 		if js.RewardRate < 0 {
 			return fmt.Errorf("report: jobs[%q].reward_rate must be >= 0", job)
+		}
+		if err := js.FaultClassification.Validate(); err != nil {
+			return fmt.Errorf("report: jobs[%q]: %w", job, err)
 		}
 		for k, ms := range js.Metrics {
 			if err := ms.Validate(k); err != nil {

@@ -619,11 +619,11 @@ func TestAllStrategiesRenderPlanAndDirectDriverValidation(t *testing.T) {
 	}
 	md := string(mdBytes)
 	for _, want := range []string{
-		"| Arm | Client | Strategy | Tasks | Failed | Reward Rate | Wall Clock (s) | Throughput (tasks/min) | Warm Hit Rate | Peak Active | Standing Pool | TTFC (cmd complete) p50/p95/p99 | Wake (cmd complete) p50/p95/p99 |",
-		"| `go-none` | `go` | `none` | 12 | 0 | 1.000 | ",
-		"| `go-naive` | `go` | `naive` | 12 | 0 | 1.000 | ",
-		"| `go-sliding` | `go` | `sliding` | 12 | 0 | 1.000 | ",
-		"| `go-pipelined` | `go` | `pipelined` | 12 | 0 | 1.000 | ",
+		"| Arm | Client | Strategy | Tasks | Failed | Infra Fault Rate (<2%) | Reward Rate | Wall Clock (s) | Throughput (tasks/min) | Warm Hit Rate | Peak Active | Standing Pool | TTFC (cmd complete) p50/p95/p99 | Wake (cmd complete) p50/p95/p99 |",
+		"| `go-none` | `go` | `none` | 12 | 0 | 0.00% (PASS, 0/12) | 1.000 | ",
+		"| `go-naive` | `go` | `naive` | 12 | 0 | 0.00% (PASS, 0/12) | 1.000 | ",
+		"| `go-sliding` | `go` | `sliding` | 12 | 0 | 0.00% (PASS, 0/12) | 1.000 | ",
+		"| `go-pipelined` | `go` | `pipelined` | 12 | 0 | 0.00% (PASS, 0/12) | 1.000 | ",
 		" | 100.0% | ", // the warm arms' hit rate
 		" | 12 | ",     // naive's standing pool
 		"## Detailed Event Breakdown (`swebench-loader report`)",

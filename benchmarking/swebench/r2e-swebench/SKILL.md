@@ -235,9 +235,11 @@ top-level comparison artifacts land at `$ARTIFACT_DIR/`:
 - `r2e-summary.json` and `swe-summary.json` (or `arms/<arm>/*-summary.json`): per-shard
   `swebench-loader report` summaries.
 - `report.json` and `report.md` (or `arms/<arm>/report.{json,md}`): unified `bench report` bundle.
-  On `--workload graded`, verify `failed == 0` and `reward_rate == 1.0`. Check
+  On `--workload graded`, verify `failed == 0`, `fault_classification.infra_fault_rate < 0.02`
+  (`fault_classification.meets_target == true`), and `reward_rate == 1.0`. Check
   `working_set_hit_rate` (`0.0` on `none`, `1.0` on `naive`/`sliding`/`pipelined`),
-  `standing_pool_size`, `peak_active_sandboxes`, `jobs.r2e`, `jobs.swe`, and `interference`.
+  `standing_pool_size`, `peak_active_sandboxes`, `fault_classification`, `jobs.r2e`, `jobs.swe`, and
+  `interference`.
 - `comparison.txt`, `comparison.json`, and `comparison.md` (multi-arm sweeps): side-by-side latency,
   throughput (`tasks/min`), warm-pool hit rate, peak active sandboxes, and standing-pool footprint
   across all `(client, strategy)` arms.
@@ -291,15 +293,17 @@ Copy [`./REPORT_TEMPLATE.md`](./REPORT_TEMPLATE.md) to `$ARTIFACT_DIR/BENCHMARK_
 3. **Populate results, findings, and exact commands executed (`## 3`, `## 4`, and `## 5`)**: Fill
    the strategy multi-arm table (`3.1`) from `comparison.json` / `comparison.md`, per-arm
    `report.json`, and `{r2e,swe}-summary.json` (with explicit `ms` vs `s` units, arm + `r2e`/`swe`
-   shard `Wall (s)`, and per-shard `r2e`/`swe` `TTFC` [`cmd complete`]), decompose where time is
-   spent by execution layer (`3.2`: first-command `TTFC`, single-rollout `task`, and arm/sweep
-   `Wall (s)` across slot-busy work vs straggler/window-barrier idle), fill all raw sandbox
-   lifecycle and command latencies across `p50`, `p90`, `p95`, `p99`, and `max` (`3.3`:
-   `sdk_slot_wait`, `actor_create`, `sandbox_create`, `prewarm`, `handle_claim`
-   [`wire_claim_to_ready_ms`], `ttfi` [`cmd started`: sandbox requested -> container restored & 1st
-   cmd started], `first_cmd_exec` [`ready_to_first_cmd_ms`], `ttfc` [`cmd complete` via
-   `stats[event="ttfi"]`], `suspend`, `wake` [`cmd complete` via `stats[event="wake"]`], `step/*`,
-   `task/*`, `delete`, `step_barrier`, `run` wall clock), fill step barrier, shard wall clock, and
-   shard split (`3.4`, plus node cache and `atelet` restore phases when `SAMPLE_CACHE=1` or
-   `HARVEST_RESTORES=1` ran), summarize failures, findings, and caveats (`## 4`), and record the
-   exact prewarm, benchmark, and measurement commands that actually ran at the bottom (`## 5`).
+   shard `Wall (s)`, `Infra fault` from `fault_classification`, and per-shard `r2e`/`swe`
+   `TTFC` [`cmd complete`]), decompose where time is spent by execution layer (`3.2`: first-command
+   `TTFC`, single-rollout `task`, and arm/sweep `Wall (s)` across slot-busy work vs
+   straggler/window-barrier idle), fill all raw sandbox lifecycle and command latencies across
+   `p50`, `p90`, `p95`, `p99`, and `max` (`3.3`: `sdk_slot_wait`, `actor_create`, `sandbox_create`,
+   `prewarm`, `handle_claim` [`wire_claim_to_ready_ms`], `ttfi` [`cmd started`: sandbox requested ->
+   container restored & 1st cmd started], `first_cmd_exec` [`ready_to_first_cmd_ms`], `ttfc` [`cmd
+   complete` via `stats[event="ttfi"]`], `suspend`, `wake` [`cmd complete` via
+   `stats[event="wake"]`], `step/*`, `task/*`, `delete`, `step_barrier`, `run` wall clock), fill
+   step barrier, shard wall clock, and shard split (`3.4`, plus node cache and `atelet` restore
+   phases when `SAMPLE_CACHE=1` or `HARVEST_RESTORES=1` ran), populate the 3-tier Trellis fault
+   classification table (`## 4`, copying `fault_classification.categories` rather than free-text
+   error interpretation), and record the exact prewarm, benchmark, and measurement commands that
+   actually ran at the bottom (`## 5`).

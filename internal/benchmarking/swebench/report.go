@@ -341,6 +341,9 @@ type Report struct {
 	// RolloutBreakdown holds per-step rollout decomposition (p50 vs p100 straggler
 	// skew, barrier time, llm_think_ms + env_wait_ms, and env_overhead_pct).
 	RolloutBreakdown []StepRolloutBreakdown `json:"rollout_breakdown,omitempty"`
+	// FaultClassification is the rollout-level 3-tier fault classification
+	// and the infra_fault_rate target status (docs/glossary.md).
+	FaultClassification *schema.FaultClassification `json:"fault_classification,omitempty"`
 	// Errors counts distinct error strings, most frequent first.
 	Errors []ErrorCount `json:"errors,omitempty"`
 	// Unresolved lists the instances whose reward was 0, once each.
@@ -486,6 +489,7 @@ type jobAccum struct {
 	rewarded int
 	steps    map[int]int
 	ttfi     []float64
+	faults   *faultTracker
 }
 
 type wsSnapshot struct {
@@ -584,6 +588,7 @@ type Builder struct {
 	stepInferredMisses map[int]int
 	peakActiveEnvs     int
 	peakPausedEnvs     int
+	faults             *faultTracker
 }
 
 // NewBuilder returns a streaming report Builder.
@@ -631,6 +636,7 @@ func NewBuilder() *Builder {
 		stepCacheMisses:    map[int]int{},
 		stepInferredHits:   map[int]int{},
 		stepInferredMisses: map[int]int{},
+		faults:             newFaultTracker(),
 	}
 }
 
@@ -681,7 +687,10 @@ func (b *Builder) ensureJob(job string) *jobAccum {
 	}
 	ja, ok := b.jobs[job]
 	if !ok {
-		ja = &jobAccum{steps: map[int]int{}}
+		ja = &jobAccum{
+			steps:  map[int]int{},
+			faults: newFaultTracker(),
+		}
 		b.jobs[job] = ja
 	}
 	return ja
@@ -745,6 +754,13 @@ func (b *Builder) Add(e Event) {
 		}
 	}
 	ja := b.ensureJob(e.Job)
+	if b.faults == nil {
+		b.faults = newFaultTracker()
+	}
+	b.faults.Add(e)
+	if ja != nil {
+		ja.faults.Add(e)
+	}
 
 	switch e.Event {
 	case EventPrewarm:
@@ -1393,6 +1409,9 @@ func (b *Builder) Finish() *Report {
 	rep.Headline = b.buildHeadlineBaseline(&rep)
 	rep.RLBreakdown = b.buildRLStepBreakdown(&rep)
 	rep.Convergence = b.buildConvergenceSummary(&rep)
+	if b.faults != nil {
+		rep.FaultClassification = b.faults.Finish()
+	}
 
 	if len(b.jobs) > 0 {
 		rep.Jobs = make(map[string]schema.JobReportSummary, len(b.jobs))
@@ -1408,6 +1427,9 @@ func (b *Builder) Finish() *Report {
 				Rewarded:   ja.rewarded,
 				RewardRate: rate,
 				Steps:      len(ja.steps),
+			}
+			if ja.faults != nil {
+				js.FaultClassification = ja.faults.Finish()
 			}
 			if len(ja.ttfi) > 0 {
 				js.Metrics = map[string]schema.MetricSummary{
@@ -3069,6 +3091,7 @@ func (rep *Report) WriteText(w io.Writer) {
 	if len(rep.Labels) > 0 {
 		fmt.Fprintf(w, "labels: %s\n", labelLine(rep.Labels))
 	}
+	writeFaultClassificationHeaderText(w, rep.FaultClassification)
 	fmt.Fprintln(w)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "event\tname\tcount\tfailed\tretried\tp50_ms\tp95_ms\tmax_ms")
@@ -3152,6 +3175,7 @@ func (rep *Report) WriteText(w io.Writer) {
 	if len(rep.Unresolved) > 0 {
 		fmt.Fprintf(w, "\nunresolved: %d instances (report -unresolved FILE writes them in exclude-file format)\n", len(rep.Unresolved))
 	}
+	writeFaultClassificationTableText(w, rep.FaultClassification)
 	if len(rep.Errors) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "errors:")
@@ -3184,6 +3208,15 @@ func (rep *Report) WriteMarkdown(w io.Writer) {
 	}
 	fmt.Fprintf(w, "- **Tasks**: %d total, %d rewarded (%.1f%%), %d failed\n",
 		rep.Tasks, rep.Rewarded, rep.RewardRate*100, rep.Failed)
+	if fc := rep.FaultClassification; fc == nil {
+		fmt.Fprintf(w, "- **Infra Fault Rate**: %s\n", faultNotClassified)
+	} else if fc.AllRollouts == 0 {
+		fmt.Fprintf(w, "- **Infra Fault Rate**: %s\n", faultNoRollouts)
+	} else {
+		fmt.Fprintf(w, "- **Infra Fault Rate**: %.2f%% (%d/%d rollouts; target `<%.1f%%`: **%s**; tier1=%d, tier3=%d, tier2_policy=%d, recovered=%d)\n",
+			fc.InfraFaultRate*100.0, fc.InfraDropped, fc.AllRollouts, fc.TargetRate*100.0, FaultTargetStatus(fc),
+			fc.Tier1Dropped, fc.Tier3Dropped, fc.Tier2Policy, fc.RecoveredRetries)
+	}
 	fmt.Fprintf(w, "- **Wall Time**: %.1f ms (%.2f tasks/min)\n\n",
 		rep.RunMS, rep.ThroughputTasksPerMin())
 
@@ -3196,6 +3229,8 @@ func (rep *Report) WriteMarkdown(w io.Writer) {
 				st.Event, st.Name, st.Count, st.Failed, st.Retried, st.P50MS, st.P90MS, st.P95MS, st.P99MS, st.MaxMS)
 		}
 	}
+
+	writeFaultClassificationMarkdown(w, rep.FaultClassification)
 
 	if rep.ScopeEnabled(schema.ScopeRL) && len(rep.RolloutBreakdown) > 0 {
 		fmt.Fprintln(w, "\n## Per-Step Rollout Decomposition")
@@ -3486,6 +3521,14 @@ func WriteStatsJSONL(path string, s *Report, runID, testName, tag string) error 
 		trialMeas["wake_p99_ms"] = st.P99MS
 		trialMeas["wake_max_ms"] = st.MaxMS
 	}
+	if fc := s.FaultClassification; fc != nil {
+		trialMeas["infra_fault_rate"] = fc.InfraFaultRate
+		trialMeas["infra_dropped"] = float64(fc.InfraDropped)
+		trialMeas["tier1_dropped"] = float64(fc.Tier1Dropped)
+		trialMeas["tier2_policy"] = float64(fc.Tier2Policy)
+		trialMeas["tier3_dropped"] = float64(fc.Tier3Dropped)
+		trialMeas["recovered_retries"] = float64(fc.RecoveredRetries)
+	}
 	rows = append(rows, schema.StatsRow{
 		SchemaVersion: schema.SchemaVersion,
 		Timestamp:     ts,
@@ -3496,6 +3539,33 @@ func WriteStatsJSONL(path string, s *Report, runID, testName, tag string) error 
 		Measurements:  trialMeas,
 		Labels:        copyLabels(baseLabels),
 	})
+	if fc := s.FaultClassification; fc != nil {
+		meetsVal := 0.0
+		if fc.MeetsTarget {
+			meetsVal = 1.0
+		}
+		rows = append(rows, schema.StatsRow{
+			SchemaVersion: schema.SchemaVersion,
+			Timestamp:     ts,
+			Tag:           tag,
+			TestName:      testName,
+			RunID:         runID,
+			Metric:        "fault_classification",
+			Measurements: map[string]float64{
+				"all_rollouts":        float64(fc.AllRollouts),
+				"infra_dropped":       float64(fc.InfraDropped),
+				"tier1_dropped":       float64(fc.Tier1Dropped),
+				"tier2_policy":        float64(fc.Tier2Policy),
+				"tier3_dropped":       float64(fc.Tier3Dropped),
+				"recovered_retries":   float64(fc.RecoveredRetries),
+				"post_rollout_errors": float64(fc.PostRolloutErrors),
+				"infra_fault_rate":    fc.InfraFaultRate,
+				"target_rate":         fc.TargetRate,
+				"meets_target":        meetsVal,
+			},
+			Labels: copyLabels(baseLabels),
+		})
+	}
 
 	// 2. phase_breakdown_summary row
 	phaseMeas := map[string]float64{
@@ -3858,9 +3928,19 @@ func WriteComparison(w io.Writer, reps []*Report, names []string) {
 	row("reps", func(r *Report) string { return fmt.Sprintf("%d", r.Reps) })
 	row("tasks", func(r *Report) string { return fmt.Sprintf("%d", r.Tasks) })
 	row("failed", func(r *Report) string { return fmt.Sprintf("%d", r.Failed) })
+	row("infra_fault_rate", func(r *Report) string {
+		fc := r.FaultClassification
+		switch {
+		case fc == nil:
+			return "not classified"
+		case fc.AllRollouts == 0:
+			return faultNoRollouts
+		}
+		return fmt.Sprintf("%.2f%% (%s)", fc.InfraFaultRate*100.0, FaultTargetStatus(fc))
+	})
 	row("reward_rate", func(r *Report) string { return fmt.Sprintf("%.3f", r.RewardRate) })
 	row("run_s", func(r *Report) string { return fmt.Sprintf("%.1f", r.RunMS/1000) })
-	builtin := map[string]bool{"run": true, "mode": true, "trace_captured": true, "reps": true, "tasks": true, "failed": true, "reward_rate": true, "run_s": true}
+	builtin := map[string]bool{"run": true, "mode": true, "trace_captured": true, "reps": true, "tasks": true, "failed": true, "infra_fault_rate": true, "reward_rate": true, "run_s": true}
 	for _, k := range labelKeys(reps) {
 		if k == "mode" && labelMatchesMode(reps) {
 			continue // the loader's own label; the mode row above says it
@@ -3956,8 +4036,8 @@ func WriteComparisonMarkdown(w io.Writer, reps []*Report, names []string) {
 	labels := columnLabels(reps, names)
 	fmt.Fprintln(w, "# Multi-Arm Strategy & Client Chain Comparison")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| Arm | Client | Strategy | Tasks | Failed | Reward Rate | Wall Clock (s) | Throughput (tasks/min) | Warm Hit Rate | Peak Active | Standing Pool | TTFC (cmd complete) p50/p95/p99 | Wake (cmd complete) p50/p95/p99 |")
-	fmt.Fprintln(w, "| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- |")
+	fmt.Fprintf(w, "| Arm | Client | Strategy | Tasks | Failed | %s | Reward Rate | Wall Clock (s) | Throughput (tasks/min) | Warm Hit Rate | Peak Active | Standing Pool | TTFC (cmd complete) p50/p95/p99 | Wake (cmd complete) p50/p95/p99 |\n", infraFaultHeader(reps))
+	fmt.Fprintln(w, "| :--- | :--- | :--- | ---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- |")
 	for i, r := range reps {
 		client := r.Labels["client"]
 		if client == "" {
@@ -3979,8 +4059,8 @@ func WriteComparisonMarkdown(w io.Writer, reps []*Report, names []string) {
 		if r.Headline != nil && r.Headline.TasksPerMin > 0 {
 			tpm = r.Headline.TasksPerMin
 		}
-		fmt.Fprintf(w, "| `%s` | `%s` | `%s` | %d | %d | %.3f | %.1f | %.1f | %s | %d | %s | %s | %s |\n",
-			labels[i], client, strategy, r.Tasks, r.Failed, r.RewardRate, r.RunMS/1000, tpm,
+		fmt.Fprintf(w, "| `%s` | `%s` | `%s` | %d | %d | %s | %.3f | %.1f | %.1f | %s | %d | %s | %s | %s |\n",
+			labels[i], client, strategy, r.Tasks, r.Failed, InfraFaultCell(r), r.RewardRate, r.RunMS/1000, tpm,
 			hitRate, r.PeakActiveSandboxes, pool, percentileCell(r, "ttfi"), percentileCell(r, "wake"))
 	}
 	fmt.Fprintln(w)
@@ -4806,6 +4886,9 @@ func NormalizeLegacyReport(rep *Report) {
 	if rep.RLBreakdown == nil {
 		rep.RLBreakdown = b.buildRLStepBreakdown(rep)
 	}
+	// FaultClassification stays nil on a report built before the field
+	// existed: the per-event data it needs is gone, and the renderers say
+	// "not classified" instead of estimating from the error counts.
 	rep.PopulateCacheMissesPerFirstCmd()
 	rep.PopulateStepChurnAndConcurrency(rep.ActiveSandboxes)
 }

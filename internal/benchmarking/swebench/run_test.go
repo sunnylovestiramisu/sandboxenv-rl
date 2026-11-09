@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/env/internal/benchmarking/schema"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -139,8 +140,12 @@ func (s *fakeSandbox) Run(ctx context.Context, command string, timeout time.Dura
 	s.b.mu.Lock()
 	s.b.commands = append(s.b.commands, s.id+": "+command)
 	s.b.mu.Unlock()
-	if strings.HasPrefix(command, "exit ") {
-		return Result{ExitCode: int(command[5] - '0'), Stderr: "failed"}, nil
+	if code, ok := strings.CutPrefix(command, "exit "); ok {
+		n, err := strconv.Atoi(code)
+		if err != nil {
+			panic("fakeSandbox: " + command)
+		}
+		return Result{ExitCode: n, Stderr: "failed"}, nil
 	}
 	if strings.HasPrefix(command, "echo ") {
 		return Result{Stdout: strings.TrimPrefix(command, "echo ")}, nil
@@ -422,6 +427,61 @@ func TestExpectExitFailsTask(t *testing.T) {
 		if strings.HasSuffix(c, ": true") {
 			t.Fatal("steps after a failed expectation must not run")
 		}
+	}
+}
+
+// A step the guest kills at its timeout (exit 137 at or past the deadline)
+// fails the task and stops the trajectory, as run_fleet_bench.py does on its
+// TimeoutError, and the report classifies it as a tier 2 command_timeout.
+func TestTimedOutStepFailsTask(t *testing.T) {
+	f := newFake()
+	var out bytes.Buffer
+	cfg := baseConfig(t, f, &out)
+	cfg.Mode = ModeEval
+	cfg.TasksPerImage = 1
+	tr, err := ParseTrajectory([]byte("name: t\nsteps:\n  - {name: slow, run: \"exit 137\", timeout: 1ms}\n  - {name: b, run: \"true\"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Trajectory = tr
+	sum, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Tasks != 3 || sum.Failed != 3 {
+		t.Fatalf("summary %+v, want 3 tasks, all failed", sum)
+	}
+	for _, c := range f.commands {
+		if strings.HasSuffix(c, ": true") {
+			t.Fatal("steps after a timed-out step must not run")
+		}
+	}
+	events := parseEvents(t, out.String())
+	var slow int
+	for _, e := range events {
+		if e.Event != EventStep || e.Name != "slow" {
+			continue
+		}
+		slow++
+		if e.OK || e.Timeout == nil || !*e.Timeout || e.Exit == nil || *e.Exit != 137 || !strings.Contains(e.Err, "timed out after") {
+			t.Fatalf("timed-out step event %+v, want ok=false timeout=true exit=137 and a timed out error", e)
+		}
+	}
+	if slow != 3 {
+		t.Fatalf("got %d slow step events, want 3", slow)
+	}
+	fc := Build(events).FaultClassification
+	if fc == nil || fc.AllRollouts != 3 || fc.Tier2Policy != 3 || fc.InfraDropped != 0 {
+		t.Fatalf("fault classification %+v, want 3 rollouts, 3 policy, 0 infra", fc)
+	}
+	var timeouts int
+	for _, c := range fc.Categories {
+		if c.Tier == schema.FaultTierPolicy && c.Category == schema.FaultCatCommandTimeout {
+			timeouts = c.Dropped
+		}
+	}
+	if timeouts != 3 {
+		t.Fatalf("command_timeout dropped = %d, want 3; categories %+v", timeouts, fc.Categories)
 	}
 }
 
@@ -1234,5 +1294,96 @@ func TestOpenLoopModeRecordsSlotWaitMS(t *testing.T) {
 	}
 	if taskEvents == 0 {
 		t.Fatal("expected EventTask events in open-loop output")
+	}
+}
+
+// flakyCreateClient is an EnvClient whose Create fails on every second call.
+type flakyCreateClient struct {
+	calls atomic.Int64
+}
+
+func (c *flakyCreateClient) Create(_ context.Context, _, _ string) (EnvHandle, error) {
+	n := c.calls.Add(1)
+	if n%2 == 0 {
+		return EnvHandle{}, errors.New("CreateError: no worker has room")
+	}
+	return EnvHandle{Name: fmt.Sprintf("env-%d", n), Source: string(schema.SourceColdStart)}, nil
+}
+
+func (c *flakyCreateClient) Exec(context.Context, string, string, time.Duration) (ExecResult, error) {
+	return ExecResult{Stdout: "ok"}, nil
+}
+
+func (c *flakyCreateClient) Delete(context.Context, string) error { return nil }
+
+func (c *flakyCreateClient) Snapshot(_ context.Context, name string) (string, error) {
+	return "snap-" + name, nil
+}
+
+func (c *flakyCreateClient) Resume(_ context.Context, snap, _, _ string) (EnvHandle, error) {
+	return EnvHandle{Name: "resumed-" + snap, Source: string(schema.SourceSnapshotResume)}, nil
+}
+
+// A rollout whose create fails is still a rollout. The simulated Runner must
+// emit a failed task event for it on both loops, so all_rollouts counts every
+// attempt and the failed creates are in the numerator and the denominator of
+// the infra fault rate, not missing from both.
+func TestRunnerFailedCreateIsARolloutInBothLoops(t *testing.T) {
+	for _, loop := range []string{"open", "closed"} {
+		t.Run(loop, func(t *testing.T) {
+			var out bytes.Buffer
+			rec := NewRecorder(&out)
+			r := &Runner{
+				Client:    &flakyCreateClient{},
+				Recorder:  rec,
+				SleepFunc: func(context.Context, time.Duration) error { return nil },
+			}
+			if loop == "open" {
+				r.Config = Config{RunID: "sim", JobName: "job", Mode: ModeOpenLoop, Concurrency: 2,
+					ArrivalRate: 2000, Duration: 30 * time.Millisecond, Seed: 7, Instances: SyntheticInstances(4, "")}
+			} else {
+				tasks := make([]schema.ScheduledTask, 6)
+				for i := range tasks {
+					tasks[i] = schema.ScheduledTask{InstanceID: fmt.Sprintf("inst-%d", i), Image: "img"}
+				}
+				r.Config = Config{RunID: "sim", JobName: "job", Mode: ModeSteps, Concurrency: 2}
+				r.Scheduled = schema.ScheduledJob{Job: "job", Steps: []schema.ScheduledStep{{Step: 1, Tasks: tasks}}}
+			}
+			// The closed loop returns the first create error after the step
+			// finishes; the events of every task are recorded either way.
+			_ = r.Run(context.Background())
+			if err := rec.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			events := parseEvents(t, out.String())
+			var creates, failedCreates, tasks, failedTasks int
+			for _, e := range events {
+				switch {
+				case e.Event == EventPhase && e.Name == "create":
+					creates++
+					if !e.OK {
+						failedCreates++
+					}
+				case e.Event == EventTask:
+					tasks++
+					if !e.OK {
+						failedTasks++
+					}
+				}
+			}
+			if creates == 0 || failedCreates == 0 {
+				t.Fatalf("test needs attempted and failed creates, got %d/%d", failedCreates, creates)
+			}
+			if tasks != creates || failedTasks != failedCreates {
+				t.Fatalf("task events %d (failed %d), want one per create %d (failed %d)", tasks, failedTasks, creates, failedCreates)
+			}
+			fc := Build(events).FaultClassification
+			if fc == nil || fc.AllRollouts != creates || fc.InfraDropped != failedCreates || fc.Tier1Dropped != failedCreates {
+				t.Fatalf("fault classification %+v, want all_rollouts=%d infra_dropped=tier1=%d", fc, creates, failedCreates)
+			}
+			if loop == "closed" && (creates != 6 || failedCreates != 3) {
+				t.Fatalf("closed loop ran %d creates (%d failed), want 6 (3)", creates, failedCreates)
+			}
+		})
 	}
 }

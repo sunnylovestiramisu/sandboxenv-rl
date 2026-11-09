@@ -40,6 +40,7 @@ type Thresholds struct {
 	MaxP50RegressionPct     map[string]float64     `json:"max_p50_regression_pct,omitempty"`
 	MaxP95RegressionPct     map[string]float64     `json:"max_p95_regression_pct,omitempty"`
 	MinRewardDelta          *float64               `json:"min_reward_delta,omitempty"`
+	MaxInfraFaultRate       *float64               `json:"max_infra_fault_rate,omitempty"`
 	CustomMetricMaxP95      map[string]float64     `json:"custom_metric_max_p95,omitempty"`
 	CustomMetrics           map[string]MetricBound `json:"custom_metrics,omitempty"`
 }
@@ -108,6 +109,46 @@ func Compare(base, cand *Report, th Thresholds) ComparisonResult {
 		regressions = append(regressions, rItem.ThresholdMsg)
 	}
 	diffs = append(diffs, rItem)
+
+	// 1b. Infra fault rate comparison (3-tier fault classification)
+	if base.FaultClassification != nil || cand.FaultClassification != nil || th.MaxInfraFaultRate != nil {
+		var baseFaultRate, candFaultRate float64
+		if base.FaultClassification != nil {
+			baseFaultRate = base.FaultClassification.InfraFaultRate
+		}
+		if cand.FaultClassification != nil {
+			candFaultRate = cand.FaultClassification.InfraFaultRate
+		}
+		fDelta := candFaultRate - baseFaultRate
+		var fPct float64
+		if baseFaultRate != 0 {
+			fPct = (fDelta / baseFaultRate) * 100.0
+		}
+		fItem := DiffItem{
+			Scope:     "run",
+			Metric:    "infra_fault_rate",
+			Baseline:  baseFaultRate,
+			Candidate: candFaultRate,
+			Delta:     fDelta,
+			DeltaPct:  fPct,
+		}
+		switch {
+		case th.MaxInfraFaultRate == nil:
+		case cand.FaultClassification == nil:
+			// A candidate without a classification (a report.json from before
+			// the field existed) has no rate to hold against the threshold.
+			// Treating the missing value as 0 would pass a run with failures,
+			// so the threshold fails instead.
+			fItem.Regressed = true
+			fItem.ThresholdMsg = fmt.Sprintf("infra_fault_rate: candidate has no fault_classification (events predate fault classification); cannot check max %.4f", *th.MaxInfraFaultRate)
+			regressions = append(regressions, fItem.ThresholdMsg)
+		case candFaultRate >= *th.MaxInfraFaultRate:
+			fItem.Regressed = true
+			fItem.ThresholdMsg = fmt.Sprintf("infra_fault_rate %.4f >= max %.4f", candFaultRate, *th.MaxInfraFaultRate)
+			regressions = append(regressions, fItem.ThresholdMsg)
+		}
+		diffs = append(diffs, fItem)
+	}
 
 	// 2. Operation and trajectory step latency comparisons from Stats
 	keys := orderedStatKeys(base.Stats, cand.Stats)

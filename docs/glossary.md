@@ -80,3 +80,13 @@ for control-plane terms.
 - **TTFI**: Time To First Interaction, emitted as `EventTTFI` by `internal/benchmarking/swebench`,
   measuring wall time from starting `CreateEnvironment` until the first command completes inside the
   guest daemon.
+
+## Benchmark reporting
+
+- **Trellis**: The rollout reliability taxonomy the benchmark reports follow (`fault_classification`
+  in `report.json`): a failed rollout is an infrastructure fault before the episode (tier 1), a
+  policy outcome during it (tier 2) or an infrastructure fault during it (tier 3); only tiers 1 and
+  3 count in `infra_fault_rate`.
+- **M2 (Trellis)**: The Trellis milestone whose target the reports check: fewer than 2% of rollouts
+  dropped by infrastructure faults (`fault_classification.target_rate`, `0.02`, `meets_target`).
+  Distinct from milestone `M2` of `internal/benchmarking/DESIGN.md`.

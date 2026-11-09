@@ -98,7 +98,8 @@ type Step struct {
 	// Think is the simulated model latency before the step (an RL rollout
 	// waits for the policy between commands).
 	Think Duration `json:"think,omitempty"`
-	// Timeout bounds a Run step; zero means the runner's default.
+	// Timeout bounds a Run step; zero means the runner's default. A step
+	// the guest kills at its timeout fails the task, reward step or not.
 	Timeout Duration `json:"timeout,omitempty"`
 	// ExpectExit, when set, fails the task if the exit code differs. A
 	// Reward step never fails the task on exit code: its output or exit
