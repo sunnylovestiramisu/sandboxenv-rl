@@ -24,7 +24,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = [
-    "grpcio>=1.84",
+    "grpcio>=1.85.1",
     "protobuf>=7.35",
 ]
 

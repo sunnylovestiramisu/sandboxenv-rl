@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 datasets = ["datasets", "pyarrow", "huggingface_hub"]
-test = ["pytest>=8", "pytest-asyncio>=0.23", "grpcio>=1.84", "protobuf>=7.35"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "grpcio>=1.85.1", "protobuf>=7.35"]
 
 [project.scripts]
 uni-agent-substrate-datasets = "uni_agent_substrate.datasets:main"
