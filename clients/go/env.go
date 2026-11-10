@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"sync"
 	"time"
 
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -32,10 +35,38 @@ import (
 
 // Env is a handle to a single environment.
 type Env struct {
-	id       string
-	atespace string
-	client   *Client
-	conn     *conn // every call of the Env goes on it
+	id        string
+	atespace  string
+	client    *Client
+	conn      *conn // every call of the Env goes on it
+	createdAt time.Time
+	firstMu   sync.Mutex
+	firstSent bool
+}
+
+// startCommandSpan opens the span for op (exec or start_process) and marks
+// ate_env.first_command=true under one lock hold so that concurrent callers
+// on one Env always attach first_command to the earliest-started span.
+func (e *Env) startCommandSpan(ctx context.Context, op, execName string) (context.Context, trace.Span) {
+	e.firstMu.Lock()
+	first := !e.firstSent
+	if first {
+		e.firstSent = true
+	}
+	attrs := []attribute.KeyValue{
+		AttrActorName.String(e.id),
+		AttrAtespace.String(e.atespace),
+		AttrCommandExecutable.String(execName),
+	}
+	if first {
+		attrs = append(attrs, AttrFirstCommand.Bool(true))
+	}
+	ctx, span := e.client.tracer.start(ctx, op, attrs...)
+	e.firstMu.Unlock()
+	if first {
+		e.client.metrics.observeReadyToFirstCommand(time.Since(e.createdAt))
+	}
+	return ctx, span
 }
 
 // ID returns the environment's identifier.
@@ -83,10 +114,12 @@ func (e *Env) Shell(ctx context.Context, commandLine string) (*ShellResponse, er
 // with req.Poll it polls instead (see ShellRequest.Poll). For incremental
 // output or interactive input use StartProcess.
 func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err error) {
-	ctx, span := e.client.tracer.start(ctx, opExec,
-		AttrActorName.String(e.id), AttrAtespace.String(e.atespace),
-		AttrCommandExecutable.String(executable(req.Command)))
-	defer func() { endSpan(span, err) }()
+	ctx, span := e.startCommandSpan(ctx, opExec, executable(req.Command))
+	began := time.Now()
+	defer func() {
+		e.client.metrics.observeExec(ctx, time.Since(began), err)
+		endSpan(span, err)
+	}()
 	start := &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"sh", "-c", req.Command},
 		Cwd:     req.Cwd,
@@ -96,8 +129,7 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 	if req.Timeout > 0 {
 		start.Timeout = durationpb.New(req.Timeout)
 	}
-	began := time.Now()
-	proc, err := e.StartProcess(ctx, start)
+	proc, err := e.startProcess(ctx, start)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +144,7 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 		return nil, err
 	}
 	res.TimedOut = res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
-	span.SetAttributes(AttrExitCode.Int(res.ExitCode))
+	span.SetAttributes(AttrExitCode.Int(res.ExitCode), AttrTimedOut.Bool(res.TimedOut))
 	return res, nil
 }
 
@@ -379,17 +411,7 @@ func (e *Env) WriteFileAt(ctx context.Context, p string, offset int64, r io.Read
 func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.FileMode, seekOffset int64) (err error) {
 	ctx, span := e.client.tracer.start(ctx, opWriteFile,
 		AttrActorName.String(e.id), AttrAtespace.String(e.atespace), AttrFilePath.String(p))
-	var counter *countingReader
-	if e.client.tracer.tracer != nil {
-		counter = &countingReader{r: r}
-		r = counter
-	}
-	defer func() {
-		if counter != nil {
-			span.SetAttributes(AttrFileSize.Int64(counter.n))
-		}
-		endSpan(span, err)
-	}()
+	defer func() { endSpan(span, err) }()
 	ctx = e.withEnv(ctx)
 	stream, err := e.conn.filesystem.WriteFile(ctx)
 	if err != nil {
@@ -440,8 +462,10 @@ func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.File
 		}
 	}
 
-	if _, err := stream.CloseAndRecv(); err != nil {
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
 		return fromGRPCError(err)
 	}
+	span.SetAttributes(AttrFileSize.Int64(resp.GetBytesWritten()))
 	return nil
 }

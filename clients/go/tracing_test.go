@@ -40,6 +40,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 // tracingFixture is the stack the SDK talks to, with the API server's gRPC
@@ -223,6 +224,15 @@ func TestTracingSpansWithProvider(t *testing.T) {
 	if exec[env.AttrCommandExecutable].AsString() != "echo" || exec[env.AttrExitCode].AsInt64() != 0 {
 		t.Errorf("exec attributes = %v, want executable echo and exit code 0", exec)
 	}
+	if !exec[env.AttrFirstCommand].AsBool() {
+		t.Errorf("first exec span missing ate_env.first_command=true: %v", exec)
+	}
+	if timedOut, ok := exec[env.AttrTimedOut]; !ok || timedOut.AsBool() {
+		t.Errorf("exec ate_env.timed_out = %v (present=%v), want false", timedOut, ok)
+	}
+	if _, nested := spans["ate-env-go-client.start_process"]; nested {
+		t.Error("Run opened a nested start_process span under exec")
+	}
 	for _, kv := range spans["ate-env-go-client.exec"].Attributes() {
 		if strings.Contains(kv.Value.Emit(), "secret-arg") {
 			t.Errorf("exec attribute %s carries the command line: %q", kv.Key, kv.Value.Emit())
@@ -322,7 +332,11 @@ func TestTracingWithCallerConnPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{Id: "own-conn"}); err != nil {
+	// A pre-existing stale traceparent in outgoing metadata is replaced, not duplicated.
+	seededCtx := metadata.NewOutgoingContext(t.Context(), metadata.Pairs(
+		"traceparent", "00-11111111111111111111111111111111-2222222222222222-01",
+	))
+	if _, err := c.Create(seededCtx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "own-conn"}); err != nil {
 		t.Fatal(err)
 	}
 	create := spansByName(rec, env.DefaultTraceServiceName)["ate-env-go-client.create_environment"]
@@ -511,5 +525,170 @@ func TestTracingCallerConnSpansMatchPythonClient(t *testing.T) {
 				t.Errorf("ate_env.rootfs_image = %q, want the reference without its tag", img.AsString())
 			}
 		}
+	}
+}
+
+// AC-G6 and G6: StartProcess opens a start_process span; ate_env.first_command
+// appears on the first exec or start_process span of an Env only; exec records
+// ate_env.timed_out; failed file operations omit ate_env.file.size, as Env in
+// Python does.
+func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T) {
+	f := newTracingFixture(t)
+	f.serveGuest(t, "sp-1")
+	f.serveGuest(t, "sp-2")
+	rec := tracetest.NewSpanRecorder()
+	c := f.client(t, env.ClientOptions{TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))})
+
+	ctx := t.Context()
+	e1, err := c.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "sp-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First command on e1 is StartProcess with an executable path, secret arg and env var.
+	proc, err := e1.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
+		Command: []string{"/bin/echo", "secret-arg"},
+		Env:     map[string]string{"API_KEY": "s3cr3t"},
+	})
+	if err != nil {
+		t.Fatalf("StartProcess: %v", err)
+	}
+	if _, err := proc.Wait(ctx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	// A leading NAME=value word in Command is also skipped by executableWords.
+	_, _ = e1.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
+		Command: []string{"API_KEY=s3cr3t", "/bin/echo", "secret-arg"},
+	})
+	// Second command on e1 is a timed-out Run: first_command must be absent, timed_out true.
+	resp, err := e1.Run(ctx, env.ShellRequest{Command: "sleep 10", Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("timed-out Run: %v", err)
+	}
+	if !resp.TimedOut {
+		t.Fatalf("resp.TimedOut = false, want true (%+v)", resp)
+	}
+
+	// Second environment e2: first Run gets first_command=true, second StartProcess does not.
+	e2, err := c.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "sp-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.Shell(ctx, "true"); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := e2.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{Command: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p2.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Failed WriteFile and ReadFile on an environment with no guest, and an
+	// early-closed ReadFile before EOF, omit ate_env.file.size.
+	if err := e2.WriteFile(ctx, "partial.txt", strings.NewReader("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	partialRC, err := e2.ReadFile(ctx, "partial.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head [3]byte
+	if _, err := io.ReadFull(partialRC, head[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := partialRC.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := c.Env("", "missing-guest")
+	if err := missing.WriteFile(ctx, "x.txt", strings.NewReader("payload"), 0o644); err == nil {
+		t.Fatal("WriteFile on missing guest succeeded")
+	}
+	if _, err := missing.ReadFile(ctx, "x.txt"); err == nil {
+		t.Fatal("ReadFile on missing guest succeeded")
+	}
+
+	prefix := env.DefaultTraceServiceName + "."
+	var spSpans, execSpans, wfSpans, rfSpans []sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		switch s.Name() {
+		case prefix + "start_process":
+			spSpans = append(spSpans, s)
+		case prefix + "exec":
+			execSpans = append(execSpans, s)
+		case prefix + "write_file":
+			wfSpans = append(wfSpans, s)
+		case prefix + "read_file":
+			rfSpans = append(rfSpans, s)
+		}
+	}
+	if len(spSpans) != 3 {
+		t.Fatalf("got %d start_process spans, want 3 (Run must not nest one)", len(spSpans))
+	}
+	if len(execSpans) != 2 {
+		t.Fatalf("got %d exec spans, want 2", len(execSpans))
+	}
+
+	sp1 := attrs(spSpans[0])
+	if spSpans[0].SpanKind() != trace.SpanKindInternal {
+		t.Errorf("start_process kind = %s, want internal", spSpans[0].SpanKind())
+	}
+	if sp1[env.AttrActorName].AsString() != "sp-1" || sp1[env.AttrCommandExecutable].AsString() != "echo" {
+		t.Errorf("sp-1 start_process attrs = %v, want actor sp-1 and executable echo", sp1)
+	}
+	if !sp1[env.AttrFirstCommand].AsBool() {
+		t.Errorf("sp-1 first start_process missing ate_env.first_command=true: %v", sp1)
+	}
+	if _, hasExit := sp1[env.AttrExitCode]; hasExit {
+		t.Errorf("start_process has ate_env.exit_code: %v", sp1)
+	}
+	for _, s := range spSpans[:2] {
+		if attrs(s)[env.AttrCommandExecutable].AsString() != "echo" {
+			t.Errorf("start_process executable = %q, want echo", attrs(s)[env.AttrCommandExecutable].AsString())
+		}
+		for _, kv := range s.Attributes() {
+			if strings.Contains(kv.Value.Emit(), "s3cr3t") || strings.Contains(kv.Value.Emit(), "secret-arg") {
+				t.Errorf("start_process leaked secret in %s=%q", kv.Key, kv.Value.Emit())
+			}
+		}
+	}
+	if _, ok := attrs(spSpans[1])[env.AttrFirstCommand]; ok {
+		t.Errorf("second start_process on sp-1 has ate_env.first_command: %v", attrs(spSpans[1]))
+	}
+
+	// Third command on sp-1 (the timed-out Run): no first_command, timed_out=true.
+	ex1 := attrs(execSpans[0])
+	if _, ok := ex1[env.AttrFirstCommand]; ok {
+		t.Errorf("later command on sp-1 has ate_env.first_command: %v", ex1)
+	}
+	if !ex1[env.AttrTimedOut].AsBool() {
+		t.Errorf("timed-out exec ate_env.timed_out = %v, want true", ex1[env.AttrTimedOut])
+	}
+
+	// On sp-2: first Run has first_command=true, second StartProcess omits it.
+	ex2 := attrs(execSpans[1])
+	if !ex2[env.AttrFirstCommand].AsBool() {
+		t.Errorf("first exec on sp-2 missing ate_env.first_command=true: %v", ex2)
+	}
+	sp2 := attrs(spSpans[2])
+	if _, ok := sp2[env.AttrFirstCommand]; ok {
+		t.Errorf("second command (start_process) on sp-2 has ate_env.first_command: %v", sp2)
+	}
+
+	if len(wfSpans) != 2 || len(rfSpans) != 2 {
+		t.Fatalf("file spans = (%d, %d), want (2, 2)", len(wfSpans), len(rfSpans))
+	}
+	if got := attrs(wfSpans[0])[env.AttrFileSize].AsInt64(); got != int64(len("hello world")) {
+		t.Errorf("complete write_file size = %d, want 11", got)
+	}
+	if _, ok := attrs(wfSpans[1])[env.AttrFileSize]; ok {
+		t.Errorf("failed write_file recorded ate_env.file.size: %v", attrs(wfSpans[1]))
+	}
+	if _, ok := attrs(rfSpans[0])[env.AttrFileSize]; ok {
+		t.Errorf("early-closed read_file recorded ate_env.file.size: %v", attrs(rfSpans[0]))
+	}
+	if _, ok := attrs(rfSpans[1])[env.AttrFileSize]; ok {
+		t.Errorf("failed read_file recorded ate_env.file.size: %v", attrs(rfSpans[1]))
 	}
 }

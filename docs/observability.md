@@ -22,7 +22,7 @@ imported, no exporter is created and no collector is registered.
 | ate-env-api | `--enable-tracing` | `--metrics-listen-addr`, for example `:9090` (default empty: metrics off) |
 | `ate-env manifest` | `--enable-tracing`, `--otlp-endpoint`, `--otlp-insecure` | `--metrics-port` (adds a `metrics` container and Service port and `prometheus.io` scrape annotations) |
 | ate-env-guest | `--enable-tracing` in the ActorTemplate's guest arguments | `--enable-metrics` (serves `/metrics` on the guest listener, without authentication; reachable only inside the environment and through the atenet router, see [metrics.md](metrics.md)) |
-| Go client (`clients/go`) | `ClientOptions.TracerProvider` (any `trace.TracerProvider`; `env.NewTracerProvider(ctx, name)` is the OTLP default) and `ClientOptions.TraceServiceName` (default `ate-env-go-client`) | none |
+| Go client (`clients/go`) | `ClientOptions.TracerProvider` (any `trace.TracerProvider`; `env.NewTracerProvider(ctx, name)` is the OTLP default) and `ClientOptions.TraceServiceName` (default `ate-env-go-client`) | `ClientOptions.MetricsRegisterer` (any `prometheus.Registerer`, such as `prometheus.DefaultRegisterer` or `prometheus.NewRegistry()`; nil registers nothing) |
 | swebench-loader | `swebench-loader run -enable-tracing` | none (the JSONL events are its record) |
 
 Install the Python extras with:
@@ -87,8 +87,10 @@ ate_env_fleet.run                                          ate-env-fleet
 
 A Go client's spans take the place of the `ate_env_client.*` ones, named
 `<TraceServiceName>.<operation>` (`create_environment`, `get_environment`,
-`suspend_environment`, `delete_environment`, `exec`, `read_file`,
-`write_file`), as children of whatever span the caller's context carries.
+`suspend_environment`, `delete_environment`, `get_server_info`,
+`get_image_status`, `ensure_image_template`, `list_placement_domains`,
+`warm_image`, `start_process`, `exec`, `read_file`, `write_file`), as children
+of whatever span the caller's context carries.
 
 The swebench loader writes each event when its operation finishes, so with
 `-enable-tracing` every event becomes one span recorded after the fact, timed
@@ -114,7 +116,8 @@ Substrate identities use Substrate's own `ateattr` keys (`ate.actor.name` for
 the environment id, `ate.atespace`, `ate.template.name`), so spans join
 Substrate's logs and traces without a mapping. Client-only fields use
 `ate_env.*` (`ate_env.rootfs_image`, `ate_env.command.executable`,
-`ate_env.exit_code`, `ate_env.file.path`, `ate_env.file.size`). The loader's
+`ate_env.first_command`, `ate_env.exit_code`, `ate_env.timed_out`,
+`ate_env.file.path`, `ate_env.file.size`). The loader's
 spans carry its own `run`, `env` and `instance`.
 
 ## Metrics
@@ -128,7 +131,9 @@ spans carry its own `run`, `env` and `instance`.
   `ate_env_fleet_release_failures_total`, `ate_env_fleet_warm_replicas`,
   `ate_env_client_{acquire,exec,suspend,warm_claim,release}_seconds`, and the
   claim sub-phases `ate_env_client_{slot_wait,wire_claim,ready_to_first_command}_seconds`):
-  the [Python client README](../clients/python/README.md#observability).
+  the [Python client README](../clients/python/README.md#observability). In Go,
+  `ClientOptions.MetricsRegisterer` registers `ate_env_client_{exec,suspend}_seconds`
+  and `ate_env_client_ready_to_first_command_seconds` (`source="direct"`).
 
 Collectors register on the first metrics-enabled `Observer`, never at import,
 and the NeMo Gym provider never creates one, so a provider process has no
@@ -144,6 +149,7 @@ Labels carry a bounded vocabulary only:
 | `backend` | `substrate`, `mock` |
 | `family` | the task's repo family (`ate_env_rl.observability.repo_family`), never the image tag; at most `MAX_FAMILIES` (64) values per process, then `other` |
 | `strategy`, `status` | the fleet strategy; `ok`, `error`, or `cancelled` (a cancelled or interrupted block) |
+| `source` | `warm_pool`, `cold_create`, `mock`, `direct` |
 | `method`, `code` | registered gRPC full method names and status codes |
 | `atespace`, `state`, `outcome`, `exit_class` | as documented in [metrics.md](metrics.md) |
 

@@ -328,3 +328,15 @@ Append-only. Each entry: date, who, what, why.
   leave it one float step off the 0.01 grid; `summary()` prints the same values, so the `.txt` and
   `.json` of one `write()` agree. P-8 is no longer proposed: `test_phase_stats_consistent` checks
   it, and the AC-7 command runs it.
+- 2026-11-10, Go client parity (PR 6, D6 of `docs/plans/go-client-parity/README.md`): the Go client
+  now emits `start_process` on `Env.StartProcess` (un-nested under `Run`), sets
+  `ate_env.first_command=true` on the first `exec` or `start_process` of an `Env`, sets
+  `ate_env.timed_out` on `exec` (pairing `Env.Run` with `SandboxHandle.exec`; Python's direct
+  `Env.shell` still emits `ate_env_client.shell` without `ate_env.timed_out`), records
+  `ate_env.file.size` only when a file read reaches `io.EOF` or a write finishes without error
+  (matching `ate_env_rl.Env`), and registers `ate_env_client_exec_seconds`,
+  `ate_env_client_suspend_seconds` and `ate_env_client_ready_to_first_command_seconds`
+  (`source="direct"`) when `ClientOptions.MetricsRegisterer` is set. Remaining AC-17.2 differences:
+  `ate_env.run_id` is Python fleet-only, `Env.shell` vs `Env.Run` (`ate_env.timed_out` and span
+  name), and Go backfilling server-resolved `ate.template.*` on `Create`, `ImageStatus` and
+  `EnsureImageTemplate` (to be reconciled in PR 7's parity vectors).

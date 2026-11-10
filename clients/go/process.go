@@ -45,7 +45,13 @@ func (p *Process) Info(ctx context.Context) (*ateenvv1alpha.Process, error) {
 }
 
 // StartProcess launches a process and returns a handle to it.
-func (e *Env) StartProcess(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (*Process, error) {
+func (e *Env) StartProcess(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (_ *Process, err error) {
+	ctx, span := e.startCommandSpan(ctx, opStartProcess, executableWords(req.GetCommand()))
+	defer func() { endSpan(span, err) }()
+	return e.startProcess(ctx, req)
+}
+
+func (e *Env) startProcess(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (*Process, error) {
 	pb, err := e.conn.process.StartProcess(e.withEnv(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)

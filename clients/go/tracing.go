@@ -50,7 +50,9 @@ const (
 	AttrTemplateAtespace  = attribute.Key("ate.template.atespace")
 	AttrRootfsImage       = attribute.Key("ate_env.rootfs_image")
 	AttrCommandExecutable = attribute.Key("ate_env.command.executable")
+	AttrFirstCommand      = attribute.Key("ate_env.first_command")
 	AttrExitCode          = attribute.Key("ate_env.exit_code")
+	AttrTimedOut          = attribute.Key("ate_env.timed_out")
 	AttrFilePath          = attribute.Key("ate_env.file.path")
 	AttrFileSize          = attribute.Key("ate_env.file.size")
 )
@@ -61,6 +63,7 @@ const (
 	opGetEnvironment       = "get_environment"
 	opSuspendEnvironment   = "suspend_environment"
 	opDeleteEnvironment    = "delete_environment"
+	opStartProcess         = "start_process"
 	opExec                 = "exec"
 	opReadFile             = "read_file"
 	opWriteFile            = "write_file"
@@ -163,8 +166,17 @@ func (t clientTracer) open(ctx context.Context, op string, kind trace.SpanKind, 
 	if t.inject {
 		carrier := propagation.MapCarrier{}
 		tracePropagator.Inject(ctx, carrier)
-		for k, v := range carrier {
-			ctx = metadata.AppendToOutgoingContext(ctx, k, v)
+		if len(carrier) > 0 {
+			md, ok := metadata.FromOutgoingContext(ctx)
+			if ok {
+				md = md.Copy()
+			} else {
+				md = metadata.MD{}
+			}
+			for k, v := range carrier {
+				md.Set(k, v)
+			}
+			ctx = metadata.NewOutgoingContext(ctx, md)
 		}
 	}
 	return ctx, span
@@ -305,6 +317,13 @@ func executable(commandLine string) string {
 	if !ok {
 		return ""
 	}
+	return executableWords(words)
+}
+
+// executableWords returns the base name of the first word in words after any
+// leading NAME=value assignments, matching executable_attr on a sequence in
+// Python.
+func executableWords(words []string) string {
 	for _, w := range words {
 		if envAssignment.MatchString(w) {
 			continue
@@ -373,8 +392,10 @@ func shellWords(s string) (words []string, ok bool) {
 	return words, true
 }
 
-// spanReader counts the bytes read through it and ends its span, with
-// env.file.size, on EOF, on a read error or on Close, whichever comes first.
+// spanReader counts the bytes read through it and ends its span on EOF, on a
+// read error or on Close, whichever comes first; ate_env.file.size is set
+// only when the stream reaches io.EOF without an error, matching
+// ate_env_rl.Env.read_file.
 type spanReader struct {
 	io.ReadCloser
 	span trace.Span
@@ -386,34 +407,24 @@ func (r *spanReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	r.n += int64(n)
 	if err == io.EOF {
-		r.finish(nil)
+		r.finish(nil, true)
 	} else if err != nil {
-		r.finish(err)
+		r.finish(err, false)
 	}
 	return n, err
 }
 
 func (r *spanReader) Close() error {
 	err := r.ReadCloser.Close()
-	r.finish(nil)
+	r.finish(err, false)
 	return err
 }
 
-func (r *spanReader) finish(err error) {
+func (r *spanReader) finish(err error, complete bool) {
 	r.once.Do(func() {
-		r.span.SetAttributes(AttrFileSize.Int64(r.n))
+		if complete && err == nil {
+			r.span.SetAttributes(AttrFileSize.Int64(r.n))
+		}
 		endSpan(r.span, err)
 	})
-}
-
-// countingReader counts the bytes read through it.
-type countingReader struct {
-	r io.Reader
-	n int64
-}
-
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
 }

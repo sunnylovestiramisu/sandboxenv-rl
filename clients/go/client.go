@@ -28,6 +28,7 @@ import (
 	"time"
 
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -61,18 +62,28 @@ type ClientOptions struct {
 	// TracerProvider, when set, makes the client emit OpenTelemetry spans
 	// named "<TraceServiceName>.<operation>" (create_environment,
 	// get_environment, suspend_environment, delete_environment,
-	// get_server_info, exec, read_file, write_file) with ate.* / ate_env.*
-	// attributes, the same as the Python client's, and send their W3C
-	// trace context to ate-env-api so its spans join the same trace. Nil
-	// means no spans; the client never creates an exporter itself (see
-	// NewTracerProvider). With GRPCConn set, the client puts the trace
-	// context into each call's metadata instead of adding the otelgrpc
-	// handler to a connection it does not own.
+	// get_server_info, get_image_status, ensure_image_template,
+	// list_placement_domains, warm_image, start_process, exec, read_file,
+	// write_file) with ate.* / ate_env.* attributes, the same as the Python
+	// client's, and send their W3C trace context to ate-env-api so its spans
+	// join the same trace. Nil means no spans; the client never creates an
+	// exporter itself (see NewTracerProvider). With GRPCConn set, the client
+	// puts the trace context into each call's metadata instead of adding the
+	// otelgrpc handler to a connection it does not own.
 	TracerProvider trace.TracerProvider
 
 	// TraceServiceName prefixes span names and names the instrumentation
 	// scope. Empty means DefaultTraceServiceName.
 	TraceServiceName string
+
+	// MetricsRegisterer, when set, registers the client's Prometheus
+	// histograms on it: ate_env_client_exec_seconds{status},
+	// ate_env_client_suspend_seconds{status}, and
+	// ate_env_client_ready_to_first_command_seconds{status,source} with
+	// source="direct". Registration is idempotent per registry, so two
+	// Clients sharing one registerer share the collectors. Nil registers
+	// nothing and touches no global registry.
+	MetricsRegisterer prometheus.Registerer
 
 	// Connections is how many connections the client dials to Endpoint,
 	// each its own grpc.ClientConn and TCP connection; 0 and 1 mean one.
@@ -108,6 +119,7 @@ type Client struct {
 	// Client call, so neither skews the other's round robin.
 	nextEnv, nextCall atomic.Uint64
 	tracer            clientTracer
+	metrics           clientMetrics
 	// pollMin and pollMax override the polling bounds of ShellRequest.Poll
 	// in tests (SetPollBoundsForTest); zero uses the defaults.
 	pollMin, pollMax time.Duration
@@ -159,28 +171,34 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	if opts.GRPCConn != nil {
 		c.conns = []*conn{newConn(opts.GRPCConn)}
-		return c, nil
-	}
-	target := strings.TrimPrefix(endpoint, "http://")
-	target = strings.TrimPrefix(target, "https://")
-	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	if opts.AuthToken != "" {
-		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerCredentials{token: opts.AuthToken}))
-	}
-	if opts.TracerProvider != nil {
-		dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
-			otelgrpc.WithTracerProvider(opts.TracerProvider),
-			otelgrpc.WithPropagators(tracePropagator))))
-	}
-	dialOpts = append(dialOpts, opts.DialOptions...)
-	for range max(opts.Connections, 1) {
-		cc, err := grpc.NewClient(target, dialOpts...)
-		if err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("env: connecting to gRPC %s: %w", target, err)
+	} else {
+		target := strings.TrimPrefix(endpoint, "http://")
+		target = strings.TrimPrefix(target, "https://")
+		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+		if opts.AuthToken != "" {
+			dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerCredentials{token: opts.AuthToken}))
 		}
-		c.conns = append(c.conns, newConn(cc))
+		if opts.TracerProvider != nil {
+			dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+				otelgrpc.WithTracerProvider(opts.TracerProvider),
+				otelgrpc.WithPropagators(tracePropagator))))
+		}
+		dialOpts = append(dialOpts, opts.DialOptions...)
+		for range max(opts.Connections, 1) {
+			cc, err := grpc.NewClient(target, dialOpts...)
+			if err != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("env: connecting to gRPC %s: %w", target, err)
+			}
+			c.conns = append(c.conns, newConn(cc))
+		}
 	}
+	metrics, err := newClientMetrics(opts.MetricsRegisterer)
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	c.metrics = metrics
 	return c, nil
 }
 
@@ -299,7 +317,11 @@ func (c *Client) SuspendLocal(ctx context.Context, atespace, id string) error {
 
 func (c *Client) suspend(ctx context.Context, cn *conn, atespace, id string, mode ateenvv1alpha.SuspendMode) (err error) {
 	ctx, span := c.tracer.startRPC(ctx, opSuspendEnvironment, "SuspendEnvironment", AttrActorName.String(id), AttrAtespace.String(atespace))
-	defer func() { endSpan(span, err) }()
+	began := time.Now()
+	defer func() {
+		c.metrics.observeSuspend(ctx, time.Since(began), err)
+		endSpan(span, err)
+	}()
 	req := &ateenvv1alpha.SuspendEnvironmentRequest{
 		Id:       id,
 		Atespace: atespace,
@@ -459,9 +481,10 @@ func (c *Client) envOn(cn *conn, atespace, id string) *Env {
 		atespace = DefaultAtespace
 	}
 	return &Env{
-		id:       id,
-		atespace: atespace,
-		client:   c,
-		conn:     cn,
+		id:        id,
+		atespace:  atespace,
+		client:    c,
+		conn:      cn,
+		createdAt: time.Now(),
 	}
 }
