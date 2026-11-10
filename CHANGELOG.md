@@ -22,6 +22,11 @@ user needs to know across them.
   of an image reach a node only when an environment boots there: that is the
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
+### Fixed
+- Clients: The executable attribute (`ate_env.command.executable`) splits shell
+  operators (like `;` and `&`) and skips comments, so it never records an environment
+  variable assignment when the command follows a shell operator or comment.
+
 ### Added
 - `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to
   the dataset (under the plan's own file name, so the run's `placement` label

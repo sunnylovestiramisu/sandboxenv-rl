@@ -312,78 +312,206 @@ var envAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
 // "'my prog' arg" gives "my prog". A line that cannot be split (an
 // unterminated quote, a trailing backslash) gives "", which records no
 // attribute. The rest of the line is never recorded.
+var (
+	ops = []string{"\n", "(", ")", ";", ";;", "&", "&&", "|", "||",
+		"<", ">", ">>", "<<", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|", "<<-"}
+	redirBases = []string{"<", ">", ">>", "<<", "<<<", ">&", "<&", "<>", ">|", "<<-"}
+)
+
+func isOpPrefix(op string) bool {
+	i := 0
+	for i < len(op) && op[i] >= '0' && op[i] <= '9' {
+		i++
+	}
+	digits := op[:i]
+	base := op[i:]
+	if len(digits) > 0 {
+		if len(base) == 0 {
+			return true
+		}
+		for _, r := range redirBases {
+			if strings.HasPrefix(r, base) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, o := range ops {
+		if strings.HasPrefix(o, base) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRedirectionOp(op string) bool {
+	i := 0
+	for i < len(op) && op[i] >= '0' && op[i] <= '9' {
+		i++
+	}
+	base := op[i:]
+	for _, r := range redirBases {
+		if r == base {
+			return true
+		}
+	}
+	return op == "&>" || op == "&>>"
+}
+
 func executable(commandLine string) string {
 	words, ok := shellWords(commandLine)
 	if !ok {
 		return ""
 	}
-	return executableWords(words)
+	return executableWordsFromShell(words)
 }
 
-// executableWords returns the base name of the first word in words after any
-// leading NAME=value assignments, matching executable_attr on a sequence in
-// Python.
-func executableWords(words []string) string {
-	for _, w := range words {
-		if envAssignment.MatchString(w) {
-			continue
+func executableWordsFromShell(words []string) string {
+	inCommand := false
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		switch w {
+		case "\n", "(", "{":
+			if inCommand {
+				return ""
+			}
+		case ";", "&", "|", "&&", "||", ";;", ")":
+			return ""
+		default:
+			if isRedirectionOp(w) {
+				inCommand = true
+				i++ // skip target
+				continue
+			}
+			if envAssignment.MatchString(w) {
+				inCommand = true
+				continue
+			}
+			if strings.Contains(w, "=") || strings.Contains(w, "$") || strings.Contains(w, "`") {
+				return ""
+			}
+			return w[strings.LastIndex(w, "/")+1:]
 		}
-		return w[strings.LastIndex(w, "/")+1:]
 	}
 	return ""
 }
 
-// shellWords splits s into words like Python's shlex.split in POSIX mode:
-// blanks separate words; single quotes keep everything literal; inside
-// double quotes a backslash escapes only '"' and '\\'; outside quotes a
-// backslash escapes the next character. ok is false for an unterminated
-// quote or a trailing backslash.
+func executableWords(words []string) string {
+	if len(words) == 0 {
+		return ""
+	}
+	w := words[0]
+	if strings.Contains(w, "=") || strings.Contains(w, "$") || strings.Contains(w, "`") {
+		return ""
+	}
+	return w[strings.LastIndex(w, "/")+1:]
+}
+
 func shellWords(s string) (words []string, ok bool) {
 	var cur strings.Builder
 	inWord := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		switch c {
+		case ' ', '\t', '\r':
 			if inWord {
 				words = append(words, cur.String())
 				cur.Reset()
 				inWord = false
 			}
-		case c == '\\':
+		case '\n', '(', ')', ';', '&', '|', '<', '>':
+			isDigitCur := true
+			curStr := cur.String()
+			for j := 0; j < len(curStr); j++ {
+				if curStr[j] < '0' || curStr[j] > '9' {
+					isDigitCur = false
+					break
+				}
+			}
+
+			var opStr string
+			if (c == '<' || c == '>') && len(curStr) > 0 && isDigitCur {
+				opStr = curStr + string(c)
+				cur.Reset()
+				inWord = false
+			} else {
+				if inWord {
+					words = append(words, cur.String())
+					cur.Reset()
+					inWord = false
+				}
+				opStr = string(c)
+			}
+
+			for i+1 < len(s) && isOpPrefix(opStr+string(s[i+1])) {
+				opStr += string(s[i+1])
+				i++
+			}
+			words = append(words, opStr)
+		case '\\':
 			if i+1 >= len(s) {
 				return nil, false
 			}
+			if s[i+1] == '\n' {
+				i++
+				continue
+			}
+			if !inWord {
+				inWord = true
+			}
+			cur.WriteByte(s[i+1])
 			i++
-			cur.WriteByte(s[i])
-			inWord = true
-		case c == '\'':
+		case '\'':
 			end := strings.IndexByte(s[i+1:], '\'')
 			if end < 0 {
 				return nil, false
 			}
+			if !inWord {
+				inWord = true
+			}
 			cur.WriteString(s[i+1 : i+1+end])
 			i += end + 1
-			inWord = true
-		case c == '"':
+		case '"':
+			if !inWord {
+				inWord = true
+			}
 			closed := false
 			for i++; i < len(s); i++ {
 				if s[i] == '"' {
 					closed = true
 					break
 				}
-				if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\') {
-					i++
+				if s[i] == '\\' && i+1 < len(s) {
+					next := s[i+1]
+					if next == '"' || next == '\\' || next == '$' || next == '\n' || next == '`' {
+						if next != '\n' {
+							cur.WriteByte(next)
+						}
+						i++
+						continue
+					}
 				}
 				cur.WriteByte(s[i])
 			}
 			if !closed {
 				return nil, false
 			}
-			inWord = true
+		case '#':
+			if !inWord {
+				end := strings.IndexByte(s[i:], '\n')
+				if end < 0 {
+					i = len(s)
+				} else {
+					i += end - 1
+				}
+			} else {
+				cur.WriteByte(c)
+			}
 		default:
+			if !inWord {
+				inWord = true
+			}
 			cur.WriteByte(c)
-			inWord = true
 		}
 	}
 	if inWord {
@@ -392,10 +520,6 @@ func shellWords(s string) (words []string, ok bool) {
 	return words, true
 }
 
-// spanReader counts the bytes read through it and ends its span on EOF, on a
-// read error or on Close, whichever comes first; ate_env.file.size is set
-// only when the stream reaches io.EOF without an error, matching
-// ate_env_rl.Env.read_file.
 type spanReader struct {
 	io.ReadCloser
 	span trace.Span

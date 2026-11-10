@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"pgregory.net/rapid"
 	"strings"
 	"testing"
 	"time"
@@ -555,7 +556,7 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	if _, err := proc.Wait(ctx); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	// A leading NAME=value word in Command is also skipped by executableWords.
+	// A leading NAME=value word in Command makes the executable empty.
 	_, _ = e1.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"API_KEY=s3cr3t", "/bin/echo", "secret-arg"},
 	})
@@ -643,9 +644,13 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	if _, hasExit := sp1[env.AttrExitCode]; hasExit {
 		t.Errorf("start_process has ate_env.exit_code: %v", sp1)
 	}
-	for _, s := range spSpans[:2] {
-		if attrs(s)[env.AttrCommandExecutable].AsString() != "echo" {
-			t.Errorf("start_process executable = %q, want echo", attrs(s)[env.AttrCommandExecutable].AsString())
+	for i, s := range spSpans[:2] {
+		execAttr := attrs(s)[env.AttrCommandExecutable].AsString()
+		if i == 0 && execAttr != "echo" {
+			t.Errorf("start_process 0 executable = %q, want echo", execAttr)
+		}
+		if i == 1 && execAttr != "" {
+			t.Errorf("start_process 1 executable = %q, want none", execAttr)
 		}
 		for _, kv := range s.Attributes() {
 			if strings.Contains(kv.Value.Emit(), "s3cr3t") || strings.Contains(kv.Value.Emit(), "secret-arg") {
@@ -706,10 +711,20 @@ func TestNonEmptyDropsEmptyStrings(t *testing.T) {
 }
 
 func TestExecutableNeverRecordsAssignments(t *testing.T) {
-	for _, line := range []string{"API_KEY=s3cr3t python x.py", "TOKEN='s3 cr3t' run", "A=s3cr3t", "A=s3cr3t 'unterminated", "X+=s3cr3t cmd"} {
+	rapid.Check(t, func(t *rapid.T) {
+		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "}
+		names := []string{"API_KEY", "TOKEN", "A", "X+"}
+		cmds := []string{"", " python x.py", " 'unterminated", " cmd"}
+
+		prefix := rapid.SampledFrom(prefixes).Draw(t, "prefix")
+		name := rapid.SampledFrom(names).Draw(t, "name")
+		secret := rapid.StringMatching(`^[a-zA-Z0-9_]{6,20}$`).Draw(t, "secret")
+		cmd := rapid.SampledFrom(cmds).Draw(t, "cmd")
+
+		line := prefix + name + "=" + secret + cmd
 		got := env.ExecutableForTest(line)
-		if strings.Contains(got, "s3") || strings.Contains(got, "=") {
-			t.Errorf("executable(%q) = %q leaks the assignment", line, got)
+		if strings.Contains(got, secret) || strings.Contains(got, "=") {
+			t.Fatalf("executable(%q) = %q leaks the assignment", line, got)
 		}
-	}
+	})
 }

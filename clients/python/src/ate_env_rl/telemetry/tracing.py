@@ -42,7 +42,6 @@ import contextlib
 import logging
 import os
 import re
-import shlex
 import threading
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any
@@ -395,6 +394,127 @@ def image_ref_attr(ref: str | None) -> str | None:
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
+_OPS = frozenset(["\n", "(", ")", ";", ";;", "&", "&&", "|", "||",
+       "<", ">", ">>", "<<", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|", "<<-"])
+_REDIR_BASES = frozenset(["<", ">", ">>", "<<", "<<<", ">&", "<&", "<>", ">|", "<<-"])
+
+def _is_op_prefix(op: str) -> bool:
+    digits = ""
+    base = op
+    for i, c in enumerate(op):
+        if not c.isdigit():
+            digits = op[:i]
+            base = op[i:]
+            break
+    else:
+        digits = op
+        base = ""
+    if digits:
+        if not base:
+            return True
+        return any(r.startswith(base) for r in _REDIR_BASES)
+    else:
+        return any(o.startswith(base) for o in _OPS)
+
+def _is_redirection_op(op: str) -> bool:
+    base = op
+    for i, c in enumerate(op):
+        if not c.isdigit():
+            op[:i]
+            base = op[i:]
+            break
+    else:
+        base = ""
+    return base in _REDIR_BASES or op in ("&>", "&>>")
+
+def _tokenize_sh(s: str) -> list[str] | None:
+    words = []
+    cur = []
+    in_word = False
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\':
+            if i + 1 >= n:
+                return None
+            if s[i+1] == '\n':
+                i += 2
+                continue
+            if not in_word:
+                in_word = True
+            cur.append(s[i+1])
+            i += 2
+        elif c == "'":
+            end = s.find("'", i + 1)
+            if end < 0:
+                return None
+            if not in_word:
+                in_word = True
+            cur.append(s[i+1:end])
+            i = end + 1
+        elif c == '"':
+            if not in_word:
+                in_word = True
+            i += 1
+            closed = False
+            while i < n:
+                if s[i] == '"':
+                    closed = True
+                    i += 1
+                    break
+                if s[i] == '\\' and i + 1 < n and s[i+1] in ('"', '\\', '$', '\n', '`'):
+                    if s[i+1] == '\n':
+                        pass
+                    else:
+                        cur.append(s[i+1])
+                    i += 2
+                else:
+                    cur.append(s[i])
+                    i += 1
+            if not closed:
+                return None
+        elif c in ' \t\r':
+            if in_word:
+                words.append(''.join(cur))
+                cur.clear()
+                in_word = False
+            i += 1
+        elif c in '\n();&|<>':
+            if c in '<>' and cur and all(x.isdigit() for x in cur):
+                op_str = ''.join(cur) + c
+                cur.clear()
+                in_word = False
+            else:
+                if in_word:
+                    words.append(''.join(cur))
+                    cur.clear()
+                    in_word = False
+                op_str = c
+            
+            while i + 1 < n:
+                next_c = s[i+1]
+                if _is_op_prefix(op_str + next_c):
+                    op_str += next_c
+                    i += 1
+                else:
+                    break
+            words.append(op_str)
+            i += 1
+        elif c == '#' and not in_word:
+            end = s.find('\n', i)
+            if end < 0:
+                break
+            i = end
+        else:
+            if not in_word:
+                in_word = True
+            cur.append(c)
+            i += 1
+    if in_word:
+        words.append(''.join(cur))
+    return words
+
 def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
     """The executable name of a command (never its arguments), for span attributes.
 
@@ -403,16 +523,39 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
     command that cannot be split like a shell would split it yields None.
     """
     if isinstance(command, (list, tuple)):
-        words = [str(w) for w in command]
-    else:
-        try:
-            words = shlex.split(command)
-        except ValueError:
+        if not command:
             return None
-    for word in words:
-        if _ENV_ASSIGNMENT.match(word):
+        w_str = str(command[0])
+        if '=' in w_str or '$' in w_str or '`' in w_str:
+            return None
+        return w_str.rsplit("/", 1)[-1] or None
+
+    words = _tokenize_sh(command)
+    if words is None:
+        return None
+
+    i = 0
+    in_command = False
+    while i < len(words):
+        w = words[i]
+        if w in ('\n', '(', '{'):
+            if in_command:
+                return None
+            i += 1
             continue
-        return word.rsplit("/", 1)[-1] or None
+        if _is_redirection_op(w):
+            in_command = True
+            i += 2
+            continue
+        if w in (';', '&', '|', '&&', '||', ';;', ')'):
+            return None
+        if _ENV_ASSIGNMENT.match(w):
+            in_command = True
+            i += 1
+            continue
+        if '=' in w or '$' in w or '`' in w:
+            return None
+        return w.rsplit("/", 1)[-1] or None
     return None
 
 

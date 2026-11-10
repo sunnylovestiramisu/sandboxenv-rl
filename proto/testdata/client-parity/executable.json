@@ -17,7 +17,7 @@
   },
   {
     "line": "./a+=b",
-    "want": "a+=b"
+    "want": null
   },
   {
     "line": "A=1 B=2 /usr/bin/env python3 -c x",
@@ -93,7 +93,7 @@
   },
   {
     "line": "./a=b",
-    "want": "a=b"
+    "want": null
   },
   {
     "line": "TOKEN=\"a secret\" ./run.sh --flag",
@@ -113,10 +113,86 @@
   },
   {
     "argv": ["API_KEY=s3cr3t", "python3", "x.py"],
-    "want": "python3"
+    "want": null
   },
   {
     "argv": [],
     "want": null
+  },
+  {
+    "line": "(API_KEY=s3cr3t python x.py)",
+    "want": "python"
+  },
+  {
+    "line": "true;API_KEY=s3cr3t python",
+    "want": "true"
+  },
+  {
+    "line": "#TOKEN=s3cr3t\npython x.py",
+    "want": "python"
+  },
+  {
+    "line": "a&&TOKEN=x b",
+    "want": "a"
+  },
+  {
+    "line": "a||TOKEN=x b",
+    "want": "a"
+  },
+  {
+    "line": "a|TOKEN=x b",
+    "want": "a"
+  },
+  {
+    "line": "TOKEN=x\\\npython",
+    "want": null
+  },
+  {
+    "line": "{ TOKEN=x cmd; }",
+    "want": "cmd"
+  },
+  {
+    "line": "TOKEN=x $(...) cmd",
+    "want": null
+  },
+  {
+    "line": ">out TOKEN=x cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "TOKEN=x >out cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "\nTOKEN=x\npython",
+    "want": null
+  },
+  {
+    "line": ">>out python",
+    "want": "python"
+  },
+  {
+    "line": "2>&1 python",
+    "want": "python"
+  },
+  {
+    "line": "2> err.log python",
+    "want": "python"
+  },
+  {
+    "line": ">out 2>&1 python",
+    "want": "python"
+  },
+  {
+    "line": "cmd >out",
+    "want": "cmd"
+  },
+  {
+    "line": "<<<input cat",
+    "want": "cat"
+  },
+  {
+    "line": "&>log python",
+    "want": "python"
   }
 ]

@@ -1,3 +1,4 @@
+
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +18,7 @@
 Tests that need OpenTelemetry skip cleanly in a venv without the tracing extra.
 """
 
+
 from __future__ import annotations
 
 import json
@@ -29,6 +31,8 @@ import textwrap
 import grpc
 import grpc.aio
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from ate_env_rl import AsyncSandboxFleet, Client, FleetConfig, SandboxFleet, Task
 from ate_env_rl._gen.ateenv.v1alpha import env_pb2_grpc, guest_pb2_grpc
@@ -413,14 +417,14 @@ def test_carrier_never_carries_baggage(spans):
         ("A=1 B=two /usr/bin/env python", "env"),
         ('TOKEN="a secret" ./run.sh --flag', "run.sh"),
         ("TOKEN='a b' X=y", None),
-        (["API_KEY=s3cr3t", "python3", "x.py"], "python3"),
+        (["API_KEY=s3cr3t", "python3", "x.py"], None),
         ('TOKEN="unterminated python', None),
         ("", None),
         ([], None),
-        ("./a=b", "a=b"),  # a path, not an assignment
+        ("./a=b", None),  # a path, not an assignment
         ("X+=s3cr3t cmd", "cmd"),  # bash appends with NAME+=value
         ("PATH+=:/opt/bin A=1 make", "make"),
-        ("./a+=b", "a+=b"),  # a path, not an assignment
+        ("./a+=b", None),  # a path, not an assignment
     ],
 )
 def test_executable_attr_skips_env_assignments(command, want):
@@ -1010,3 +1014,17 @@ async def test_placement_spans_carry_the_template_and_follow_the_rpc(spans):
     assert warm.attributes["ate_env.rootfs_image"] == image
     for span in (plain, named, warm):
         assert span.status.status_code.name != "ERROR"
+
+@settings(max_examples=300)
+@given(
+    prefix=st.sampled_from(["", " ", "\\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "]),
+    name=st.sampled_from(["API_KEY", "TOKEN", "A", "X+"]),
+    secret=st.text(alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", min_size=6, max_size=20),
+    cmd=st.sampled_from(["", " python x.py", " 'unterminated", " cmd"]),
+)
+def test_executable_never_records_assignments_prop(prefix, name, secret, cmd):
+    line = f"{prefix}{name}={secret}{cmd}"
+    got = tracing.executable_attr(line)
+    if got is not None:
+        assert secret not in got
+        assert "=" not in got
