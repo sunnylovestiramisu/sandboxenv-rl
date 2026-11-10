@@ -49,19 +49,6 @@ class _FakeRpcError(grpc.RpcError):
         return self._trailing
 
 
-@pytest.mark.parametrize("code, reason", [
-    (grpc.StatusCode.FAILED_PRECONDITION, START_FAILURE_CRASHED),
-    (grpc.StatusCode.RESOURCE_EXHAUSTED, START_FAILURE_NO_CAPACITY),
-])
-def test_marked_calls_map_to_a_retryable_start_error(code, reason):
-    err = map_rpc_error(_FakeRpcError(code, "env cannot start", ((START_FAILURE_KEY, reason),)))
-    assert isinstance(err, SandboxStartError)
-    assert err.reason == reason
-    assert err.retryable
-    assert err.status == f"grpc {code.name}"
-    assert str(err) == "env cannot start"
-
-
 def test_bytes_trailer_values_are_decoded():
     err = map_rpc_error(_FakeRpcError(
         grpc.StatusCode.FAILED_PRECONDITION, "x", ((START_FAILURE_KEY, b"crashed"),)))

@@ -281,6 +281,8 @@ user needs to know across them.
   drafts release notes and cuts draft releases (see [docs/release.md](docs/release.md)).
 
 ### Changed
+- Python client: server.address drops a dns:/// or passthrough:/// scheme, as the Go client does.
+- Go and Python clients: conformance vectors (`proto/testdata/client-parity`) enforce parity for telemetry attributes, error mappings, and RPC coverage (Go parity PR 7). mirrored Python tables and Go table-driven tests are replaced by these shared vectors.
 
 - Go client: every error keeps the gRPC status in its chain, thus
   `status.Code(err)` now reports `codes.NotFound` for an `env.ErrNotFound`

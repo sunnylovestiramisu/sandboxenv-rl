@@ -77,6 +77,7 @@ Keep responsibilities strictly separated across layers:
 - **Go SDK** (`clients/go/env.go`): add helper methods on `*Env` or `*Process`.
 - **Python low-level SDK** (`clients/python/src/ate_env_rl/env.py`): add async methods on `Env` or
   `Process`.
+- **Parity**: add the new RPC to `proto/testdata/client-parity/rpc_coverage.json`.
 - **Python high-level fleet** (`clients/python/src/ate_env_rl/handle.py`): add synchronous methods
   on `SandboxHandle` (delegating through `self.runtime` or `self.backend`, which dispatch coroutines
   via `LoopRunner.run(...)`) and asynchronous methods `..._async`.
@@ -85,6 +86,8 @@ Keep responsibilities strictly separated across layers:
 
 - Write Go unit tests using `internal/internaltest/fakecontrol` and
   `internal/internaltest/fakerouter`.
+- Update telemetry vectors in `proto/testdata/client-parity/` (e.g., `rpc_attrs.json`,
+  `error_mapping.json`) if needed.
 - Write Python unit tests using `src/ate_env_rl/backend/mock.py` (`MockBackendDriver`),
   `src/ate_env_rl/runtime/mock.py` (`MockRuntimeHook`), and `tests/fakes.py` (`Fake*Service` gRPC
   fakes).

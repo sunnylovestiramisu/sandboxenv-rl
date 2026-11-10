@@ -250,11 +250,11 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 ### PR 7: parity vectors
 
 - `proto/testdata/client-parity/`: `image_ref.json`, `executable.json`, `rpc_attrs.json` (one block
-  per semconv mode), `error_mapping.json` (status code, message, trailer, expected class or
-  sentinel, retryable; it pins the NOT_FOUND rule that reads "environment" or "actor" in the
-  message, which a server message change would flip in both clients), `metric_families.json` (name,
-  labels, buckets), `rpc_coverage.json` (each `EnvironmentService` RPC and the Go and Python method
-  that calls it).
+  (use `null` in the vector for "no attribute recorded") per semconv mode), `error_mapping.json`
+  (status code, message, trailer, expected class or sentinel, retryable; it pins the NOT_FOUND rule
+  that reads "environment" or "actor" in the message, which a server message change would flip in
+  both clients), `metric_families.json` (name, labels, buckets), `rpc_coverage.json` (each
+  `EnvironmentService` RPC and the Go and Python method that calls it).
 - `clients/go/parity_test.go` and `clients/python/tests/test_parity_vectors.py` read them; the
   Python test checks the method names by reflection. `attrs_test.go`, `executable_test.go` and the
   mirrored Python tables go.

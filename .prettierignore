@@ -24,3 +24,4 @@
 !/clients/python/src/ate_env_rl/_gen/README.md
 !/docs/plans/**/*.md
 !/clients/go/README.md
+!/proto/testdata/**/*.json

@@ -15,8 +15,12 @@
 package env
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/metadata"
 )
 
 // SetPollBoundsForTest sets the first and the largest interval between the
@@ -38,3 +42,18 @@ func SetRPCSemconvModeForTest(t testing.TB, mode string) {
 	rpcSemconvMode = mode
 	t.Cleanup(func() { rpcSemconvMode = prev })
 }
+
+func ImageRefAttrForTest(ref string) string        { return imageRefAttr(ref) }
+func ExecutableForTest(line string) string         { return executable(line) }
+func ParseRPCSemconvModeForTest(val string) string { return parseRPCSemconvMode(val) }
+func RPCAttrsForTest(svc, method, target string) []attribute.KeyValue {
+	return rpcAttrs(svc, method, target)
+}
+func FromGRPCErrorForTest(err error) error { return fromGRPCError(err) }
+func MarkStartFailureForTest(ctx context.Context, err error, reason string) error {
+	md := metadata.Pairs(StartFailureKey, reason)
+	return mark(ctx, err, md)
+}
+
+var SecondsBucketsForTest = secondsBuckets
+var NonEmptyForTest = nonEmpty

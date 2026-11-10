@@ -222,7 +222,7 @@ func TestTracingSpansWithProvider(t *testing.T) {
 	}
 	exec := attrs(spans["ate-env-go-client.exec"])
 	if exec[env.AttrCommandExecutable].AsString() != "echo" || exec[env.AttrExitCode].AsInt64() != 0 {
-		t.Errorf("exec attributes = %v, want executable echo and exit code 0", exec)
+		t.Errorf("exec attributes = %v, want env.ExecutableForTest echo and exit code 0", exec)
 	}
 	if !exec[env.AttrFirstCommand].AsBool() {
 		t.Errorf("first exec span missing ate_env.first_command=true: %v", exec)
@@ -544,7 +544,7 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// First command on e1 is StartProcess with an executable path, secret arg and env var.
+	// First command on e1 is StartProcess with an env.ExecutableForTest path, secret arg and env var.
 	proc, err := e1.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"/bin/echo", "secret-arg"},
 		Env:     map[string]string{"API_KEY": "s3cr3t"},
@@ -555,7 +555,7 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	if _, err := proc.Wait(ctx); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	// A leading NAME=value word in Command is also skipped by executableWords.
+	// A leading NAME=value word in Command is also skipped by env.ExecutableForTestWords.
 	_, _ = e1.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"API_KEY=s3cr3t", "/bin/echo", "secret-arg"},
 	})
@@ -635,7 +635,7 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 		t.Errorf("start_process kind = %s, want internal", spSpans[0].SpanKind())
 	}
 	if sp1[env.AttrActorName].AsString() != "sp-1" || sp1[env.AttrCommandExecutable].AsString() != "echo" {
-		t.Errorf("sp-1 start_process attrs = %v, want actor sp-1 and executable echo", sp1)
+		t.Errorf("sp-1 start_process attrs = %v, want actor sp-1 and env.ExecutableForTest echo", sp1)
 	}
 	if !sp1[env.AttrFirstCommand].AsBool() {
 		t.Errorf("sp-1 first start_process missing ate_env.first_command=true: %v", sp1)
@@ -645,7 +645,7 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	}
 	for _, s := range spSpans[:2] {
 		if attrs(s)[env.AttrCommandExecutable].AsString() != "echo" {
-			t.Errorf("start_process executable = %q, want echo", attrs(s)[env.AttrCommandExecutable].AsString())
+			t.Errorf("start_process env.ExecutableForTest = %q, want echo", attrs(s)[env.AttrCommandExecutable].AsString())
 		}
 		for _, kv := range s.Attributes() {
 			if strings.Contains(kv.Value.Emit(), "s3cr3t") || strings.Contains(kv.Value.Emit(), "secret-arg") {
@@ -690,5 +690,26 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 	}
 	if _, ok := attrs(rfSpans[1])[env.AttrFileSize]; ok {
 		t.Errorf("failed read_file recorded ate_env.file.size: %v", attrs(rfSpans[1]))
+	}
+}
+
+func TestNonEmptyDropsEmptyStrings(t *testing.T) {
+	got := env.NonEmptyForTest([]attribute.KeyValue{
+		attribute.String("a", "b"),
+		attribute.String("c", ""),
+		attribute.Int("d", 1),
+		attribute.String("e", "   "),
+	})
+	if len(got) != 3 {
+		t.Errorf("nonEmpty = %d items (%v), want 3", len(got), got)
+	}
+}
+
+func TestExecutableNeverRecordsAssignments(t *testing.T) {
+	for _, line := range []string{"API_KEY=s3cr3t python x.py", "TOKEN='s3 cr3t' run", "A=s3cr3t", "A=s3cr3t 'unterminated", "X+=s3cr3t cmd"} {
+		got := env.ExecutableForTest(line)
+		if strings.Contains(got, "s3") || strings.Contains(got, "=") {
+			t.Errorf("env.ExecutableForTest(%q) = %q leaks the assignment", line, got)
+		}
 	}
 }

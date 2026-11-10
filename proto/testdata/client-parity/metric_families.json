@@ -1,0 +1,20 @@
+[
+  {
+    "name": "ate_env_client_exec_seconds",
+    "help": "Time to run a command in an environment",
+    "labels": ["status"],
+    "buckets": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600]
+  },
+  {
+    "name": "ate_env_client_suspend_seconds",
+    "help": "Time to suspend an environment",
+    "labels": ["status"],
+    "buckets": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600]
+  },
+  {
+    "name": "ate_env_client_ready_to_first_command_seconds",
+    "help": "Time from environment acquire ready until the first command begins",
+    "labels": ["status", "source"],
+    "buckets": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600]
+  }
+]
