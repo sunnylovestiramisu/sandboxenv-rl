@@ -21,10 +21,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -86,6 +88,7 @@ func TestImageRefAttrParity(t *testing.T) {
 func TestExecutableParity(t *testing.T) {
 	var vectors []struct {
 		Line string
+		Argv []string // set instead of Line for a command given as words
 		Want *string
 	}
 	readJSON(t, "executable.json", &vectors)
@@ -94,8 +97,33 @@ func TestExecutableParity(t *testing.T) {
 		if v.Want != nil {
 			want = *v.Want
 		}
+		if v.Argv != nil {
+			if got := env.ExecutableWordsForTest(v.Argv); got != want {
+				t.Errorf("executableWords(%q) = %q, want %q", v.Argv, got, want)
+			}
+			continue
+		}
 		if got := env.ExecutableForTest(v.Line); got != want {
 			t.Errorf("executable(%q) = %q, want %q", v.Line, got, want)
+		}
+	}
+}
+
+// OTEL_SEMCONV_STABILITY_OPT_IN parses as in otelgrpc's parseSemconvMode:
+// the first rpc/* item decides, case-sensitive. A null value is unset.
+func TestSemconvModeParity(t *testing.T) {
+	var vectors []struct {
+		Value *string
+		Want  string
+	}
+	readJSON(t, "semconv_mode.json", &vectors)
+	for _, v := range vectors {
+		value := ""
+		if v.Value != nil {
+			value = *v.Value
+		}
+		if got := env.ParseRPCSemconvModeForTest(value); got != v.Want {
+			t.Errorf("parseRPCSemconvMode(%q) = %q, want %q", value, got, v.Want)
 		}
 	}
 }
@@ -165,8 +193,13 @@ func TestErrorMappingParity(t *testing.T) {
 			var se *env.StartError
 			if !errors.As(got, &se) {
 				t.Errorf("fromGRPCError(%v) = %T, want *StartError", err, got)
-			} else if se.Reason != v.Want.Reason {
-				t.Errorf("StartError.Reason = %q, want %q", se.Reason, v.Want.Reason)
+			} else {
+				if se.Reason != v.Want.Reason {
+					t.Errorf("StartError.Reason = %q, want %q", se.Reason, v.Want.Reason)
+				}
+				if se.Code != v.Want.Code {
+					t.Errorf("StartError.Code = %v, want %v", se.Code, v.Want.Code)
+				}
 			}
 		} else {
 			var sentinel error
@@ -212,7 +245,7 @@ func TestErrorMappingParity(t *testing.T) {
 			e := client.Env("envs", "dev1")
 
 			// Unary: GetProcess
-			t.Run(conn+"/GetProcess", func(t *testing.T) {
+			t.Run(conn+"/GetProcess/"+v.Message, func(t *testing.T) {
 				_, err := e.Process("p1").Wait(context.Background())
 				if err == nil {
 					t.Fatalf("expected error")
@@ -230,7 +263,7 @@ func TestErrorMappingParity(t *testing.T) {
 			})
 
 			// Stream: WriteFile
-			t.Run(conn+"/WriteFile", func(t *testing.T) {
+			t.Run(conn+"/WriteFile/"+v.Message, func(t *testing.T) {
 				err := e.WriteFile(context.Background(), "a.txt", strings.NewReader("hi"), 0644)
 				if err == nil {
 					t.Fatalf("expected error")
@@ -250,30 +283,6 @@ func TestErrorMappingParity(t *testing.T) {
 	}
 }
 
-type mockReg struct {
-	prometheus.Registerer
-	prometheus.Gatherer
-	descs []*prometheus.Desc
-}
-
-func (m *mockReg) Register(c prometheus.Collector) error {
-	ch := make(chan *prometheus.Desc, 10)
-	c.Describe(ch)
-	close(ch)
-	for d := range ch {
-		m.descs = append(m.descs, d)
-	}
-	return m.Registerer.Register(c)
-}
-
-func (m *mockReg) MustRegister(cs ...prometheus.Collector) {
-	for _, c := range cs {
-		if err := m.Register(c); err != nil {
-			panic(err)
-		}
-	}
-}
-
 func TestMetricFamiliesParity(t *testing.T) {
 	var vectors []struct {
 		Name    string
@@ -283,76 +292,104 @@ func TestMetricFamiliesParity(t *testing.T) {
 	}
 	readJSON(t, "metric_families.json", &vectors)
 
-	r := prometheus.NewRegistry()
-	reg := &mockReg{Registerer: r, Gatherer: r}
-	_, _ = env.NewClient(env.ClientOptions{Endpoint: "dns:///localhost:1", MetricsRegisterer: reg})
-
-	for _, v := range vectors {
-		var foundDesc *prometheus.Desc
-		for _, d := range reg.descs {
-			if strings.Contains(d.String(), `fqName: "`+v.Name+`"`) {
-				foundDesc = d
-				break
-			}
-		}
-		if foundDesc == nil {
-			t.Errorf("metric family %q not found", v.Name)
-			continue
-		}
-
-		wantLabels := strings.Join(v.Labels, ",")
-		if len(v.Labels) > 0 {
-			if !strings.Contains(foundDesc.String(), `variableLabels: {`+wantLabels+`}`) && !strings.Contains(foundDesc.String(), `variableLabels: [`+wantLabels+`]`) {
-				t.Errorf("metric %q labels != %v (desc: %s)", v.Name, v.Labels, foundDesc.String())
-			}
-		} else {
-			if strings.Contains(foundDesc.String(), `variableLabels:`) {
-				t.Errorf("metric %q should have no labels", v.Name)
-			}
-		}
-	}
-
-	gotFamilies, err := reg.Gather()
+	reg := prometheus.NewRegistry()
+	capture := &capturingRegisterer{Registerer: reg}
+	c, err := env.NewClient(env.ClientOptions{Endpoint: "dns:///localhost:1", MetricsRegisterer: capture})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = c.Close() })
 
-	gotMap := make(map[string]interface{})
-	for _, f := range gotFamilies {
-		gotMap[f.GetName()] = f
-	}
-
+	// Gather sorts label pairs by name, which hides their order. For each
+	// vector, add a series whose label values are the vector's label names
+	// in the vector's order: in the family whose labels are in that order,
+	// each pair then has value == name.
 	for _, v := range vectors {
-		fany, ok := gotMap[v.Name]
+		for _, h := range capture.vecs {
+			_, _ = h.GetMetricWithLabelValues(v.Labels...) // a wrong label count is an error; skip it
+		}
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]*dto.MetricFamily, len(families))
+	for _, f := range families {
+		byName[f.GetName()] = f
+	}
+	for _, v := range vectors {
+		f, ok := byName[v.Name]
 		if !ok {
+			t.Errorf("metric family %q not registered", v.Name)
 			continue
 		}
-
-		fVal := reflect.ValueOf(fany)
-		help := fVal.MethodByName("GetHelp").Call(nil)[0].String()
-		if help != v.Help {
-			t.Errorf("metric %q help = %q, want %q", v.Name, help, v.Help)
+		if f.GetHelp() != v.Help {
+			t.Errorf("metric %q help = %q, want %q", v.Name, f.GetHelp(), v.Help)
 		}
-
-		metrics := fVal.MethodByName("GetMetric").Call(nil)[0]
-		if metrics.Len() > 0 {
-			m := metrics.Index(0)
-			histMethod := m.MethodByName("GetHistogram")
-			if histMethod.IsValid() && !histMethod.Call(nil)[0].IsNil() {
-				hist := histMethod.Call(nil)[0]
-				buckets := hist.MethodByName("GetBucket").Call(nil)[0]
-				var gotBuckets []float64
-				for i := 0; i < buckets.Len(); i++ {
-					b := buckets.Index(i)
-					gotBuckets = append(gotBuckets, b.MethodByName("GetUpperBound").Call(nil)[0].Float())
-				}
-				if !reflect.DeepEqual(gotBuckets, v.Buckets) {
-					t.Errorf("metric %q buckets = %v, want %v", v.Name, gotBuckets, v.Buckets)
-				}
+		if len(f.GetMetric()) == 0 || f.GetMetric()[0].GetHistogram() == nil {
+			t.Errorf("metric %q has no histogram series", v.Name)
+			continue
+		}
+		m := f.GetMetric()[0]
+		if !hasSeriesNamingItsLabels(f, v.Labels) {
+			var got []string
+			for _, l := range m.GetLabel() {
+				got = append(got, l.GetName())
 			}
+			t.Errorf("metric %q labels (sorted) = %v, want %v in that order", v.Name, got, v.Labels)
+		}
+		var buckets []float64
+		for _, b := range m.GetHistogram().GetBucket() {
+			buckets = append(buckets, b.GetUpperBound())
+		}
+		if !slices.Equal(buckets, v.Buckets) {
+			t.Errorf("metric %q buckets = %v, want %v", v.Name, buckets, v.Buckets)
 		}
 	}
 }
+
+// capturingRegisterer records the HistogramVecs registered through it.
+type capturingRegisterer struct {
+	prometheus.Registerer
+	vecs []*prometheus.HistogramVec
+}
+
+func (r *capturingRegisterer) Register(c prometheus.Collector) error {
+	if h, ok := c.(*prometheus.HistogramVec); ok {
+		r.vecs = append(r.vecs, h)
+	}
+	return r.Registerer.Register(c)
+}
+
+func (r *capturingRegisterer) MustRegister(cs ...prometheus.Collector) {
+	for _, c := range cs {
+		if err := r.Register(c); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// hasSeriesNamingItsLabels reports whether f has a series with exactly the
+// labels in want, each set to its own name.
+func hasSeriesNamingItsLabels(f *dto.MetricFamily, want []string) bool {
+	for _, m := range f.GetMetric() {
+		pairs := m.GetLabel()
+		if len(pairs) != len(want) {
+			continue
+		}
+		ok := true
+		for _, l := range pairs {
+			if l.GetName() != l.GetValue() || !slices.Contains(want, l.GetName()) {
+				ok = false
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRPCCoverageParity(t *testing.T) {
 	var vectors map[string]map[string]string
 	readJSON(t, "rpc_coverage.json", &vectors)

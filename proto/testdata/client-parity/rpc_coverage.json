@@ -25,7 +25,7 @@
   },
   "EnsureImageTemplate": {
     "go": "EnsureImageTemplate",
-    "python": "image_status"
+    "python": "image_status(ensure=True)"
   },
   "ListPlacementDomains": {
     "go": "ListPlacementDomains",

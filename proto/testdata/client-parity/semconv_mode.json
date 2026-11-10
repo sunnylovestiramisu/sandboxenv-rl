@@ -1,0 +1,50 @@
+[
+  {
+    "value": null,
+    "want": "new"
+  },
+  {
+    "value": "",
+    "want": "new"
+  },
+  {
+    "value": "http",
+    "want": "new"
+  },
+  {
+    "value": "rpc",
+    "want": "new"
+  },
+  {
+    "value": "rpc/old",
+    "want": "old"
+  },
+  {
+    "value": "rpc/dup",
+    "want": "dup"
+  },
+  {
+    "value": " rpc/dup ",
+    "want": "dup"
+  },
+  {
+    "value": "http, rpc/old",
+    "want": "old"
+  },
+  {
+    "value": "http,rpc/dup",
+    "want": "dup"
+  },
+  {
+    "value": "rpc/old,rpc/dup",
+    "want": "old"
+  },
+  {
+    "value": "rpc/dup,rpc/old",
+    "want": "dup"
+  },
+  {
+    "value": "RPC/OLD",
+    "want": "new"
+  }
+]

@@ -74,5 +74,49 @@
   {
     "line": "python3 -c 'print(1)'",
     "want": "python3"
+  },
+  {
+    "line": "ONLY=assignments",
+    "want": null
+  },
+  {
+    "line": "  ./run.sh  ",
+    "want": "run.sh"
+  },
+  {
+    "line": "dir/",
+    "want": null
+  },
+  {
+    "line": "X=\"a b\" cmd y",
+    "want": "cmd"
+  },
+  {
+    "line": "./a=b",
+    "want": "a=b"
+  },
+  {
+    "line": "TOKEN=\"a secret\" ./run.sh --flag",
+    "want": "run.sh"
+  },
+  {
+    "line": "A=1 B=two /usr/bin/env python",
+    "want": "env"
+  },
+  {
+    "line": "TOKEN=\"unterminated python",
+    "want": null
+  },
+  {
+    "argv": ["/usr/bin/python3", "-c", "x"],
+    "want": "python3"
+  },
+  {
+    "argv": ["API_KEY=s3cr3t", "python3", "x.py"],
+    "want": "python3"
+  },
+  {
+    "argv": [],
+    "want": null
   }
 ]

@@ -61,6 +61,28 @@ def test_missing_extra_logs_one_warning(monkeypatch, caplog):
     metrics.observe("exec", 1.0)  # still a no-op
 
 
+def test_histogram_first_call_imports_prometheus_without_deadlock():
+    # In a fresh process nothing has imported prometheus_client yet, so the
+    # first _histogram or _subphase_histogram call runs _load_prom, which
+    # takes _LOCK. It must not do so while holding _LOCK (a plain Lock).
+    pytest.importorskip("prometheus_client")
+    code = textwrap.dedent(
+        """
+        from ate_env_rl.telemetry import metrics
+
+        assert metrics._PROM is None
+        metrics._histogram("exec")
+        metrics._subphase_histogram("ready_to_first_command")
+        print("ok")
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
 def test_histograms_register_on_first_use_only():
     pytest.importorskip("prometheus_client")
     code = textwrap.dedent(

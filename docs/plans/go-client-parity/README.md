@@ -249,18 +249,25 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 
 ### PR 7: parity vectors
 
-- `proto/testdata/client-parity/`: `image_ref.json`, `executable.json`, `rpc_attrs.json` (one block
-  (use `null` in the vector for "no attribute recorded") per semconv mode), `error_mapping.json`
-  (status code, message, trailer, expected class or sentinel, retryable; it pins the NOT_FOUND rule
-  that reads "environment" or "actor" in the message, which a server message change would flip in
-  both clients), `metric_families.json` (name, labels, buckets), `rpc_coverage.json` (each
-  `EnvironmentService` RPC and the Go and Python method that calls it).
+- `proto/testdata/client-parity/`: `image_ref.json`, `executable.json` (a command line, or an argv
+  list), `semconv_mode.json` (how each `OTEL_SEMCONV_STABILITY_OPT_IN` value parses),
+  `rpc_attrs.json` (one block per semconv mode; an attribute the client does not record is left out
+  of `want`, not set to `null`), `error_mapping.json` (status code, message, trailer, expected class
+  or sentinel, retryable; it pins the NOT_FOUND rule that reads "environment" or "actor" in the
+  message, which a server message change would flip in both clients), `metric_families.json` (name,
+  labels, buckets), `rpc_coverage.json` (each `EnvironmentService` RPC and the Go and Python method
+  that calls it).
 - `clients/go/parity_test.go` and `clients/python/tests/test_parity_vectors.py` read them; the
   Python test checks the method names by reflection. `attrs_test.go`, `executable_test.go` and the
   mirrored Python tables go.
 - Step 5 and 6 of
   [the extend-env-surface skill](../../../.agents/skills/extend-env-surface/SKILL.md) name the
   vectors.
+- As built (#329): Python's `retryable` comes from `SubstrateEnvClientRuntime._infra_error`, the
+  `exec_async` classification the test calls for each vector. Asserting it for every vector showed
+  that Python retried `PERMISSION_DENIED` and `FAILED_PRECONDITION` where Go's `Retryable` does not;
+  `exec_async` now raises a non-retryable `SandboxProtocolError` for them, as Go classifies them.
+  The vectors cover 17.3 and 17.4 of the telemetry AC-17; 17.1 and 17.2 stay with per-client tests.
 
 ### PR 8: README and example
 

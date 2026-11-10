@@ -148,10 +148,7 @@ def __getattr__(name: str) -> Any:
 # --- TracerProvider ------------------------------------------------------ #
 
 # The environment variables that opt in to the client's own OTLP exporter.
-OTLP_ENDPOINT_ENV_VARS = (
-    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
-)
+OTLP_ENDPOINT_ENV_VARS = ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
 
 # The client's own SDK TracerProvider (OTLP exporter), built on first use when
 # the application has no provider and an OTLP endpoint variable is set. It is
@@ -195,22 +192,14 @@ def _private_provider(service_name: str) -> Any | None:
             except ImportError:
                 _log_missing_extra()
                 return None
-            provider = TracerProvider(
-                resource=Resource(attributes={"service.name": service_name})
-            )
+            provider = TracerProvider(resource=Resource(attributes={"service.name": service_name}))
             provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
             atexit.register(provider.shutdown)
             _PRIVATE_PROVIDER = provider
-            logger.info(
-                "OpenTelemetry OTLP exporter configured for service %r", service_name
-            )
+            logger.info("OpenTelemetry OTLP exporter configured for service %r", service_name)
             return provider
         existing = _service_name_of(_PRIVATE_PROVIDER)
-        if (
-            existing
-            and existing != service_name
-            and service_name not in _WARNED_SERVICE_NAMES
-        ):
+        if existing and existing != service_name and service_name not in _WARNED_SERVICE_NAMES:
             _WARNED_SERVICE_NAMES.add(service_name)
             logger.warning(
                 "OTLP TracerProvider already initialized with service name %r; "
@@ -355,12 +344,7 @@ def rpc_attrs(service: str, method: str, target: str | None) -> dict[str, Any]:
     if _RPC_SEMCONV_MODE == _SEMCONV_OLD:
         attrs = {"rpc.system": "grpc", "rpc.service": service, "rpc.method": method}
     elif _RPC_SEMCONV_MODE == _SEMCONV_DUP:
-        attrs = {
-            "rpc.system": "grpc",
-            "rpc.service": service,
-            "rpc.system.name": "grpc",
-            "rpc.method": full_method,
-        }
+        attrs = {"rpc.system": "grpc", "rpc.service": service, "rpc.system.name": "grpc", "rpc.method": full_method}
     else:
         attrs = {"rpc.system.name": "grpc", "rpc.method": full_method}
     if target:
@@ -477,9 +461,7 @@ class TracerManager:
         self.tracer = _ResolvingTracer(self.instrumentation_scope_name, service_name)
 
 
-def create_tracer_manager(
-    config: TracerConfig,
-) -> tuple[TracerManager | None, Any | None]:
+def create_tracer_manager(config: TracerConfig) -> tuple[TracerManager | None, Any | None]:
     """Build a TracerManager from config; ``(None, None)`` when disabled or OTel absent."""
     auto_trace = should_auto_enable_tracing(config)
     if (config is None or not config.enable_tracing) and not auto_trace:
@@ -586,18 +568,14 @@ class UnaryStreamTraceContextInterceptor(
 class StreamUnaryTraceContextInterceptor(
     TraceContextInterceptor, grpc.aio.StreamUnaryClientInterceptor
 ):
-    async def intercept_stream_unary(
-        self, continuation, client_call_details, request_iterator
-    ):
+    async def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
         return await continuation(self._inject(client_call_details), request_iterator)
 
 
 class StreamStreamTraceContextInterceptor(
     TraceContextInterceptor, grpc.aio.StreamStreamClientInterceptor
 ):
-    async def intercept_stream_stream(
-        self, continuation, client_call_details, request_iterator
-    ):
+    async def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
         return await continuation(self._inject(client_call_details), request_iterator)
 
 

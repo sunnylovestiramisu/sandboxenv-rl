@@ -233,13 +233,13 @@ def client_metrics_enabled() -> bool:
 def _histogram(op: str) -> Any:
     hist = _HISTOGRAMS.get(op)
     if hist is None:
+        # Before _LOCK: _load_prom takes _LOCK itself on the first import.
+        prom = _load_prom()
         with _LOCK:
             hist = _HISTOGRAMS.get(op)
             if hist is None:
                 name, doc = CLIENT_FAMILIES[op]
-                hist = _metric(
-                    _load_prom().Histogram, name, doc, ["status"], buckets=SEC_BUCKETS
-                )
+                hist = _metric(prom.Histogram, name, doc, ["status"], buckets=SEC_BUCKETS)
                 _HISTOGRAMS[op] = hist
     return hist
 
@@ -247,12 +247,13 @@ def _histogram(op: str) -> Any:
 def _subphase_histogram(phase: str) -> Any:
     hist = _SUBPHASE_HISTOGRAMS.get(phase)
     if hist is None:
+        prom = _load_prom()  # before _LOCK, as in _histogram
         with _LOCK:
             hist = _SUBPHASE_HISTOGRAMS.get(phase)
             if hist is None:
                 name, doc = SUBPHASE_FAMILIES[phase]
                 hist = _metric(
-                    _load_prom().Histogram,
+                    prom.Histogram,
                     name,
                     doc,
                     ["status", "source"],

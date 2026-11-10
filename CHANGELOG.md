@@ -281,9 +281,18 @@ user needs to know across them.
   drafts release notes and cuts draft releases (see [docs/release.md](docs/release.md)).
 
 ### Changed
-- Python client: server.address drops a dns:/// or passthrough:/// scheme, as the Go client does.
-- Go and Python clients: conformance vectors (`proto/testdata/client-parity`) enforce parity for telemetry attributes, error mappings, and RPC coverage (Go parity PR 7). mirrored Python tables and Go table-driven tests are replaced by these shared vectors.
 
+- Python client: `server.address` drops a `dns:///` or `passthrough:///`
+  scheme, as the Go client does.
+- Python client: `SubstrateEnvClientRuntime.exec_async` and `exec` raise a
+  non-retryable `SandboxProtocolError` for a
+  `PERMISSION_DENIED` or `FAILED_PRECONDITION` guest error (`ProcessExitedError`
+  included), as the Go client's `Retryable` classifies them; it raised a
+  retryable `InfrastructureError`.
+- Go and Python clients: shared vectors in `proto/testdata/client-parity`
+  (executable, semconv mode, `rpc.*` attributes, image ref, error mapping with
+  `retryable`, metric families, RPC coverage) replace the tables that each
+  suite mirrored by hand (Go parity PR 7).
 - Go client: every error keeps the gRPC status in its chain, thus
   `status.Code(err)` now reports `codes.NotFound` for an `env.ErrNotFound`
   error, and `codes.FailedPrecondition` for an `env.ErrProcessExited` error,

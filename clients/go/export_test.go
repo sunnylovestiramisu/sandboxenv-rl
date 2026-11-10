@@ -45,6 +45,7 @@ func SetRPCSemconvModeForTest(t testing.TB, mode string) {
 
 func ImageRefAttrForTest(ref string) string        { return imageRefAttr(ref) }
 func ExecutableForTest(line string) string         { return executable(line) }
+func ExecutableWordsForTest(words []string) string { return executableWords(words) }
 func ParseRPCSemconvModeForTest(val string) string { return parseRPCSemconvMode(val) }
 func RPCAttrsForTest(svc, method, target string) []attribute.KeyValue {
 	return rpcAttrs(svc, method, target)
@@ -55,5 +56,4 @@ func MarkStartFailureForTest(ctx context.Context, err error, reason string) erro
 	return mark(ctx, err, md)
 }
 
-var SecondsBucketsForTest = secondsBuckets
 var NonEmptyForTest = nonEmpty

@@ -30,6 +30,7 @@ from ate_env_rl import (
 from ate_env_rl._gen.ateenv.v1alpha import env_pb2
 from ate_env_rl.client import Client
 from ate_env_rl.errors import map_rpc_error
+from ate_env_rl.runtime.substrate_env_client import guest_infra_error
 from ate_env_rl.telemetry import tracing
 
 
@@ -56,7 +57,14 @@ def test_image_ref_attr(vector):
 
 @pytest.mark.parametrize("vector", load_vector("executable.json"))
 def test_executable_attr(vector):
-    assert tracing.executable_attr(vector["line"]) == vector["want"]
+    # "argv" is a command given as words, "line" one for a shell.
+    command = vector["argv"] if "argv" in vector else vector["line"]
+    assert tracing.executable_attr(command) == vector["want"]
+
+
+@pytest.mark.parametrize("vector", load_vector("semconv_mode.json"))
+def test_rpc_semconv_mode(vector):
+    assert tracing._rpc_semconv_mode(vector["value"]) == vector["want"]
 
 
 @pytest.mark.parametrize("vector", load_vector("rpc_attrs.json"))
@@ -72,12 +80,8 @@ def test_rpc_attrs(vector, monkeypatch):
     else:
         monkeypatch.setattr(tracing, "_RPC_SEMCONV_MODE", tracing._SEMCONV_NEW)
 
-    got = tracing.rpc_attrs(vector["service"], vector["method"], vector["target"])
-
-    # python uses target=None instead of empty string
-    if not vector["target"]:
-        got = tracing.rpc_attrs(vector["service"], vector["method"], None)
-
+    # An empty target in the vector is no target (None in Python).
+    got = tracing.rpc_attrs(vector["service"], vector["method"], vector["target"] or None)
     assert got == vector["want"]
 
 
@@ -93,18 +97,6 @@ class _FakeRpcError(grpc.RpcError):
 
     def trailing_metadata(self):
         return self._trailing
-
-
-def error_class_for_name(name):
-    return {
-        "NotFoundError": NotFoundError,
-        "InvalidArgumentError": InvalidArgumentError,
-        "PermissionDeniedError": PermissionDeniedError,
-        "FailedPreconditionError": FailedPreconditionError,
-        "ProcessExitedError": ProcessExitedError,
-        "StartError": SandboxStartError,
-        "RpcError": RpcError,
-    }[name]
 
 
 @pytest.mark.parametrize("vector", load_vector("error_mapping.json"))
@@ -133,17 +125,23 @@ def test_error_mapping(vector):
 
     if kind == "start_error":
         assert mapped.reason == want.get("reason")
+        assert mapped.status == f"grpc {code_enum.name}"
+        assert code_enum.value[0] == want["code"]
 
-    if hasattr(mapped, "retryable"):
-        assert mapped.retryable == want["retryable"]
+    # retryable is the runtime's call: exec_async turns each guest error into
+    # an InfrastructureError, as the Go client's Retryable classifies it.
+    assert guest_infra_error(mapped, "dev1").retryable == want["retryable"]
 
 
-def test_metric_families():
+def test_metric_families(monkeypatch):
     pytest.importorskip("prometheus_client")
     from ate_env_rl.telemetry import metrics
 
     # Build the collectors without enable_client_metrics(), which is a
-    # one-way, process-global switch.
+    # one-way, process-global switch, in histogram maps of this test's own,
+    # as test_telemetry_metrics.py does, so the module's maps are untouched.
+    monkeypatch.setattr(metrics, "_HISTOGRAMS", {})
+    monkeypatch.setattr(metrics, "_SUBPHASE_HISTOGRAMS", {})
     metrics._histogram("exec")
     metrics._histogram("suspend")
     metrics._subphase_histogram("ready_to_first_command")
@@ -172,7 +170,8 @@ def test_rpc_coverage():
     for method in env_service.methods:
         assert method.name in vectors, f"RPC {method.name} not found in coverage vector"
         mapping = vectors[method.name]
-        python_method_name = mapping["python"]
+        # "image_status(ensure=True)": the method, and the call that sends the RPC.
+        python_method_name = mapping["python"].split("(")[0]
         assert hasattr(Client, python_method_name), (
             f"Python Client missing method {python_method_name} for RPC {method.name}"
         )
