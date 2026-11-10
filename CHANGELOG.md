@@ -138,7 +138,9 @@ user needs to know across them.
   `ARTIFACT_DIR`, `MEASURE_INTERVAL_SEC`, `SAMPLE_CACHE`, `ATE_ENDPOINT`,
   `PROM_URL`, `PREFLIGHT_COVERAGE`, `FOOTING`, `ENABLE_TRACING`,
   `VALIDATE_BUNDLE`, `GCS_BENCHMARK_BUCKET`, `GCS_BENCHMARK_FOLDER`,
-  `GCS_BENCHMARK_NICKNAME`, `GCS_DRY_RUN`).
+  `GCS_BENCHMARK_NICKNAME`, `GCS_DRY_RUN`), and `LOADER_NODEPOOL` /
+  `LOADER_TOLERATION_KEY` to pin the loader Job to a node pool and tolerate
+  its taint.
 - `run_fleet_bench.py --enable-tracing` and `--trace-out PATH`: the Python arm
   points the client's trace recorder at `traces/<job>.jsonl` next to its
   events, one `v1` `TraceEvent` line per sandbox operation; a bundle with a

@@ -388,6 +388,23 @@ the same command with a different context and run id is how two clusters are
 compared. For an API with a token, set `AUTH_TOKEN_SECRET`
 to a Secret in the namespace whose key `token` holds it; the Job passes it to
 the loader as `SUBSTRATE_ENV_AUTH_TOKEN`.
+`LOADER_NODEPOOL=<gke node pool>` pins the loader pod to a node pool and
+`LOADER_TOLERATION_KEY=<taint key>` lets it tolerate that key's taint, any
+effect (each may be set alone; both are checked before the build); without it several
+shards share the few untainted nodes, and a drain of one of them ends every
+shard on it, events included, because the Job does not retry.
+
+Running several shards at once: each invocation bakes its dataset into the
+same `kodata` directory and removes it after `ko build`, so two invocations
+whose bake-and-build windows overlap take each other's files (the loser's
+loader exits with `open dataset ... no such file`). The window is not a fixed
+time: it covers `go run ... trajectory-assets` per trajectory, the build and
+the push, minutes on a cold Go cache. Start the next invocation only after
+the previous one has printed `loader image ...`.
+In eval mode the per-loader `-delete-rate` (200/s by default) caps the shard's
+task rate at that many tasks per second once starts are warm; raise it for a
+throughput run. The events file lives in the pod until the copy at the end, so
+a shard that loses its pod loses its events.
 
 ## Image-delivery workloads
 

@@ -39,6 +39,12 @@
 # its trap runs, the Job ends by itself after 48 hours (activeDeadlineSeconds)
 # and is removed an hour after it finishes; Ctrl-C runs the trap and deletes
 # the Job at once, results included.
+# LOADER_NODEPOOL, when set, pins the loader pod to that GKE node pool
+# (cloud.google.com/gke-nodepool), and LOADER_TOLERATION_KEY lets it tolerate
+# the pool's taint (any effect of that key). Either may be set alone. Without
+# them the pod lands wherever the scheduler puts it; several shards then share the few untainted nodes, and a
+# drain of one of them (a node-pool upgrade, say) ends every shard on it with
+# its events file, since the Job does not retry.
 # AUTH_TOKEN_SECRET names a Secret in NAMESPACE whose key `token` holds
 # ate-env-api's bearer token; the loader then reads it from
 # SUBSTRATE_ENV_AUTH_TOKEN. Leave it unset for an API without a token.
@@ -94,6 +100,13 @@ echo "kubectl context ${CONTEXT:-$(kubectl config current-context 2>/dev/null ||
 AUTH_TOKEN_SECRET="${AUTH_TOKEN_SECRET:-}"
 # Checked as a DNS subdomain name, so the value cannot break the manifest.
 [[ -z "${AUTH_TOKEN_SECRET}" || ( "${AUTH_TOKEN_SECRET}" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#AUTH_TOKEN_SECRET} -le 253 ) ]] || { echo "AUTH_TOKEN_SECRET must be a Secret name" >&2; exit 2; }
+LOADER_NODEPOOL="${LOADER_NODEPOOL:-}"
+LOADER_TOLERATION_KEY="${LOADER_TOLERATION_KEY:-}"
+[[ -z "${LOADER_NODEPOOL}" || "${LOADER_NODEPOOL}" =~ ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$ ]] || { echo "LOADER_NODEPOOL must be a GKE node pool name" >&2; exit 2; }
+[[ -z "${LOADER_TOLERATION_KEY}" || "${LOADER_TOLERATION_KEY}" =~ ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$ ]] || { echo "LOADER_TOLERATION_KEY must be a Kubernetes taint key" >&2; exit 2; }
+if [[ -n "${LOADER_NODEPOOL}" ]] && [[ -z "$(kc get nodes -l "cloud.google.com/gke-nodepool=${LOADER_NODEPOOL}" -o name 2>/dev/null | head -1)" ]]; then
+  echo "LOADER_NODEPOOL=${LOADER_NODEPOOL}: no node carries cloud.google.com/gke-nodepool=${LOADER_NODEPOOL}" >&2; exit 2
+fi
 LOADER_ENV=""
 ENABLE_TRACING="${ENABLE_TRACING:-0}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
@@ -372,6 +385,17 @@ if (( BUNDLE_MODE == 1 )); then
 fi
 
 kc -n "${NS}" delete job "${JOB}" --ignore-not-found --wait=true >/dev/null
+# Rendered into the Job's pod spec after automountServiceAccountToken; each
+# piece starts with its own newline so an unset variable adds nothing to the
+# manifest. No taint effect is named: the pod tolerates every effect of the
+# key (NoSchedule and NoExecute alike), which is what a tainted pool needs.
+LOADER_PLACEMENT_YAML=""
+if [[ -n "${LOADER_NODEPOOL}" ]]; then
+  LOADER_PLACEMENT_YAML+=$'\n      nodeSelector:\n        cloud.google.com/gke-nodepool: "'"${LOADER_NODEPOOL}"'"'
+fi
+if [[ -n "${LOADER_TOLERATION_KEY}" ]]; then
+  LOADER_PLACEMENT_YAML+=$'\n      tolerations:\n        - key: "'"${LOADER_TOLERATION_KEY}"$'"\n          operator: Exists'
+fi
 # busybox 1.36, pinned by digest; Docker Hub rate-limits unauthenticated pulls.
 cat <<EOF_JOB | kc apply -f -
 apiVersion: batch/v1
@@ -391,7 +415,7 @@ spec:
         app: swebench-loader
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: false
+      automountServiceAccountToken: false${LOADER_PLACEMENT_YAML}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
