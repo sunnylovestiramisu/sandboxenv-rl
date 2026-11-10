@@ -39,11 +39,19 @@ user needs to know across them.
   sentinels `env.ErrInvalidArgument`, `env.ErrPermissionDenied` and
   `env.ErrFailedPrecondition` (an `ErrProcessExited` error also wraps
   `ErrFailedPrecondition`).
+- Python client: `SweBenchSource` (a SWE-bench-style Hugging Face dataset,
+  default `R2E-Gym/SWE-Bench-Verified`; reads only the `limit`/`offset` slice
+  into memory, and an `offset` past the end reads no tasks; `name=` picks a
+  config; `keep_row=True` keeps the row under `metadata["ds"]`; needs `pip
+  install datasets`, imported on `load()`), `ImageListSource` (an image
+  manifest, one task per image) and `read_bytes()`. `JsonlSource` and
+  `ImageListSource` read `gs://` objects through `google-cloud-storage` when
+  installed, else `gcloud storage cat` or `gsutil cat`. No new dependency.
 - Python client: task sources and dataset-row parsing. `load_tasks()` and
   `add_tasks()` (and their `AsyncSandboxFleet` forms) take `image_field=` and
   `id_field=` (a dotted path, several paths tried in order, or a callable), or
-  a `TaskSource`: `ListSource` and `JsonlSource` (a local UTF-8 JSON-lines
-  file; a bad row names its file and line). By default a row's image is read
+  a `TaskSource`: `ListSource` and `JsonlSource` (a UTF-8 JSON-lines file,
+  local or `gs://`; a bad row names its file and line). By default a row's image is read
   from `image`, then the R2E-Gym and SWE-bench keys (`docker_image`,
   `image_name`, under `metadata` and `env_config.entry` too), and its id from
   `task_id`, `id` or `instance_id`, so SWE-bench rows load without mapping. An

@@ -33,21 +33,33 @@ ids that come from the data.
 from __future__ import annotations
 
 import codecs
+import copy
+import importlib
 import json
+import logging
 import os
+import shutil
+import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from .types import Task
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "DEFAULT_ID_FIELDS",
     "DEFAULT_IMAGE_FIELDS",
+    "DEFAULT_SWEBENCH_DATASET",
     "FieldSpec",
+    "ImageListSource",
     "JsonlSource",
     "ListSource",
+    "SweBenchSource",
     "TaskSource",
     "extract_image",
+    "load_image_list",
+    "read_bytes",
     "row_to_task",
     "to_tasks",
 ]
@@ -288,11 +300,12 @@ class ListSource:
 
 
 class JsonlSource:
-    """A ``TaskSource`` reading one JSON object per line from a local file.
+    """A ``TaskSource`` reading one JSON object per line.
 
     Args:
-        path: a local ``.jsonl`` file. It is streamed, so ``limit`` stops the
-            read early. Blank lines are skipped.
+        path: a local ``.jsonl`` file, streamed so ``limit`` stops the read
+            early, or a ``gs://`` object, downloaded whole (see
+            ``read_bytes``). Blank lines are skipped.
         image_field: where a row keeps its image (see ``extract_image``).
         id_field: where a row keeps its id (see ``row_to_task``).
         limit: the most tasks to read. None reads all; 0 reads none.
@@ -304,8 +317,6 @@ class JsonlSource:
 
     def __init__(self, path: str | os.PathLike[str], *, image_field: FieldSpec = None,
                  id_field: FieldSpec = None, limit: int | None = None):
-        if os.fspath(path).startswith("gs://"):
-            raise ValueError(f"JsonlSource reads local files only, not {os.fspath(path)}")
         if limit is not None and limit < 0:
             raise ValueError(f"limit must be None or >= 0, not {limit}")
         self.path = path
@@ -314,35 +325,253 @@ class JsonlSource:
         self.limit = limit
 
     def load(self) -> list[Task]:
-        tasks: list[Task] = []
-        path = os.path.expanduser(os.fspath(self.path))
-        # Bytes split on b"\n" only, and each line is decoded on its own, so a
-        # bad byte names its line. A JSON string may hold U+2028, U+2029 or
-        # U+0085; str.splitlines() would split on them.
-        with open(path, "rb") as fh:
+        path = os.fspath(self.path)
+        if path.startswith("gs://"):
             if self.limit == 0:
-                return tasks
-            for lineno, raw in enumerate(fh, 1):
-                where = f"{self.path}:{lineno}"
-                if lineno == 1:
-                    raw = raw.removeprefix(codecs.BOM_UTF8)
-                try:
-                    line = raw.decode("utf-8").strip()
-                except UnicodeDecodeError as e:
-                    raise ValueError(f"{where}: not UTF-8: {e}") from e
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"{where}: not JSON: {e}") from e
-                if not isinstance(row, dict):
-                    raise ValueError(f"{where}: a task row must be a JSON object, not {type(row).__name__}")
-                try:
-                    tasks.append(row_to_task(row, len(tasks), image_field=self.image_field,
-                                             id_field=self.id_field))
-                except ValueError as e:
-                    raise ValueError(f"{where}: {e}") from e
-                if self.limit is not None and len(tasks) >= self.limit:
-                    break
+                return []
+            return self._parse(read_bytes(path).split(b"\n"))
+        with open(os.path.expanduser(path), "rb") as fh:
+            if self.limit == 0:
+                return []
+            return self._parse(fh)
+
+    def _parse(self, lines: Iterable[bytes]) -> list[Task]:
+        tasks: list[Task] = []
+        # Bytes split on b"\n" (and b"\r\n") only, and each line is decoded
+        # on its own, so a bad byte names its line. A JSON string may hold
+        # U+2028, U+2029 or U+0085; str.splitlines() would split on them.
+        for lineno, raw in enumerate(lines, 1):
+            where = f"{self.path}:{lineno}"
+            if lineno == 1:
+                raw = raw.removeprefix(codecs.BOM_UTF8)
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError as e:
+                raise ValueError(f"{where}: not UTF-8: {e}") from e
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{where}: not JSON: {e}") from e
+            if not isinstance(row, dict):
+                raise ValueError(f"{where}: a task row must be a JSON object, not {type(row).__name__}")
+            try:
+                tasks.append(row_to_task(row, len(tasks), image_field=self.image_field,
+                                         id_field=self.id_field))
+            except ValueError as e:
+                raise ValueError(f"{where}: {e}") from e
+            if self.limit is not None and len(tasks) >= self.limit:
+                break
+        return tasks
+
+
+# ---------------------------------------------------------------------------
+# Remote files: gs://
+
+
+def _storage_module() -> Any:
+    """``google.cloud.storage`` when it is installed, else None."""
+    try:
+        return importlib.import_module("google.cloud.storage")
+    except ImportError:
+        return None
+
+
+#: How long ``read_bytes`` lets ``gcloud storage cat`` or ``gsutil cat`` run.
+_CLI_TIMEOUT_S = 600
+
+#: Characters ``gcloud storage cat`` and ``gsutil cat`` expand in an object name.
+_GS_WILDCARDS = "*?["
+
+
+def read_bytes(path: str | os.PathLike[str]) -> bytes:
+    """The bytes of a local file or a ``gs://`` object.
+
+    A ``gs://`` object is read with ``google.cloud.storage`` when it is
+    installed (with the ambient credentials), else with ``gcloud storage cat``
+    or ``gsutil cat`` from ``PATH``. A client that cannot read the object (for
+    example no application default credentials on a machine where ``gcloud``
+    is logged in) falls back to the command line. ``RuntimeError`` names the
+    options when none works, or the command that failed, could not run or ran
+    past ``_CLI_TIMEOUT_S``; either way it keeps the client's error too. An
+    object name with ``*``, ``?`` or ``[`` is read with the client only: the
+    command line would expand it, so it raises ``RuntimeError`` instead.
+    """
+    path = os.fspath(path)
+    if not path.startswith("gs://"):
+        with open(os.path.expanduser(path), "rb") as fh:
+            return fh.read()
+    bucket, _, blob = path[len("gs://"):].partition("/")
+    if not bucket or not blob:
+        raise ValueError(f"not a gs:// object path: {path}")
+    client_error = None
+    storage = _storage_module()
+    if storage is not None:
+        try:
+            return storage.Client().bucket(bucket).blob(blob).download_as_bytes()
+        except Exception as exc:  # noqa: BLE001 - the command line below may still work
+            client_error = f"{type(exc).__name__}: {exc}"
+            logger.info("google.cloud.storage could not read %s (%s); trying the command line", path, client_error)
+    client_note = f" (google.cloud.storage: {client_error})" if client_error else ""
+    if any(c in blob for c in _GS_WILDCARDS):
+        # gcloud and gsutil expand these, so they could read other objects
+        # (or several, concatenated); the client reads the name literally.
+        raise RuntimeError(
+            f"cannot read {path}: the object name holds a wildcard (*, ? or [), which gcloud and gsutil "
+            f"expand; only google-cloud-storage reads it literally{client_note}"
+        )
+    for tool, argv in (("gcloud", ["gcloud", "storage", "cat", path]), ("gsutil", ["gsutil", "cat", path])):
+        if shutil.which(tool):
+            try:
+                return subprocess.run(argv, check=True, capture_output=True, timeout=_CLI_TIMEOUT_S).stdout
+            except subprocess.CalledProcessError as e:
+                stderr = (e.stderr or b"").decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"cannot read {path}: {tool} failed: {stderr}{client_note}") from e
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(
+                    f"cannot read {path}: {tool} did not finish in {_CLI_TIMEOUT_S} s{client_note}"
+                ) from e
+            except OSError as e:
+                raise RuntimeError(f"cannot read {path}: cannot run {tool}: {e}{client_note}") from e
+    raise RuntimeError(
+        f"cannot read {path}: install google-cloud-storage, or put gcloud or gsutil on PATH{client_note}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Image manifests
+
+
+def load_image_list(path: str | os.PathLike[str]) -> list[str]:
+    """The images of a manifest: one image per line, local or ``gs://``.
+
+    Blank lines and ``#`` comments are skipped, and a repeated image is kept
+    once, at its first line. A line that is not UTF-8, or whose image holds
+    whitespace (two images on one line, say), raises ValueError naming the
+    file and the line.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for lineno, raw in enumerate(read_bytes(path).removeprefix(codecs.BOM_UTF8).split(b"\n"), 1):
+        where = f"{os.fspath(path)}:{lineno}"
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError(f"{where}: not UTF-8: {e}") from e
+        image = line.split("#", 1)[0].strip()
+        if any(c.isspace() for c in image):
+            raise ValueError(f"{where}: an image reference cannot hold whitespace: {image!r}")
+        if image and image not in seen:
+            seen.add(image)
+            out.append(image)
+    return out
+
+
+class ImageListSource:
+    """A ``TaskSource`` over an image manifest (see ``load_image_list``): one
+    task per image, whose id is the image reference itself, so it is stable
+    across processes and reloads."""
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = path
+
+    def load(self) -> list[Task]:
+        return [Task(id=image, image=image) for image in load_image_list(self.path)]
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face datasets
+
+#: The SWE-bench Verified split with a ``docker_image`` per row.
+DEFAULT_SWEBENCH_DATASET = "R2E-Gym/SWE-Bench-Verified"
+
+
+class SweBenchSource:
+    """A ``TaskSource`` over a SWE-bench-style Hugging Face dataset.
+
+    Needs the ``datasets`` package (``pip install datasets``); it is imported
+    when ``load()`` runs, not when the source is built.
+
+    Args:
+        dataset: the dataset id.
+        split: the split to read: a plain name such as ``"test"``, without a
+            slice (``offset`` and ``limit`` make the slice).
+        limit: the most tasks. None reads all; 0 reads none (and imports
+            nothing).
+        offset: rows to skip first. With ``limit`` or ``offset``, only that
+            slice of the split is read into memory (``"test[10:20]"``);
+            ``datasets`` still downloads and prepares the whole config. An
+            ``offset`` at or past the end of the split reads no tasks.
+        image_field / id_field: as for ``row_to_task``. The defaults read
+            ``docker_image`` or ``image_name``, and ``instance_id``.
+        keep_row: also store a deep copy of the row under
+            ``Task.metadata["ds"]``, which the R2E-Gym adapter of the OpenHands
+            integration needs for its environment and reward grading. The copy
+            keeps the row the adapter grades with apart from ``Task.metadata``,
+            which a rollout may edit; ``copy.deepcopy`` copies only the
+            containers and shares the strings, so a large text field (such as
+            ``parsed_commit_content``) is stored once.
+        revision: the dataset revision (a branch, tag or commit), to pin it.
+        name: the dataset config, for a dataset with several.
+    """
+
+    def __init__(self, dataset: str = DEFAULT_SWEBENCH_DATASET, split: str = "test", *,
+                 limit: int | None = None, offset: int = 0, image_field: FieldSpec = None,
+                 id_field: FieldSpec = None, keep_row: bool = False, revision: str | None = None,
+                 name: str | None = None):
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be None or >= 0, not {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be >= 0, not {offset}")
+        if "[" in split:
+            raise ValueError(f"split must be a plain split name, not {split!r}: use offset= and limit= for a slice")
+        self.dataset = dataset
+        self.split = split
+        self.limit = limit
+        self.offset = offset
+        self.image_field = image_field
+        self.id_field = id_field
+        self.keep_row = keep_row
+        self.revision = revision
+        self.name = name
+
+    def load(self) -> list[Task]:
+        if self.limit == 0:
+            return []
+        try:
+            datasets = importlib.import_module("datasets")
+        except ImportError as e:
+            raise ImportError("SweBenchSource needs the Hugging Face datasets package: pip install datasets") from e
+        split = self.split
+        if self.offset or self.limit is not None:
+            end = "" if self.limit is None else self.offset + self.limit
+            split = f"{self.split}[{self.offset}:{end}]"
+        kwargs: dict[str, Any] = {"split": split}
+        if self.name is not None:
+            kwargs["name"] = self.name
+        if self.revision is not None:
+            kwargs["revision"] = self.revision
+        logger.info("Loading %s split %s", self.dataset, split)
+        try:
+            rows = datasets.load_dataset(self.dataset, **kwargs)
+        except ValueError as e:
+            # datasets refuses a slice that starts at or past the end of the
+            # split ('Instruction "test[500:]" corresponds to no data!').
+            if self.offset and "corresponds to no data" in str(e):
+                logger.info("%s split %s: offset %d is past the end; no tasks", self.dataset, split, self.offset)
+                return []
+            raise ValueError(f"{self.dataset} split {split}: {e}") from e
+        tasks: list[Task] = []
+        for i, item in enumerate(rows):
+            row = dict(item)
+            try:
+                task = row_to_task(row, self.offset + i, image_field=self.image_field, id_field=self.id_field)
+            except ValueError as e:
+                raise ValueError(f"{self.dataset} [{self.split}] row {self.offset + i}: {e}") from e
+            if self.keep_row:
+                task = Task(id=task.id, image=task.image, metadata={**row, "ds": copy.deepcopy(row)},
+                            template=task.template)
+            tasks.append(task)
+        logger.info("Loaded %d tasks (%d images) from %s", len(tasks), len({t.image for t in tasks}), self.dataset)
         return tasks

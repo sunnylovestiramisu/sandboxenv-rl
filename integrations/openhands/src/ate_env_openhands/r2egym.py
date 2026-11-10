@@ -97,7 +97,7 @@ def _dataset_row(handle: Any) -> dict:
     if ds is None:
         raise RuntimeError(
             "Task.metadata['ds'] is required for the R2E-Gym adapter: load tasks with the "
-            "dataset row kept (SweBenchSource(keep_row=True) in agent-sandbox-rl terms)."
+            "dataset row kept: ate_env_rl.SweBenchSource(keep_row=True)."
         )
     return ds
 

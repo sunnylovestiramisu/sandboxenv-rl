@@ -186,9 +186,7 @@ def test_jsonl_source_names_the_file_and_line_of_a_bad_row(tmp_path):
         JsonlSource(path).load()
 
 
-def test_jsonl_source_rejects_gs_paths_and_negative_limits():
-    with pytest.raises(ValueError, match="local files only"):
-        JsonlSource("gs://bucket/tasks.jsonl")
+def test_jsonl_source_rejects_negative_limits():
     with pytest.raises(ValueError, match="limit"):
         JsonlSource("tasks.jsonl", limit=-1)
 

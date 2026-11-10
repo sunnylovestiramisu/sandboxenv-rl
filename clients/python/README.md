@@ -465,16 +465,44 @@ results and reports need ids that name the row in your data.
 
 A source is any object with a `load()` method that returns `Task` objects
 (`TaskSource`): `ListSource(items, image_field=, id_field=)` over a list, and
-`JsonlSource(path, image_field=, id_field=, limit=)` over a local UTF-8
-JSON-lines file, which names the file and line of a bad row. `load()` is
-synchronous: `AsyncSandboxFleet.load_tasks` runs it on the event loop thread.
+`JsonlSource(path, image_field=, id_field=, limit=)` over a UTF-8 JSON-lines
+file, which names the file and line of a bad row. `load()` is synchronous:
+`AsyncSandboxFleet.load_tasks` runs it on the event loop thread, so for a
+remote source (`gs://`, Hugging Face) load it on a thread and pass the list:
+`tasks = await asyncio.to_thread(source.load)`, then `fleet.load_tasks(tasks)`.
+
+Two more sources read from outside the process:
+
+- `SweBenchSource(dataset=, split=, limit=, offset=, keep_row=, revision=, name=)`
+  reads a SWE-bench-style Hugging Face dataset (default
+  `R2E-Gym/SWE-Bench-Verified`), reading only the `offset`/`limit` slice into
+  memory; `datasets` still downloads and prepares the whole config. `split` is
+  a plain name such as `test`, and an `offset` past the end reads no tasks. It
+  needs the `datasets` package (`pip install datasets`), imported when `load()`
+  runs. `keep_row=True` also stores a copy of the row under
+  `Task.metadata["ds"]`, which the OpenHands R2E-Gym adapter needs.
+- `ImageListSource(path)` reads an image manifest, one image per line with `#`
+  comments; each task's id is its image.
+
+`JsonlSource` and `ImageListSource` take a local path or a `gs://` object.
+`gs://` is read with `google-cloud-storage` when it is installed, else with
+`gcloud storage cat` or `gsutil cat`; `read_bytes(path)` does the same for your
+own files. A `gs://` object is downloaded whole: `limit` does not bound the
+transfer. An object name with `*`, `?` or `[` is read with
+`google-cloud-storage` only, since the command line would expand it.
 
 ```python
-from ate_env_rl import JsonlSource
+from ate_env_rl import ImageListSource, JsonlSource, SweBenchSource
+
+def r2e_id(row):
+    return f"{row['repo_name']}@{row['commit_hash'][:12]}"
 
 fleet.load_tasks(rows)                                               # SWE-bench rows: instance_id, image_name
-fleet.load_tasks(rows, id_field=lambda r: f"{r['repo_name']}@{r['commit_hash'][:12]}")   # R2E-Gym
+fleet.load_tasks(rows, id_field=r2e_id)                              # R2E-Gym
 fleet.load_tasks(JsonlSource("tasks.jsonl", image_field="metadata.docker_image", limit=100))
+fleet.load_tasks(JsonlSource("gs://my-bucket/r2e/train.jsonl", id_field=r2e_id))
+fleet.load_tasks(SweBenchSource(limit=50, keep_row=True))          # pip install datasets
+fleet.load_tasks(ImageListSource("images.txt"))                    # warm a fixed image set
 
 new = fleet.add_tasks(next_batch)                    # Task objects, rows or a source
 fleet.warm_images(sorted({t.image for t in new}), wait=False)
