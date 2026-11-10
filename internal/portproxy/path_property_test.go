@@ -31,7 +31,8 @@ import (
 // percent-escapes (an escaped slash among them), and bytes Go's server
 // accepts though url.EscapedPath calls them invalid in a raw path ({ } | ^
 // " < > \ ` # and raw UTF-8). An empty first segment makes a path that starts
-// with "//".
+// with "//". Queries also draw bare '?', ';', '&', '/', '?', and bad '%'
+// escapes that Go's server accepts in RawQuery.
 func pathRestGen() *rapid.Generator[string] {
 	atom := rapid.OneOf(
 		rapid.SampledFrom([]string{"a", "b", "z", "0", "-", "_", ".", "~"}),
@@ -42,24 +43,29 @@ func pathRestGen() *rapid.Generator[string] {
 	seg := rapid.Custom(func(t *rapid.T) string {
 		return strings.Join(rapid.SliceOfN(atom, 0, 6).Draw(t, "atoms"), "")
 	})
+	queryAtom := rapid.OneOf(
+		atom,
+		rapid.SampledFrom([]string{"/", "?", ";", "&", "=", "%", "%2", "%ZZ"}),
+	)
+	query := rapid.Custom(func(t *rapid.T) string {
+		return strings.Join(rapid.SliceOfN(queryAtom, 0, 8).Draw(t, "queryAtoms"), "")
+	})
 	return rapid.Custom(func(t *rapid.T) string {
 		rest := "/" + strings.Join(rapid.SliceOfN(seg, 1, 4).Draw(t, "segs"), "/")
 		if rapid.Bool().Draw(t, "hasQuery") {
-			// httputil.ReverseProxy drops a query it cannot parse, one with
-			// ';' among them; PP-1 is about the path.
-			rest += "?" + strings.ReplaceAll(seg.Draw(t, "query"), ";", "")
+			rest += "?" + query.Draw(t, "query")
 		}
 		return rest
 	})
 }
 
 // sameSegments reports whether got and want have the same segments, each
-// decoding to the same bytes, and the same query.
+// decoding to the same bytes, and the same query (including a bare '?').
 func sameSegments(got, want string) bool {
-	gp, gq, _ := strings.Cut(got, "?")
-	wp, wq, _ := strings.Cut(want, "?")
+	gp, gq, gHasQ := strings.Cut(got, "?")
+	wp, wq, wHasQ := strings.Cut(want, "?")
 	g, w := strings.Split(gp, "/"), strings.Split(wp, "/")
-	if len(g) != len(w) || gq != wq {
+	if len(g) != len(w) || gHasQ != wHasQ || gq != wq {
 		return false
 	}
 	for i := range g {
@@ -72,15 +78,17 @@ func sameSegments(got, want string) bool {
 	return true
 }
 
-// PP-1 (docs/plans/port-proxy/acceptance-criteria.md). Rule (Dispatch doc;
-// TestPathFormKeepsPathAsSent, TestRawBytesKeptAsSent): the daemon gets the
-// path after the routing prefix, and the header form's path, exactly as
+// PP-1, PP-2 (docs/plans/port-proxy/acceptance-criteria.md). Rule (Dispatch
+// doc; TestPathFormKeepsPathAsSent, TestRawBytesKeptAsSent,
+// TestRawQueryKeptAsSent): the daemon gets the path after the routing prefix,
+// the header form's path, and the query of the request-target, exactly as
 // sent. Each request line is written on a raw TCP connection, so no client
 // escapes it. A path that starts with "//" cannot be written as is (it would
-// read as an authority); for it the daemon must get the same segments and
-// query, each decoding to the same bytes. The routing prefix is matched on
-// the path as sent: with one of its separators escaped (%2F), the request
-// is not a path form and reaches no daemon, whatever the rest holds.
+// read as an authority); for it the daemon must get the same segments, each
+// decoding to the same bytes, and the query byte for byte. The routing prefix
+// is matched on the path as sent: with one of its separators escaped (%2F),
+// the request is not a path form and reaches no daemon, whatever the rest
+// holds.
 func TestPathFormDeliversPathAsSentProperty(t *testing.T) {
 	s, base := pathSetup(t)
 	var got string
@@ -105,6 +113,12 @@ func TestPathFormDeliversPathAsSentProperty(t *testing.T) {
 		viaHeader := send(rt, rest, headerForm)
 		if !ok(viaPath) || !ok(viaHeader) {
 			rt.Fatalf("sent %q: path form delivered %q, header form %q", rest, viaPath, viaHeader)
+		}
+		if strings.HasPrefix(rest, "/?") {
+			viaBarePrefix := send(rt, "/v1alpha/envs/env1/ports/8000"+rest[1:], "")
+			if viaBarePrefix != rest {
+				rt.Fatalf("sent bare prefix %q: delivered %q, want %q", rest[1:], viaBarePrefix, rest)
+			}
 		}
 		segs := []string{"", "v1alpha", "envs", "env1", "ports", "8000"}
 		i := rapid.IntRange(1, len(segs)-2).Draw(rt, "escapedSeparator")
@@ -223,6 +237,55 @@ func TestRawBytesDoNotMoveRoutingPrefix(t *testing.T) {
 		code, body := sendRaw(t, base, c.target, "")
 		if code != c.code || (c.body != "" && body != c.body) || body == "daemon" {
 			t.Errorf("GET %q: got %d %q, want %d %q", c.target, code, body, c.code, c.body)
+		}
+	}
+}
+
+// PP-2: the query of the request-target reaches the daemon byte for byte in
+// both forms, including bare '?', ';' parameters, bad '%' escapes, '{ } | ^',
+// '#', raw UTF-8, '//' paths, and a bare path-form prefix without a slash
+// before '?'.
+func TestRawQueryKeptAsSent(t *testing.T) {
+	s, base := pathSetup(t)
+	var got, host string
+	s.router.RegisterPort("env1", 8000, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, host = r.RequestURI, r.Host
+		io.WriteString(w, "daemon")
+	}))
+	for _, c := range []struct{ rest, want string }{
+		{"/?", "/?"},
+		{"/x?", "/x?"},
+		{"/?;", "/?;"},
+		{"/x?a=1;b=2", "/x?a=1;b=2"},
+		{"/?a=1&b;c&d=2", "/?a=1&b;c&d=2"},
+		{"/?z=1&a=2%203&semi;drop", "/?z=1&a=2%203&semi;drop"},
+		{"/x?%", "/x?%"},
+		{"/x?a=1&bad=%ZZ&b=2", "/x?a=1&bad=%ZZ&b=2"},
+		{"/x?p=%2F&q={a}|b^c&u=caf\xc3\xa9#frag", "/x?p=%2F&q={a}|b^c&u=caf\xc3\xa9#frag"},
+		{"//double-slash?", "//double-slash?"},
+		{"//double-slash?;", "//double-slash?;"},
+		{"//a{b%2Fc?a=1;b=2&q={x}|y^z&u=\xc3\xa9&bad=%ZZ", "//a%7Bb%2Fc?a=1;b=2&q={x}|y^z&u=\xc3\xa9&bad=%ZZ"},
+	} {
+		for _, form := range []struct{ name, target, extra string }{
+			{"path form", "/v1alpha/envs/env1/ports/8000" + c.rest, ""},
+			{"header form", c.rest, headerForm},
+		} {
+			got, host = "", ""
+			code, body := sendRaw(t, base, form.target, form.extra)
+			if code != http.StatusOK || body != "daemon" || got != c.want || host != "127.0.0.1:8000" {
+				t.Errorf("%s: sent %q, got %d %q, daemon got %q (Host %q), want %q", form.name, c.rest, code, body, got, host, c.want)
+			}
+		}
+	}
+	for _, c := range []struct{ target, want string }{
+		{"/v1alpha/envs/env1/ports/8000?", "/?"},
+		{"/v1alpha/envs/env1/ports/8000?;", "/?;"},
+		{"/v1alpha/atespaces/ate-env/envs/env1/ports/8000?a=1;b=2", "/?a=1;b=2"},
+	} {
+		got, host = "", ""
+		code, body := sendRaw(t, base, c.target, "")
+		if code != http.StatusOK || body != "daemon" || got != c.want || host != "127.0.0.1:8000" {
+			t.Errorf("GET %q: got %d %q, daemon got %q (Host %q), want %q", c.target, code, body, got, host, c.want)
 		}
 	}
 }

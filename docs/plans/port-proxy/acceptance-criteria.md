@@ -1,8 +1,8 @@
 # Port proxy: acceptance criteria for forwarding
 
-Status: PP-1 met by #277, which fixed the second bug a property test found against it (#245 fixed
-the first). The criterion names the tests that check it on every pull request (the Go job's
-`go test -race ./...`).
+Status: `PP-1` met by #277, which fixed the second bug a property test found against it (#245 fixed
+the first). `PP-2` met by #316, forwarding the raw query and bare `?` unchanged. Each criterion
+names the tests that check it on every pull request (the Go job's `go test -race ./...`).
 
 ## Scope
 
@@ -11,28 +11,28 @@ ate-env-api's port proxy
 WebSocket request to a port a daemon listens on inside an environment. A caller addresses the
 environment and port in one of two forms:
 
-- **Header form:** `X-Env-Id`, `X-Env-Port` (and `X-Env-Atespace`) headers; the request's own path
-  is forwarded.
+- **Header form:** `X-Env-Id`, `X-Env-Port` (and `X-Env-Atespace`) headers. The proxy forwards the
+  request's own path and query.
 - **Path form:** `/v1alpha/envs/<id>/ports/<port>/<rest>` (or
   `/v1alpha/atespaces/<atespace>/envs/<id>/ports/<port>/<rest>`), for browsers and WebSocket clients
-  that cannot set headers; `/<rest>` is forwarded.
+  that cannot set headers. The proxy forwards `/<rest>` and the query.
 
 `Dispatch` matches the path form itself rather than on a `ServeMux` "so the daemon gets the path
 exactly as sent": a mux would redirect a missing trailing slash, `//` and `..`, and WebSocket
 clients do not follow redirects.
 
-PP-1 has one exception: a forwarded path that starts with `//` would read as an authority if written
-as is, so in it the proxy percent-encodes the bytes `URL.RawPath` cannot hold raw
+`PP-1` has one exception: a forwarded path that starts with `//` would read as an authority if
+written as is, so in it the proxy percent-encodes the bytes `URL.RawPath` cannot hold raw
 (`{ } | ^ " < > \`, `` ` ``, `#`, space, control bytes and non-ASCII) and keeps every other byte,
-escapes included; the daemon gets the same segments, each decoding to the same bytes. The query is
-outside PP-1: `httputil.ReverseProxy` drops a query that holds `;` or a bad escape, so `/x?a=1;b=2`
-reaches the daemon as `/x`.
+escapes included. The daemon gets the same segments, each decoding to the same bytes, and gets the
+query byte for byte (`PP-2`).
 
 ## Criteria
 
 | ID   | Criterion                                                                                                                                                                                                                                 | Status      | Tests                                                                                                                                                                       |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | PP-1 | The daemon gets the forwarded path exactly as the caller sent it, byte for byte, in both forms: the path form's `/<rest>` after the routing prefix, and the header form's path. No character is escaped, unescaped or cleaned on the way. | met by #277 | `TestPathFormDeliversPathAsSentProperty`, `TestPathFormKeepsSubDelimsAsSent`, `TestPathFormKeepsPathAsSent`, `TestRawBytesKeptAsSent`, `TestRawBytesDoNotMoveRoutingPrefix` |
+| PP-2 | The daemon gets the query of the request-target (including a bare trailing `?`, `;` parameters, bad `%` escapes, `{ } \| ^`, `#`, and raw UTF-8) exactly as the caller sent it, byte for byte, in both forms, including on `//` paths.    | met by #316 | `TestPathFormDeliversPathAsSentProperty`, `TestRawBytesKeptAsSent`, `TestRawQueryKeptAsSent`                                                                                |
 
 ## What the property test found
 
@@ -57,6 +57,16 @@ reaches the daemon as `/x`.
   generated none of them. It now writes each request line on a raw TCP connection, generates these
   bytes mixed with `%2F`, a leading `//` and a query, and also sends the routing prefix with one
   separator escaped, which must reach no daemon. On the old code it fails at once, shrunk to `/{`.
+- **PP-2.** `httputil.ReverseProxy` runs `cleanQueryParams` on the outbound `URL.RawQuery` before
+  calling `Rewrite`. When a query holds `;` or a bad `%` escape, `cleanQueryParams` re-encodes it
+  through `url.ParseQuery`, which drops parameters with `;` or bad escapes and sorts and re-encodes
+  the rest: `/?;` reached the daemon as `/`, `/x?a=1;b=2` as `/x`, and `/?z=1&a=2%203&semi;drop` as
+  `/?a=2+3&z=1`. The proxy never inspects the query, so `rewrite` copies `RawQuery` from
+  `pr.In.URL`; `ReverseProxy` keeps `ForceQuery` (a bare `?`) itself.
+  `TestPathFormDeliversPathAsSentProperty` now draws bare `?`, `;`, `&`, `/`, `?`, bad `%` escapes,
+  `{ } | ^`, `#`, and raw UTF-8 in queries on ordinary and `//` paths (and after a bare path-form
+  prefix), and `TestRawQueryKeptAsSent` checks the examples across both forms. On the previous code
+  `rapid` shrinks the failure to `/?;`.
 
 It is not a timing bug, so `testing/synctest` alone would not have found it: synctest makes
 scheduling deterministic but generates no inputs and checks nothing.

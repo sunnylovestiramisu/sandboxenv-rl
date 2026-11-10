@@ -275,8 +275,8 @@ func Wants(r *http.Request) bool {
 // wrap the proxy routes without wrapping next. The path form is matched here
 // rather than on a ServeMux, so the daemon gets the path exactly as sent: a
 // mux would redirect a missing trailing slash, "//" and "..", and WebSocket
-// clients do not follow redirects. Both forms route and forward the path of
-// the request-target as sent (see requestPath).
+// clients do not follow redirects. Both forms route on the path as sent (see
+// requestPath) and forward the path and query of the request-target as sent.
 func Dispatch(p *Proxy, next http.Handler, mw ...func(http.Handler) http.Handler) http.Handler {
 	var proxy http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPathForm(requestPath(r.URL)) {
@@ -568,6 +568,11 @@ func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 	if t.path != "" {
 		setPath(pr.Out.URL, t.path, t.rawPath)
 	}
+	// ReverseProxy cleans RawQuery before Rewrite, which drops ';'
+	// parameters and re-encodes on bad '%' escapes. The proxy never
+	// inspects the query, so forward RawQuery as sent. ForceQuery (a bare
+	// '?') is copied from the inbound request by ReverseProxy itself.
+	pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 	for _, h := range []string{EnvIDHeader, EnvAtespaceHeader, EnvPortHeader, EnvAuthorizationHeader} {
 		pr.Out.Header.Del(h)
 	}
