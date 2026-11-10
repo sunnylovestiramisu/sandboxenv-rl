@@ -355,6 +355,7 @@ user needs to know across them.
     a UTF-8 bytes id is decoded (was `"b'...'"`).
 
 ### Fixed
+- guest: a process that RPCs report as exited no longer counts toward the guest's concurrent process limit.
 - `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` no longer delete an
   environment whose name a probe collided with: a create the server refused
   (`AlreadyExists`, a bad argument, a missing template, no permission, no

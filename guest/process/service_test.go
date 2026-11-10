@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -788,5 +789,50 @@ func TestTTYExitWhileDescendantHoldsTerminal(t *testing.T) {
 	}
 	if exit.GetExitCode() != 0 {
 		t.Fatalf("exit_code = %d, want 0", exit.GetExitCode())
+	}
+}
+
+func TestConcurrencySlotRace(t *testing.T) {
+	cfg := DefaultConfig(t.TempDir())
+	cfg.MaxConcurrentProcesses = 1
+
+	// OnExit runs after reap marks the process EXITED and before it closes
+	// done; holding it open keeps reap at that point, so the second
+	// StartProcess below runs while the exit is already observable.
+	waitOnExit := make(chan struct{})
+	var release sync.Once
+	releaseReap := func() { release.Do(func() { close(waitOnExit) }) }
+	t.Cleanup(releaseReap)
+	cfg.OnExit = func(d time.Duration, exitClass string) {
+		<-waitOnExit
+	}
+
+	client := setupTestServerWithConfig(t, cfg)
+	ctx := context.Background()
+
+	proc, err := client.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{Command: []string{"true"}})
+	if err != nil {
+		t.Fatalf("StartProcess failed: %v", err)
+	}
+
+	for {
+		p, err := client.GetProcess(ctx, &ateenvv1alpha.GetProcessRequest{ProcessId: proc.GetProcessId()})
+		if err != nil {
+			t.Fatalf("GetProcess failed: %v", err)
+		}
+		if p.GetState() == ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, err = client.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{Command: []string{"true"}})
+	releaseReap()
+
+	if err != nil {
+		if status.Code(err) == codes.ResourceExhausted {
+			t.Fatalf("StartProcess after the previous process was reported EXITED: %v", err)
+		}
+		t.Fatalf("StartProcess failed with unexpected error: %v", err)
 	}
 }

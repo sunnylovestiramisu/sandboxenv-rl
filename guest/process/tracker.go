@@ -524,6 +524,8 @@ func (t *Tracker) reap(state *ProcessState, cmd *exec.Cmd, stdoutFile, stderrFil
 	_ = stdoutFile.Close()
 	_ = stderrFile.Close()
 
+	t.decrementActive()
+
 	state.mu.Lock()
 	state.FinishedAt = finishedAt
 	state.State = ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED
@@ -541,7 +543,6 @@ func (t *Tracker) reap(state *ProcessState, cmd *exec.Cmd, stdoutFile, stderrFil
 
 	close(state.done)
 	state.output.notify()
-	t.decrementActive()
 }
 
 // exitClassOf classifies a reaped process for TrackerConfig.OnExit.
