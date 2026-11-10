@@ -213,6 +213,11 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
   `Client` round robin. `Connections > 1` with `GRPCConn` is an error from `NewClient`.
 - The loader's `EnvBackend` becomes one `env.Client` with `Connections`; `EnvBackend.pick` goes
   away.
+- As built (#317): `Connections` below zero is an error too. The same pull request adds
+  `ClientOptions.DialOptions` (G4 of #292), also an error with `GRPCConn`, and the handle accessors
+  `Env.Atespace`, `Env.Info`, `Process.Env` and `Process.Info` (G5). Python's fleet picks a
+  connection by a hash of the actor id; Go keeps the plan's round robin, so two `Env` handles for
+  one environment can use two connections.
 
 ### PR 6: metrics and the span deltas
 

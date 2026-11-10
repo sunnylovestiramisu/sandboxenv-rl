@@ -217,6 +217,17 @@ user needs to know across them.
   it returns first. `Poll` is off by default, and `Run` streams as before.
   `ShellResponse.Duration` and `TimedOut` (exit 137 at or past `Timeout`, the
   Python client's heuristic), in both modes.
+- Go client: `ClientOptions.Connections` dials that many connections (0 and 1
+  mean one). `Create` and `Env` hand them out round robin, and an `Env` sends
+  every call on the connection it got; the other `Client` calls round robin.
+  `ClientOptions.DialOptions` adds gRPC dial options to every connection the
+  client dials, after its own, as the Python client's `channel_options`. Both
+  are errors with `GRPCConn` (`Connections` above one). `Close` closes every
+  connection the client dialed. The swebench-loader's `-connections` uses
+  `Connections`.
+- Go client: `Env.Atespace`, `Env.Info`, `Process.Env` and `Process.Info`, as
+  the Python client's `Env.atespace`, `Env.info()`, `Process.env` and
+  `Process.info()`.
 - swebench-loader: `run -enable-tracing` records every event as a span under one
   `swebench-loader.run` span; the JSONL is unchanged.
 - `examples/grpo` and the NeMo Gym rollout benchmark record their phases with

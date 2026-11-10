@@ -35,10 +35,20 @@ type Env struct {
 	id       string
 	atespace string
 	client   *Client
+	conn     *conn // every call of the Env goes on it
 }
 
 // ID returns the environment's identifier.
 func (e *Env) ID() string { return e.id }
+
+// Atespace returns the environment's atespace.
+func (e *Env) Atespace() string { return e.atespace }
+
+// Info returns the environment's current status and configuration, as
+// Client.Get does.
+func (e *Env) Info(ctx context.Context) (*ateenvv1alpha.Environment, error) {
+	return e.client.get(ctx, e.conn, e.atespace, e.id)
+}
 
 func (e *Env) withEnv(ctx context.Context) context.Context {
 	return e.client.withAuth(metadata.AppendToOutgoingContext(ctx, "x-env-id", e.id, "x-env-atespace", e.atespace))
@@ -47,18 +57,18 @@ func (e *Env) withEnv(ctx context.Context) context.Context {
 // Suspend checkpoints and stops the environment using gRPC; it returns once
 // the snapshot is in object storage.
 func (e *Env) Suspend(ctx context.Context) error {
-	return e.client.Suspend(ctx, e.atespace, e.id)
+	return e.client.suspend(ctx, e.conn, e.atespace, e.id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_UNSPECIFIED)
 }
 
 // SuspendLocal checkpoints and stops the environment and returns once the
 // snapshot is on the node; see Client.SuspendLocal.
 func (e *Env) SuspendLocal(ctx context.Context) error {
-	return e.client.SuspendLocal(ctx, e.atespace, e.id)
+	return e.client.suspend(ctx, e.conn, e.atespace, e.id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_LOCAL)
 }
 
 // Delete removes the environment permanently using gRPC.
 func (e *Env) Delete(ctx context.Context) error {
-	return e.client.Delete(ctx, e.atespace, e.id)
+	return e.client.delete(ctx, e.conn, e.atespace, e.id)
 }
 
 // Shell runs a shell command line inside the environment and captures its
@@ -303,7 +313,7 @@ func (e *Env) ReadFile(ctx context.Context, p string) (_ io.ReadCloser, err erro
 
 func (e *Env) readFile(ctx context.Context, p string) (io.ReadCloser, error) {
 	ctx = e.withEnv(ctx)
-	stream, err := e.client.filesystem.ReadFile(ctx, &ateenvv1alpha.ReadFileRequest{
+	stream, err := e.conn.filesystem.ReadFile(ctx, &ateenvv1alpha.ReadFileRequest{
 		Path: p,
 	})
 	if err != nil {
@@ -381,7 +391,7 @@ func (e *Env) writeFile(ctx context.Context, p string, r io.Reader, mode fs.File
 		endSpan(span, err)
 	}()
 	ctx = e.withEnv(ctx)
-	stream, err := e.client.filesystem.WriteFile(ctx)
+	stream, err := e.conn.filesystem.WriteFile(ctx)
 	if err != nil {
 		return fromGRPCError(err)
 	}

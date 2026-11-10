@@ -22,7 +22,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	env "github.com/agent-substrate/env/clients/go"
@@ -157,13 +156,12 @@ func WithPlacement(plan *schema.ImagePlacement) EnvBackendOption {
 
 // EnvBackend is the Backend over the ate-env API through the Go SDK.
 //
-// It holds several connections and hands them out round-robin per
-// environment: a Kubernetes Service balances per connection, so one
-// connection would put every task on one API replica, and gRPC caps the
-// concurrent streams on a connection.
+// Its client holds several connections and hands them out round-robin per
+// environment (env.ClientOptions.Connections): a Kubernetes Service
+// balances per connection, so one connection would put every task on one
+// API replica, and gRPC caps the concurrent streams on a connection.
 type EnvBackend struct {
-	clients      []*env.Client
-	next         atomic.Uint64
+	client       *env.Client
 	atespace     string
 	baseTemplate string
 	deletes      deleteLimits
@@ -312,37 +310,21 @@ func NewEnvBackend(endpoint, atespace, baseTemplate string, connections int, aut
 	for _, opt := range opts {
 		opt(b)
 	}
-	for i := 0; i < connections; i++ {
-		c, err := env.NewClient(env.ClientOptions{Endpoint: endpoint, AuthToken: authToken})
-		if err != nil {
-			b.Close()
-			return nil, err
-		}
-		b.clients = append(b.clients, c)
+	c, err := env.NewClient(env.ClientOptions{Endpoint: endpoint, AuthToken: authToken, Connections: connections})
+	if err != nil {
+		return nil, err
 	}
+	b.client = c
 	return b, nil
 }
 
 // Close releases the API connections.
-func (b *EnvBackend) Close() error {
-	var first error
-	for _, c := range b.clients {
-		if err := c.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
-}
-
-// pick returns the next connection round-robin.
-func (b *EnvBackend) pick() *env.Client {
-	return b.clients[int(b.next.Add(1)-1)%len(b.clients)]
-}
+func (b *EnvBackend) Close() error { return b.client.Close() }
 
 // Delete implements Backend, under the backend's delete cap and retries.
 func (b *EnvBackend) Delete(ctx context.Context, id string) error {
 	return b.deletes.do(ctx, func(ctx context.Context) error {
-		return b.pick().Delete(ctx, b.atespace, id)
+		return b.client.Delete(ctx, b.atespace, id)
 	})
 }
 
@@ -352,9 +334,9 @@ func (b *EnvBackend) Delete(ctx context.Context, id string) error {
 // node and the upload goes on in the background).
 func (b *EnvBackend) SuspendWithMode(ctx context.Context, id string, async bool) error {
 	if async {
-		return b.pick().SuspendLocal(ctx, b.atespace, id)
+		return b.client.SuspendLocal(ctx, b.atespace, id)
 	}
-	return b.pick().Suspend(ctx, b.atespace, id)
+	return b.client.Suspend(ctx, b.atespace, id)
 }
 
 // CheckSuspendLocal fails when the ate-env-api does not serve the suspend
@@ -362,9 +344,7 @@ func (b *EnvBackend) SuspendWithMode(ctx context.Context, id string, async bool)
 // run that parks with suspend-async stops before it starts instead of failing
 // every suspend with InvalidArgument.
 func (b *EnvBackend) CheckSuspendLocal(ctx context.Context) error {
-	// The first connection, so the check does not advance the round robin;
-	// every connection names the same endpoint.
-	info, err := b.clients[0].ServerInfo(ctx)
+	info, err := b.client.ServerInfo(ctx)
 	if err != nil {
 		if status.Code(err) == codes.Unimplemented {
 			return fmt.Errorf("this ate-env-api predates GetServerInfo and cannot suspend locally; use -park suspend: %w", err)
@@ -403,7 +383,7 @@ func (b *EnvBackend) Create(ctx context.Context, id, image string) (Sandbox, err
 
 // CreateWith implements ImageWarmer: Create with options.
 func (b *EnvBackend) CreateWith(ctx context.Context, id, image string, opts CreateOptions) (Sandbox, error) {
-	e, err := b.pick().Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{
+	e, err := b.client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{
 		Id:             id,
 		Atespace:       b.atespace,
 		Template:       &ateenvv1alpha.Template{Name: b.baseTemplate, Atespace: b.atespace},
@@ -418,7 +398,7 @@ func (b *EnvBackend) CreateWith(ctx context.Context, id, image string, opts Crea
 
 // Node implements ImageWarmer.
 func (b *EnvBackend) Node(ctx context.Context, id string) (string, error) {
-	e, err := b.pick().Get(ctx, b.atespace, id)
+	e, err := b.client.Get(ctx, b.atespace, id)
 	if err != nil {
 		return "", fmt.Errorf("get %s: %w", id, err)
 	}
@@ -427,7 +407,7 @@ func (b *EnvBackend) Node(ctx context.Context, id string) (string, error) {
 
 // EnsureImageTemplate implements ImageWarmer.
 func (b *EnvBackend) EnsureImageTemplate(ctx context.Context, image string) (ImageState, error) {
-	st, err := b.pick().EnsureImageTemplate(ctx, &ateenvv1alpha.EnsureImageTemplateRequest{
+	st, err := b.client.EnsureImageTemplate(ctx, &ateenvv1alpha.EnsureImageTemplateRequest{
 		RootfsImage: image,
 		Template:    &ateenvv1alpha.Template{Name: b.baseTemplate, Atespace: b.atespace},
 		Atespace:    b.atespace,
@@ -440,7 +420,7 @@ func (b *EnvBackend) EnsureImageTemplate(ctx context.Context, image string) (Ima
 
 // ImageStatus implements ImageWarmer.
 func (b *EnvBackend) ImageStatus(ctx context.Context, image string) (ImageState, error) {
-	st, err := b.pick().ImageStatus(ctx, &ateenvv1alpha.GetImageStatusRequest{
+	st, err := b.client.ImageStatus(ctx, &ateenvv1alpha.GetImageStatusRequest{
 		RootfsImage: image,
 		Template:    &ateenvv1alpha.Template{Name: b.baseTemplate, Atespace: b.atespace},
 		Atespace:    b.atespace,

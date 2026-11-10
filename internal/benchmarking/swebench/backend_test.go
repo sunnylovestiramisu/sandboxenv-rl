@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -285,23 +287,28 @@ func (f *fakeAPI) SignalProcess(_ context.Context, req *ateenvv1alpha.SignalProc
 	return &ateenvv1alpha.Process{ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED, ExitCode: 137}, nil
 }
 
+// init makes the maps the handlers write.
+func (f *fakeAPI) init() {
+	f.polls = map[string]int{}
+	f.exited = map[string]bool{}
+	f.domainCounter = map[string]int{}
+	f.nodes = map[string]string{}
+	f.selectors = map[string]map[string]string{}
+	f.inflight = map[string]int{}
+	f.maxInflight = map[string]int{}
+	f.images = map[string]string{}
+	f.templates = map[string]bool{}
+	f.statusCalls = map[string]int{}
+	if f.goldenFail == nil {
+		f.goldenFail = map[string]string{}
+	}
+}
+
 // newFakeBackend serves fakeAPI over an in-memory connection and returns an
 // EnvBackend on it, the same path the binary uses with a real address.
 func newFakeBackend(t *testing.T, api *fakeAPI) *EnvBackend {
 	t.Helper()
-	api.polls = map[string]int{}
-	api.exited = map[string]bool{}
-	api.domainCounter = map[string]int{}
-	api.nodes = map[string]string{}
-	api.selectors = map[string]map[string]string{}
-	api.inflight = map[string]int{}
-	api.maxInflight = map[string]int{}
-	api.images = map[string]string{}
-	api.templates = map[string]bool{}
-	api.statusCalls = map[string]int{}
-	if api.goldenFail == nil {
-		api.goldenFail = map[string]string{}
-	}
+	api.init()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
 	ateenvv1alpha.RegisterEnvironmentServiceServer(srv, api)
@@ -319,7 +326,7 @@ func newFakeBackend(t *testing.T, api *fakeAPI) *EnvBackend {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close(); _ = conn.Close(); srv.Stop() })
-	b := &EnvBackend{clients: []*env.Client{c}, atespace: "ate-env", baseTemplate: "default-template", deletes: defaultDeleteLimits()}
+	b := &EnvBackend{client: c, atespace: "ate-env", baseTemplate: "default-template", deletes: defaultDeleteLimits()}
 	return b
 }
 
@@ -444,38 +451,84 @@ func TestEnvBackendDeleteRateCap(t *testing.T) {
 	}
 }
 
+// The backend's connections reach the API as that many TCP connections,
+// and every call of one sandbox goes on the connection it was created on.
+// NewEnvBackend takes 0 for 1.
 func TestEnvBackendSpreadsConnections(t *testing.T) {
-	// grpc.NewClient does not dial until the first call, so a backend over
-	// an unreachable address is enough to check the pool and the rotation.
-	b, err := NewEnvBackend("127.0.0.1:1", "ate-env", "default-template", 3, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-	if len(b.clients) != 3 {
-		t.Fatalf("%d clients, want 3", len(b.clients))
-	}
-	seen := map[int]int{}
-	for i := 0; i < 9; i++ {
-		c := b.pick()
-		for j, cc := range b.clients {
-			if cc == c {
-				seen[j]++
+	for _, tc := range []struct{ connections, want int }{{3, 3}, {0, 1}} {
+		t.Run(fmt.Sprint(tc.connections), func(t *testing.T) {
+			api := &fakeAPI{pollsUntilExit: 1}
+			api.init()
+			// peers records the client address, one per TCP connection,
+			// of each call per sandbox: from the request on a create, from
+			// the x-env-id header on a guest call.
+			var (
+				mu    sync.Mutex
+				peers = map[string]map[string]bool{}
+			)
+			record := func(ctx context.Context, req any) {
+				id := ""
+				if r, ok := req.(interface{ GetId() string }); ok {
+					id = r.GetId()
+				}
+				if md, _ := metadata.FromIncomingContext(ctx); len(md.Get("x-env-id")) > 0 {
+					id = md.Get("x-env-id")[0]
+				}
+				p, _ := peer.FromContext(ctx)
+				mu.Lock()
+				defer mu.Unlock()
+				if peers[id] == nil {
+					peers[id] = map[string]bool{}
+				}
+				peers[id][p.Addr.String()] = true
 			}
-		}
-	}
-	for j := 0; j < 3; j++ {
-		if seen[j] != 3 {
-			t.Fatalf("connection %d picked %d times, want 3: %v", j, seen[j], seen)
-		}
-	}
-	one, err := NewEnvBackend("127.0.0.1:1", "ate-env", "default-template", 0, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer one.Close()
-	if len(one.clients) != 1 {
-		t.Fatalf("connections 0 must mean 1, got %d", len(one.clients))
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := grpc.NewServer(
+				grpc.ChainUnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+					record(ctx, req)
+					return h(ctx, req)
+				}),
+				grpc.ChainStreamInterceptor(func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, h grpc.StreamHandler) error {
+					record(ss.Context(), nil)
+					return h(srv, ss)
+				}))
+			ateenvv1alpha.RegisterEnvironmentServiceServer(srv, api)
+			ateenvv1alpha.RegisterProcessServiceServer(srv, api)
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+
+			b, err := NewEnvBackend(lis.Addr().String(), "ate-env", "default-template", tc.connections, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer b.Close()
+			ctx := context.Background()
+			for i := range 6 {
+				sb, err := b.Create(ctx, fmt.Sprintf("e%d", i), "reg/img@"+goodDigest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sb.Run(ctx, "true", time.Minute); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			all := map[string]bool{}
+			for i := range 6 {
+				id := fmt.Sprintf("e%d", i)
+				if len(peers[id]) != 1 {
+					t.Errorf("sandbox %s used %d connections, want 1: %v", id, len(peers[id]), peers[id])
+				}
+				maps.Copy(all, peers[id])
+			}
+			if len(all) != tc.want {
+				t.Errorf("%d connections used, want %d: %v", len(all), tc.want, all)
+			}
+		})
 	}
 }
 

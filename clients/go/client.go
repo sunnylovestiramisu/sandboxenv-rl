@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
@@ -48,6 +49,7 @@ type ClientOptions struct {
 	Endpoint string
 
 	// GRPCConn overrides the grpc.ClientConn used for ate-env-api RPCs.
+	// Connections above one and DialOptions are errors with it.
 	GRPCConn *grpc.ClientConn
 
 	// AuthToken, if non-empty, is sent as an "Authorization: Bearer <token>"
@@ -71,21 +73,63 @@ type ClientOptions struct {
 	// TraceServiceName prefixes span names and names the instrumentation
 	// scope. Empty means DefaultTraceServiceName.
 	TraceServiceName string
+
+	// Connections is how many connections the client dials to Endpoint,
+	// each its own grpc.ClientConn and TCP connection; 0 and 1 mean one.
+	// The client sets no load-balancing policy (grpc-go's default,
+	// pick_first, opens one subchannel per ClientConn). Create and Env hand
+	// them out round robin, and an Env sends every call on the one it got,
+	// so one environment's streams share a connection. The other Client
+	// methods round robin call by call, on a counter of their own. A
+	// Kubernetes Service balances per connection, and a connection caps its
+	// concurrent streams, so use at least as many as ate-env-api has
+	// replicas when many environments are in flight. More than one is an
+	// error with GRPCConn.
+	Connections int
+
+	// DialOptions are added to every connection the client dials, after
+	// its own (insecure transport credentials, the bearer token, the trace
+	// handler), thus an option that sets one value replaces the client's:
+	// grpc.WithTransportCredentials replaces the client's credentials,
+	// while grpc.WithCredentialsBundle is an error alongside them. Use
+	// them for keepalive, window sizes or the maximum message size, as the
+	// Python client's channel_options. An error with GRPCConn, which the
+	// caller dials itself.
+	DialOptions []grpc.DialOption
 }
 
 // Client manages environments against an ate-env-api endpoint over gRPC.
 type Client struct {
-	endpoint   string
-	opts       ClientOptions
-	connAuth   bool // the connection sends AuthToken itself
-	grpcConn   *grpc.ClientConn
-	grpc       ateenvv1alpha.EnvironmentServiceClient
-	process    ateenvv1alpha.ProcessServiceClient
-	filesystem ateenvv1alpha.FileSystemServiceClient
-	tracer     clientTracer
+	endpoint string
+	opts     ClientOptions
+	connAuth bool // the connection sends AuthToken itself
+	conns    []*conn
+	// nextEnv picks the connection of a new Env, nextCall that of a
+	// Client call, so neither skews the other's round robin.
+	nextEnv, nextCall atomic.Uint64
+	tracer            clientTracer
 	// pollMin and pollMax override the polling bounds of ShellRequest.Poll
 	// in tests (SetPollBoundsForTest); zero uses the defaults.
 	pollMin, pollMax time.Duration
+}
+
+// conn is one connection of a Client and the service clients on it.
+type conn struct {
+	cc         *grpc.ClientConn
+	env        ateenvv1alpha.EnvironmentServiceClient
+	process    ateenvv1alpha.ProcessServiceClient
+	filesystem ateenvv1alpha.FileSystemServiceClient
+}
+
+func newConn(cc *grpc.ClientConn) *conn {
+	return &conn{
+		cc:  cc,
+		env: ateenvv1alpha.NewEnvironmentServiceClient(cc),
+		// Guest calls read their trailer for a start failure (see
+		// StartError).
+		process:    ateenvv1alpha.NewProcessServiceClient(trailerConn{cc}),
+		filesystem: ateenvv1alpha.NewFileSystemServiceClient(trailerConn{cc}),
+	}
 }
 
 // NewClient returns a Client targeting endpoint.
@@ -93,60 +137,81 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.Endpoint == "" && opts.GRPCConn == nil {
 		return nil, errors.New("env: ClientOptions.Endpoint is required")
 	}
+	if opts.Connections < 0 {
+		return nil, fmt.Errorf("env: ClientOptions.Connections is %d, want 0 or more", opts.Connections)
+	}
+	if opts.GRPCConn != nil && opts.Connections > 1 {
+		return nil, errors.New("env: ClientOptions.Connections above one cannot be set with GRPCConn")
+	}
+	if opts.GRPCConn != nil && len(opts.DialOptions) > 0 {
+		return nil, errors.New("env: ClientOptions.DialOptions cannot be set with GRPCConn")
+	}
 	endpoint := strings.TrimRight(opts.Endpoint, "/")
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") && endpoint != "" {
 		endpoint = "http://" + endpoint
 	}
 
-	var (
-		grpcConn *grpc.ClientConn
-		err      error
-	)
-	if opts.GRPCConn != nil {
-		grpcConn = opts.GRPCConn
-	} else {
-		target := strings.TrimPrefix(endpoint, "http://")
-		target = strings.TrimPrefix(target, "https://")
-		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-		if opts.AuthToken != "" {
-			dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerCredentials{token: opts.AuthToken}))
-		}
-		if opts.TracerProvider != nil {
-			dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
-				otelgrpc.WithTracerProvider(opts.TracerProvider),
-				otelgrpc.WithPropagators(tracePropagator))))
-		}
-		grpcConn, err = grpc.NewClient(target, dialOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("env: connecting to gRPC %s: %w", target, err)
-		}
-	}
-
-	return &Client{
+	c := &Client{
 		endpoint: endpoint,
 		opts:     opts,
 		connAuth: opts.GRPCConn == nil && opts.AuthToken != "",
-		grpcConn: grpcConn,
-		grpc:     ateenvv1alpha.NewEnvironmentServiceClient(grpcConn),
-		// Guest calls read their trailer for a start failure (see
-		// StartError).
-		process:    ateenvv1alpha.NewProcessServiceClient(trailerConn{grpcConn}),
-		filesystem: ateenvv1alpha.NewFileSystemServiceClient(trailerConn{grpcConn}),
-		tracer:     newClientTracer(opts),
-	}, nil
+		tracer:   newClientTracer(opts),
+	}
+	if opts.GRPCConn != nil {
+		c.conns = []*conn{newConn(opts.GRPCConn)}
+		return c, nil
+	}
+	target := strings.TrimPrefix(endpoint, "http://")
+	target = strings.TrimPrefix(target, "https://")
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if opts.AuthToken != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerCredentials{token: opts.AuthToken}))
+	}
+	if opts.TracerProvider != nil {
+		dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
+			otelgrpc.WithTracerProvider(opts.TracerProvider),
+			otelgrpc.WithPropagators(tracePropagator))))
+	}
+	dialOpts = append(dialOpts, opts.DialOptions...)
+	for range max(opts.Connections, 1) {
+		cc, err := grpc.NewClient(target, dialOpts...)
+		if err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("env: connecting to gRPC %s: %w", target, err)
+		}
+		c.conns = append(c.conns, newConn(cc))
+	}
+	return c, nil
 }
 
-// Close releases the client's resources.
-func (c *Client) Close() error {
-	if c.grpcConn != nil && c.opts.GRPCConn == nil {
-		return c.grpcConn.Close()
+// pick returns the next connection for a Client call, round robin.
+func (c *Client) pick() *conn { return c.next(&c.nextCall) }
+
+// pickEnv returns the connection for a new Env, round robin.
+func (c *Client) pickEnv() *conn { return c.next(&c.nextEnv) }
+
+func (c *Client) next(counter *atomic.Uint64) *conn {
+	if len(c.conns) == 1 {
+		return c.conns[0]
 	}
-	return nil
+	return c.conns[(counter.Add(1)-1)%uint64(len(c.conns))]
+}
+
+// Close closes the connections the client dialed; a GRPCConn stays open.
+func (c *Client) Close() error {
+	if c.opts.GRPCConn != nil {
+		return nil
+	}
+	var errs []error
+	for _, cn := range c.conns {
+		errs = append(errs, cn.cc.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // bearerCredentials sends the token on each RPC of the client's own
-// connection. That connection has no TLS (insecure credentials), thus it
-// cannot require transport security.
+// connection. That connection has no TLS (insecure credentials) unless
+// DialOptions replace them, thus it cannot require transport security.
 type bearerCredentials struct{ token string }
 
 func (b bearerCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
@@ -169,7 +234,8 @@ func (c *Client) withAuth(ctx context.Context) context.Context {
 }
 
 // Create registers a new env with the parameters given in req and
-// starts it using the gRPC EnvironmentService.
+// starts it using the gRPC EnvironmentService. The returned Env keeps the
+// connection the call went on (see ClientOptions.Connections).
 func (c *Client) Create(ctx context.Context, req *ateenvv1alpha.CreateEnvironmentRequest) (_ *Env, err error) {
 	ctx, span := c.tracer.startRPC(ctx, opCreateEnvironment, "CreateEnvironment",
 		AttrActorName.String(req.GetId()),
@@ -178,7 +244,8 @@ func (c *Client) Create(ctx context.Context, req *ateenvv1alpha.CreateEnvironmen
 		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
 		AttrRootfsImage.String(imageRefAttr(req.GetRootfsImage())))
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.CreateEnvironment(c.withAuth(ctx), req)
+	cn := c.pickEnv()
+	resp, err := cn.env.CreateEnvironment(c.withAuth(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -188,15 +255,19 @@ func (c *Client) Create(ctx context.Context, req *ateenvv1alpha.CreateEnvironmen
 		AttrAtespace.String(created.GetAtespace()),
 		AttrTemplateName.String(created.GetTemplate().GetName()),
 		AttrTemplateAtespace.String(created.GetTemplate().GetAtespace()))
-	return c.Env(created.GetAtespace(), created.GetId()), nil
+	return c.envOn(cn, created.GetAtespace(), created.GetId()), nil
 }
 
 // Get returns the environment's current status and configuration using the
 // gRPC EnvironmentService.
-func (c *Client) Get(ctx context.Context, atespace, id string) (_ *ateenvv1alpha.Environment, err error) {
+func (c *Client) Get(ctx context.Context, atespace, id string) (*ateenvv1alpha.Environment, error) {
+	return c.get(ctx, c.pick(), atespace, id)
+}
+
+func (c *Client) get(ctx context.Context, cn *conn, atespace, id string) (_ *ateenvv1alpha.Environment, err error) {
 	ctx, span := c.tracer.startRPC(ctx, opGetEnvironment, "GetEnvironment", AttrActorName.String(id), AttrAtespace.String(atespace))
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.GetEnvironment(c.withAuth(ctx), &ateenvv1alpha.GetEnvironmentRequest{Id: id, Atespace: atespace})
+	resp, err := cn.env.GetEnvironment(c.withAuth(ctx), &ateenvv1alpha.GetEnvironmentRequest{Id: id, Atespace: atespace})
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -211,7 +282,7 @@ func (c *Client) Get(ctx context.Context, atespace, id string) (_ *ateenvv1alpha
 // pending, is left as it is: the call returns at once and does not wait for
 // the upload.
 func (c *Client) Suspend(ctx context.Context, atespace, id string) error {
-	return c.suspend(ctx, atespace, id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_UNSPECIFIED)
+	return c.suspend(ctx, c.pick(), atespace, id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_UNSPECIFIED)
 }
 
 // SuspendLocal checkpoints and stops the environment and returns once the
@@ -223,10 +294,10 @@ func (c *Client) Suspend(ctx context.Context, atespace, id string) error {
 // ServerInfo's features for "suspend_mode" first. Like Suspend, it leaves an
 // environment that is already suspended or paused as it is.
 func (c *Client) SuspendLocal(ctx context.Context, atespace, id string) error {
-	return c.suspend(ctx, atespace, id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_LOCAL)
+	return c.suspend(ctx, c.pick(), atespace, id, ateenvv1alpha.SuspendMode_SUSPEND_MODE_LOCAL)
 }
 
-func (c *Client) suspend(ctx context.Context, atespace, id string, mode ateenvv1alpha.SuspendMode) (err error) {
+func (c *Client) suspend(ctx context.Context, cn *conn, atespace, id string, mode ateenvv1alpha.SuspendMode) (err error) {
 	ctx, span := c.tracer.startRPC(ctx, opSuspendEnvironment, "SuspendEnvironment", AttrActorName.String(id), AttrAtespace.String(atespace))
 	defer func() { endSpan(span, err) }()
 	req := &ateenvv1alpha.SuspendEnvironmentRequest{
@@ -234,7 +305,7 @@ func (c *Client) suspend(ctx context.Context, atespace, id string, mode ateenvv1
 		Atespace: atespace,
 		Mode:     mode,
 	}
-	_, err = c.grpc.SuspendEnvironment(c.withAuth(ctx), req)
+	_, err = cn.env.SuspendEnvironment(c.withAuth(ctx), req)
 	if err != nil {
 		return fromGRPCError(err)
 	}
@@ -242,14 +313,18 @@ func (c *Client) suspend(ctx context.Context, atespace, id string, mode ateenvv1
 }
 
 // Delete removes the environment permanently using the gRPC EnvironmentService.
-func (c *Client) Delete(ctx context.Context, atespace, id string) (err error) {
+func (c *Client) Delete(ctx context.Context, atespace, id string) error {
+	return c.delete(ctx, c.pick(), atespace, id)
+}
+
+func (c *Client) delete(ctx context.Context, cn *conn, atespace, id string) (err error) {
 	ctx, span := c.tracer.startRPC(ctx, opDeleteEnvironment, "DeleteEnvironment", AttrActorName.String(id), AttrAtespace.String(atespace))
 	defer func() { endSpan(span, err) }()
 	req := &ateenvv1alpha.DeleteEnvironmentRequest{
 		Id:       id,
 		Atespace: atespace,
 	}
-	_, err = c.grpc.DeleteEnvironment(c.withAuth(ctx), req)
+	_, err = cn.env.DeleteEnvironment(c.withAuth(ctx), req)
 	if err != nil {
 		return fromGRPCError(err)
 	}
@@ -263,7 +338,7 @@ func (c *Client) Delete(ctx context.Context, atespace, id string) (err error) {
 func (c *Client) ServerInfo(ctx context.Context) (_ *ateenvv1alpha.GetServerInfoResponse, err error) {
 	ctx, span := c.tracer.startRPC(ctx, opGetServerInfo, "GetServerInfo")
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.GetServerInfo(c.withAuth(ctx), &ateenvv1alpha.GetServerInfoRequest{})
+	resp, err := c.pick().env.GetServerInfo(c.withAuth(ctx), &ateenvv1alpha.GetServerInfoRequest{})
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -279,7 +354,7 @@ func (c *Client) ImageStatus(ctx context.Context, req *ateenvv1alpha.GetImageSta
 		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
 		AttrAtespace.String(req.GetAtespace()))
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.GetImageStatus(c.withAuth(ctx), req)
+	resp, err := c.pick().env.GetImageStatus(c.withAuth(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -300,7 +375,7 @@ func (c *Client) EnsureImageTemplate(ctx context.Context, req *ateenvv1alpha.Ens
 		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
 		AttrAtespace.String(req.GetAtespace()))
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.EnsureImageTemplate(c.withAuth(ctx), req)
+	resp, err := c.pick().env.EnsureImageTemplate(c.withAuth(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -325,7 +400,7 @@ func (c *Client) ListPlacementDomains(ctx context.Context, req *ateenvv1alpha.Li
 		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
 		AttrAtespace.String(req.GetAtespace()))
 	defer func() { endSpan(span, err) }()
-	resp, err := c.grpc.ListPlacementDomains(c.withAuth(ctx), req)
+	resp, err := c.pick().env.ListPlacementDomains(c.withAuth(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -344,7 +419,7 @@ func (c *Client) WarmImage(ctx context.Context, req *ateenvv1alpha.WarmImageRequ
 		AttrTemplateAtespace.String(req.GetTemplate().GetAtespace()),
 		AttrAtespace.String(req.GetAtespace()))
 	defer func() { endSpan(span, err) }()
-	stream, err := c.grpc.WarmImage(c.withAuth(ctx), req)
+	stream, err := c.pick().env.WarmImage(c.withAuth(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -373,7 +448,13 @@ func (c *Client) WarmImage(ctx context.Context, req *ateenvv1alpha.WarmImageRequ
 }
 
 // Env returns a handle to an environment without checking that it exists.
+// The handle takes the next connection, round robin, and keeps it (see
+// ClientOptions.Connections).
 func (c *Client) Env(atespace, id string) *Env {
+	return c.envOn(c.pickEnv(), atespace, id)
+}
+
+func (c *Client) envOn(cn *conn, atespace, id string) *Env {
 	if atespace == "" {
 		atespace = DefaultAtespace
 	}
@@ -381,5 +462,6 @@ func (c *Client) Env(atespace, id string) *Env {
 		id:       id,
 		atespace: atespace,
 		client:   c,
+		conn:     cn,
 	}
 }

@@ -55,6 +55,7 @@ type fixture struct {
 	client  *env.Client
 	guest   string // guest workdir
 	apiURL  string
+	calls   *callLog
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -89,10 +90,11 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(service.Close)
 
 	// The interceptors ate-env-api runs, so each call the SDK makes is checked
-	// for fields the server does not know.
+	// for fields the server does not know, after the call log's.
+	calls := newCallLog()
 	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(unknownfields.UnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(unknownfields.StreamServerInterceptor()),
+		grpc.ChainUnaryInterceptor(calls.unary, unknownfields.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(calls.stream, unknownfields.StreamServerInterceptor()),
 	)
 	ateenvv1alpha.RegisterEnvironmentServiceServer(grpcServer, service)
 	ateenvv1alpha.RegisterProcessServiceServer(grpcServer, service)
@@ -110,6 +112,7 @@ func newFixture(t *testing.T) *fixture {
 
 	srv := httptest.NewUnstartedServer(mux)
 	srv.Config.Protocols = &protocols
+	srv.Config.ConnState = calls.connState
 	srv.Start()
 	t.Cleanup(srv.Close)
 
@@ -121,11 +124,17 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { client.Close() })
 
-	return &fixture{router: router, control: control, service: service, client: client, guest: t.TempDir(), apiURL: srv.URL}
+	return &fixture{router: router, control: control, service: service, client: client, guest: t.TempDir(), apiURL: srv.URL, calls: calls}
 }
 
 // create makes a env whose guest handler serves from a temp dir.
 func (f *fixture) create(t *testing.T, id string) *env.Env {
+	t.Helper()
+	return f.createWith(t, f.client, id)
+}
+
+// createWith is create through client.
+func (f *fixture) createWith(t *testing.T, client *env.Client, id string) *env.Env {
 	t.Helper()
 	workDir := t.TempDir()
 	grpcGuestServer, cleanup, err := guest.NewServer(guest.Config{
@@ -140,7 +149,7 @@ func (f *fixture) create(t *testing.T, id string) *env.Env {
 
 	f.router.Register(id, grpcGuestServer)
 
-	sb, err := f.client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
+	sb, err := client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
 		Id: id,
 		Template: &ateenvv1alpha.Template{
 			Name:     "default-template",

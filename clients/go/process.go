@@ -36,9 +36,17 @@ type Process struct {
 // ID returns the process identifier.
 func (p *Process) ID() string { return p.id }
 
+// Env returns the environment the process runs in.
+func (p *Process) Env() *Env { return p.env }
+
+// Info returns the current state of the process, as Env.FindProcess does.
+func (p *Process) Info(ctx context.Context) (*ateenvv1alpha.Process, error) {
+	return p.env.FindProcess(ctx, p.id)
+}
+
 // StartProcess launches a process and returns a handle to it.
 func (e *Env) StartProcess(ctx context.Context, req *ateenvv1alpha.StartProcessRequest) (*Process, error) {
-	pb, err := e.client.process.StartProcess(e.withEnv(ctx), req)
+	pb, err := e.conn.process.StartProcess(e.withEnv(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -53,7 +61,7 @@ func (e *Env) Process(id string) *Process {
 // FindProcess returns the current state of the process with the given ID,
 // or an error wrapping ErrNotFound if the guest no longer tracks it.
 func (e *Env) FindProcess(ctx context.Context, id string) (*ateenvv1alpha.Process, error) {
-	pb, err := e.client.process.GetProcess(e.withEnv(ctx), &ateenvv1alpha.GetProcessRequest{ProcessId: id})
+	pb, err := e.conn.process.GetProcess(e.withEnv(ctx), &ateenvv1alpha.GetProcessRequest{ProcessId: id})
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -88,7 +96,7 @@ func (p *Process) Wait(ctx context.Context) (*ateenvv1alpha.Process, error) {
 
 // Signal delivers sig to the process and its process group.
 func (p *Process) Signal(ctx context.Context, sig ateenvv1alpha.Signal) error {
-	_, err := p.env.client.process.SignalProcess(p.env.withEnv(ctx), &ateenvv1alpha.SignalProcessRequest{ProcessId: p.id, Signal: sig})
+	_, err := p.env.conn.process.SignalProcess(p.env.withEnv(ctx), &ateenvv1alpha.SignalProcessRequest{ProcessId: p.id, Signal: sig})
 	return fromGRPCError(err)
 }
 
@@ -96,7 +104,7 @@ func (p *Process) Signal(ctx context.Context, sig ateenvv1alpha.Signal) error {
 // delivers SIGWINCH to its foreground process group. The process must have
 // been started with a TTY.
 func (p *Process) Resize(ctx context.Context, rows, cols uint32) error {
-	_, err := p.env.client.process.ResizeProcess(p.env.withEnv(ctx), &ateenvv1alpha.ResizeProcessRequest{
+	_, err := p.env.conn.process.ResizeProcess(p.env.withEnv(ctx), &ateenvv1alpha.ResizeProcessRequest{
 		ProcessId: p.id,
 		Rows:      rows,
 		Cols:      cols,
@@ -127,7 +135,7 @@ func (p *Process) Output(ctx context.Context, req *ateenvv1alpha.StreamProcessOu
 		req = proto.Clone(req).(*ateenvv1alpha.StreamProcessOutputRequest)
 	}
 	req.ProcessId = p.id
-	stream, err := p.env.client.process.StreamProcessOutput(p.env.withEnv(ctx), req)
+	stream, err := p.env.conn.process.StreamProcessOutput(p.env.withEnv(ctx), req)
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
@@ -160,7 +168,7 @@ func (s outputStream) RecvMsg(m any) error {
 // as they happen; Close sends EOF. The process must have been started with
 // stdin enabled. Errors from the guest surface on Write or Close.
 func (p *Process) Stdin(ctx context.Context) (io.WriteCloser, error) {
-	stream, err := p.env.client.process.WriteProcessInput(p.env.withEnv(ctx))
+	stream, err := p.env.conn.process.WriteProcessInput(p.env.withEnv(ctx))
 	if err != nil {
 		return nil, fromGRPCError(err)
 	}
