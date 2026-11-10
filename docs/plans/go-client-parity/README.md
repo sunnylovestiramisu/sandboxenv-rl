@@ -235,6 +235,10 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
   `ate_env.timed_out` are in both clients from this PR on (D6).
 - [docs/observability.md](../../observability.md): the Go row of the enabling table and the trainer
   families list.
+- As built: `Env.WriteFile` and `Env.ReadFile` also align `ate_env.file.size` with `ate_env_rl.Env`
+  (set from `WriteFileResponse.bytes_written` or at the end of a clean read, omitted when the call
+  fails). `NewClient` reuses an existing `*prometheus.HistogramVec` on the same registerer and
+  returns an error if another collector type or label set already occupies the name.
 
 ### PR 7: parity vectors
 
