@@ -15,9 +15,9 @@
 # limitations under the License.
 
 # Run swebench-loader inside the cluster, next to ate-env-api, and bring the
-# events file back. The dataset, offline-exclusions.txt and any -trajectory
-# file (with the files next to it) are baked into the loader image (ko's
-# kodata directory), so the pod needs no bucket access; a
+# events file back. The dataset, offline-exclusions.txt, a -placement plan
+# and any -trajectory file (with the files next to it) are baked into the
+# loader image (ko's kodata directory), so the pod needs no bucket access; a
 # sidecar keeps the pod alive after the loader exits so the results can be
 # copied out with kubectl cp. The copy is retried; if it still fails, the Job
 # is kept and the script prints the command to fetch the file by hand.
@@ -257,6 +257,19 @@ bake_trajectory() {
   local IFS=','
   BAKED="${out[*]}"
 }
+
+# The -placement plan is baked next to the dataset, under its own name so the
+# run's "placement" label (the file's base name) tells plans apart, and the
+# flag is rewritten to the baked path. Relative paths resolve against the
+# caller's directory, like the dataset and the trajectories.
+bake_placement() {
+  local path="$1"
+  [[ "${path}" = /* ]] || path="${OUT_DIR}/${path}"
+  [[ -f "${path}" ]] || { echo "-placement needs an existing file: $1" >&2; exit 2; }
+  mkdir -p "${KODATA}/placement"
+  cp "${path}" "${KODATA}/placement/$(basename "${path}")"
+  BAKED="/var/run/ko/placement/$(basename "${path}")"
+}
 ARGS=()
 while (( $# )); do
   case "$1" in
@@ -265,6 +278,11 @@ while (( $# )); do
       bake_trajectory "$2"; ARGS+=("$1" "${BAKED}"); shift 2 ;;
     -trajectory=*|--trajectory=*)
       bake_trajectory "${1#*=}"; ARGS+=("${1%%=*}=${BAKED}"); shift ;;
+    -placement|--placement)
+      [[ $# -ge 2 ]] || { echo "$1 needs an existing file" >&2; exit 2; }
+      bake_placement "$2"; ARGS+=("$1" "${BAKED}"); shift 2 ;;
+    -placement=*|--placement=*)
+      bake_placement "${1#*=}"; ARGS+=("${1%%=*}=${BAKED}"); shift ;;
     *)
       ARGS+=("$1"); shift ;;
   esac

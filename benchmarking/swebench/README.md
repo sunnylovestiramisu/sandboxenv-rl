@@ -378,9 +378,10 @@ KO_DOCKER_REPO=gcr.io/PROJECT/repo benchmarking/swebench/run-in-cluster.sh swe-e
   -mode eval -images 500 -tasks-per-image 6 -width 500 -connections 8
 ```
 
-The script bakes the dataset, the exclusion list and any `-trajectory` file
-you pass (with the files its `write` steps name, so a grader script travels
-with its trajectory, and nothing else from its directory) into the loader image, runs a Job next to ate-env-api, follows the full loader log (step failures
+The script bakes the dataset, the exclusion list, any `-placement` plan and
+any `-trajectory` file you pass (with the files its `write` steps name, so a
+grader script travels with its trajectory, and nothing else from its
+directory) into the loader image, runs a Job next to ate-env-api, follows the full loader log (step failures
 included), copies the events file back to the current directory, prints the
 report and deletes the Job. `CONTEXT=<kubectl context>` selects the cluster;
 the same command with a different context and run id is how two clusters are

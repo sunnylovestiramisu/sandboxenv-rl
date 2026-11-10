@@ -7,6 +7,10 @@ user needs to know across them.
 ## Unreleased
 
 ### Added
+- `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to
+  the dataset (under the plan's own file name, so the run's `placement` label
+  tells plans apart) and rewrites the flag to the baked path; relative paths
+  resolve against the caller's directory.
 - Go client: `ClientOptions.MetricsRegisterer` registers the Prometheus
   histograms `ate_env_client_exec_seconds{status}`,
   `ate_env_client_suspend_seconds{status}` and
