@@ -245,7 +245,13 @@ type Process struct {
 	// Timestamp when the process started.
 	StartedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	// Timestamp when the process exited. Unset while RUNNING.
-	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	// Set once state is EXITED. true when the guest killed the process
+	// because StartProcessRequest.timeout, or the guest default timeout,
+	// elapsed; false when the process exited on its own or SignalProcess or
+	// any other signal killed it. Absent from a guest that predates the
+	// field, so a client can tell "not timed out" from "not reported".
+	TimedOut      *bool `protobuf:"varint,8,opt,name=timed_out,json=timedOut,proto3,oneof" json:"timed_out,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -327,6 +333,13 @@ func (x *Process) GetFinishedAt() *timestamppb.Timestamp {
 		return x.FinishedAt
 	}
 	return nil
+}
+
+func (x *Process) GetTimedOut() bool {
+	if x != nil && x.TimedOut != nil {
+		return *x.TimedOut
+	}
+	return false
 }
 
 // Pseudo-terminal configuration for interactive processes.
@@ -1206,7 +1219,7 @@ var File_proto_ateenv_v1alpha_guest_proto protoreflect.FileDescriptor
 
 const file_proto_ateenv_v1alpha_guest_proto_rawDesc = "" +
 	"\n" +
-	" proto/ateenv/v1alpha/guest.proto\x12\x0eateenv.v1alpha\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x9d\x02\n" +
+	" proto/ateenv/v1alpha/guest.proto\x12\x0eateenv.v1alpha\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcd\x02\n" +
 	"\aProcess\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x18\n" +
@@ -1217,7 +1230,10 @@ const file_proto_ateenv_v1alpha_guest_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
 	"\vfinished_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"finishedAt\"-\n" +
+	"finishedAt\x12 \n" +
+	"\ttimed_out\x18\b \x01(\bH\x00R\btimedOut\x88\x01\x01B\f\n" +
+	"\n" +
+	"_timed_out\"-\n" +
 	"\x03TTY\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\"\xab\x02\n" +
@@ -1403,6 +1419,7 @@ func file_proto_ateenv_v1alpha_guest_proto_init() {
 	if File_proto_ateenv_v1alpha_guest_proto != nil {
 		return
 	}
+	file_proto_ateenv_v1alpha_guest_proto_msgTypes[0].OneofWrappers = []any{}
 	file_proto_ateenv_v1alpha_guest_proto_msgTypes[5].OneofWrappers = []any{
 		(*ProcessOutput_Stdout)(nil),
 		(*ProcessOutput_Stderr)(nil),

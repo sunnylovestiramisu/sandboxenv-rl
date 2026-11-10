@@ -213,6 +213,31 @@ async def test_shell_killed_by_signal(fake_stack):
     assert fakes.processes.procs["proc-1"].timeout_seconds == 0.5
 
 
+async def test_shell_reports_guest_timed_out(fake_stack):
+    client, fakes = fake_stack
+    env = client.env("dev1")
+    fakes.processes.next_procs.append(FakeProc(signal=guest_pb2.SIGNAL_KILL, timed_out=True))
+    fakes.processes.next_procs.append(FakeProc(signal=guest_pb2.SIGNAL_KILL))
+    result = await env.shell("sleep 30", timeout=0.5)
+    assert result.exit_code == 137
+    assert result.timed_out is True
+    # A guest that predates Process.timed_out does not report it.
+    old = await env.shell("sleep 30", timeout=0.5)
+    assert old.exit_code == 137
+    assert old.timed_out is None
+
+
+async def test_wait_and_info_report_guest_timed_out(fake_stack):
+    client, fakes = fake_stack
+    env = client.env("dev1")
+    fakes.processes.next_procs.append(FakeProc(signal=guest_pb2.SIGNAL_KILL, timed_out=True))
+    proc = await env.start_process(["sleep", "30"], timeout=0.5)
+    info = await proc.wait()
+    assert info.exit_code == 137
+    assert info.timed_out is True
+    assert (await proc.info()).timed_out is True
+
+
 async def test_shell_empty_output(fake_stack):
     client, fakes = fake_stack
     env = client.env("dev1")

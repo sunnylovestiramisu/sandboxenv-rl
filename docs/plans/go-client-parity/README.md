@@ -203,6 +203,13 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
   for a guest that predates the field.
 - Follow [the extend-env-surface skill](../../../.agents/skills/extend-env-surface/SKILL.md). No
   server flag; the field is zero on an older guest, and `GetServerInfo` cannot speak for the guest.
+- As built (#330): the field is `optional bool timed_out = 8`, so a client tells an older guest
+  (field absent) from a guest that reports `false`; both clients use the heuristic only when the
+  field is absent. The guest sets it on every exited `Process`, with the signal guard of
+  `exitClassOf`, so a process that exits on its own just as its timer fires is not a timeout. The
+  swebench loader takes `ShellResponse.TimedOut` from the SDK drivers and keeps its own heuristic
+  for agent-sandbox, which reports no flag. Python's `Env.shell` returns `ShellResult.timed_out` but
+  its span still records no `ate_env.timed_out`.
 - `CHANGELOG.md`: one entry that names both clients and the guest (section 7).
 
 ### PR 5: connections

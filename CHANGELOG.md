@@ -15,6 +15,13 @@ user needs to know across them.
   the Python README's section order, with compiled examples in
   `clients/go/example_test.go` (`go test` runs `ExampleNewClient`, which needs
   no server).
+- guest: `Process.timed_out` (`optional bool`, set on every exited process)
+  is true when the guest killed the process at `StartProcessRequest.timeout`
+  or its default timeout, and false for any other exit, so an OOM kill at the
+  deadline no longer reads as a timeout. The Go client (`ShellResponse.TimedOut`),
+  the Python client (`ProcessInfo.timed_out`, `ShellResult.timed_out`,
+  `ExecResult.timed_out`) and the swebench loader use it, and fall back to the
+  exit-137 heuristic only for a guest that predates the field.
 - Go client: `ClientOptions.MetricsRegisterer` registers the Prometheus
   histograms `ate_env_client_exec_seconds{status}`,
   `ate_env_client_suspend_seconds{status}` and

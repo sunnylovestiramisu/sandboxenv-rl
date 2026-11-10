@@ -141,11 +141,18 @@ func (s *fakeSandbox) Run(ctx context.Context, command string, timeout time.Dura
 	s.b.commands = append(s.b.commands, s.id+": "+command)
 	s.b.mu.Unlock()
 	if code, ok := strings.CutPrefix(command, "exit "); ok {
+		// "exit N # timed_out=B" stands for an SDK driver that reports
+		// the guest's timed_out; plain "exit N" for one that does not.
+		var timedOut *bool
+		if c, flag, ok := strings.Cut(code, " # timed_out="); ok {
+			v := flag == "true"
+			code, timedOut = c, &v
+		}
 		n, err := strconv.Atoi(code)
 		if err != nil {
 			panic("fakeSandbox: " + command)
 		}
-		return Result{ExitCode: n, Stderr: "failed"}, nil
+		return Result{ExitCode: n, Stderr: "failed", TimedOut: timedOut}, nil
 	}
 	if strings.HasPrefix(command, "echo ") {
 		return Result{Stdout: strings.TrimPrefix(command, "echo ")}, nil
@@ -482,6 +489,52 @@ func TestTimedOutStepFailsTask(t *testing.T) {
 	}
 	if timeouts != 3 {
 		t.Fatalf("command_timeout dropped = %d, want 3; categories %+v", timeouts, fc.Categories)
+	}
+}
+
+// A driver that reports timed_out (the SDK drivers) decides the step's
+// timeout; the exit-code heuristic is only for a driver that cannot tell.
+// A 137 at the deadline that the guest says is not a timeout (an OOM kill)
+// is not one, and a timeout the guest reports is one before the deadline the
+// loader measures.
+func TestStepTimedOutFromDriver(t *testing.T) {
+	cases := []struct {
+		run, timeout string
+		want         bool
+	}{
+		{"exit 137 # timed_out=false", "1ms", false},
+		{"exit 137 # timed_out=true", "1h", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.run, func(t *testing.T) {
+			f := newFake()
+			var out bytes.Buffer
+			cfg := baseConfig(t, f, &out)
+			cfg.Mode = ModeEval
+			cfg.TasksPerImage = 1
+			tr, err := ParseTrajectory([]byte(fmt.Sprintf("name: t\nsteps:\n  - {name: slow, run: %q, timeout: %s}\n", tc.run, tc.timeout)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Trajectory = tr
+			if _, err := Run(context.Background(), cfg); err != nil {
+				t.Fatal(err)
+			}
+			var slow int
+			for _, e := range parseEvents(t, out.String()) {
+				if e.Event != EventStep || e.Name != "slow" {
+					continue
+				}
+				slow++
+				got := e.Timeout != nil && *e.Timeout
+				if got != tc.want || e.Exit == nil || *e.Exit != 137 || strings.Contains(e.Err, "timed out after") != tc.want {
+					t.Errorf("step event %+v, want exit=137 timeout=%v", e, tc.want)
+				}
+			}
+			if slow == 0 {
+				t.Fatal("no slow step events")
+			}
+		})
 	}
 }
 

@@ -169,6 +169,11 @@ async def test_shell_with_stdin(guest_env):
 async def test_shell_timeout(guest_env):
     result = await guest_env.shell("sleep 30", timeout=0.2)
     assert result.exit_code == 137
+    assert result.timed_out is True
+
+    result2 = await guest_env.shell("kill -9 $$")
+    assert result2.exit_code == 137
+    assert result2.timed_out is False
 
 
 async def test_cwd_passthrough(guest_env):

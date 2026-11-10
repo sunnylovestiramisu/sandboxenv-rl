@@ -451,7 +451,7 @@ func (s *directSubstrateSandbox) Run(ctx context.Context, command string, timeou
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}, nil
+	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, TimedOut: &res.TimedOut}, nil
 }
 
 func (s *directSubstrateSandbox) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {

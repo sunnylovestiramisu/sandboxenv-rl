@@ -145,6 +145,12 @@ message Process {
   google.protobuf.Timestamp started_at = 6;
   // Timestamp when the process exited. Unset while RUNNING.
   google.protobuf.Timestamp finished_at = 7;
+  // Set once state is EXITED. true when the guest killed the process
+  // because StartProcessRequest.timeout, or the guest default timeout,
+  // elapsed; false when the process exited on its own or SignalProcess or
+  // any other signal killed it. Absent from a guest that predates the
+  // field, so a client can tell "not timed out" from "not reported".
+  optional bool timed_out = 8;
 }
 
 // Pseudo-terminal configuration for interactive processes.

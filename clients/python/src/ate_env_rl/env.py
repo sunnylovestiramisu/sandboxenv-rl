@@ -276,6 +276,7 @@ class Env:
                     stdout=stdout.decode("utf-8", errors="replace"),
                     stderr=stderr.decode("utf-8", errors="replace"),
                     exit_code=exit_info.exit_code,
+                    timed_out=exit_info.timed_out,
                 )
         finally:
             in_env_span.reset(tok)

@@ -39,6 +39,11 @@ type Result struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
+	// TimedOut reports that the sandbox killed the command at its
+	// timeout. The SDK drivers set it from env.ShellResponse.TimedOut; nil
+	// means the driver cannot tell (agent-sandbox), and the loader infers
+	// it from the exit code.
+	TimedOut *bool
 }
 
 // Sandbox is the subset of an environment the loader drives.
@@ -468,7 +473,7 @@ func (s envSandbox) Run(ctx context.Context, command string, timeout time.Durati
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}, nil
+	return Result{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, TimedOut: &res.TimedOut}, nil
 }
 
 func (s envSandbox) WriteFile(ctx context.Context, path string, content []byte, mode fs.FileMode) error {

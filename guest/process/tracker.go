@@ -213,6 +213,13 @@ func (p *ProcessState) ToProto() *ateenvv1alpha.Process {
 	if !p.FinishedAt.IsZero() {
 		proto.FinishedAt = timestamppb.New(p.FinishedAt)
 	}
+	if p.State == ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED {
+		// The signal guard is exitClassOf's: the timer can fire between
+		// cmd.Wait and timer.Stop in reap, setting timedOut for a process
+		// that had already exited on its own (see reap).
+		timedOut := p.timedOut.Load() && p.Signal != 0
+		proto.TimedOut = &timedOut
+	}
 	return proto
 }
 

@@ -510,6 +510,9 @@ func TestDefaultTimeoutKills(t *testing.T) {
 	if proc.GetExitCode() != 137 {
 		t.Fatalf("expected 137 (128+SIGKILL) from watchdog, got %d", proc.GetExitCode())
 	}
+	if !proc.GetTimedOut() {
+		t.Fatalf("expected timed_out=true from watchdog kill")
+	}
 }
 
 func TestPerProcessTimeout(t *testing.T) {
@@ -521,6 +524,43 @@ func TestPerProcessTimeout(t *testing.T) {
 	proc := wait(t, client, started.GetProcessId())
 	if proc.GetExitCode() != 137 {
 		t.Fatalf("expected 137 (128+SIGKILL) from per-process timeout, got %d", proc.GetExitCode())
+	}
+	if !proc.GetTimedOut() {
+		t.Fatalf("expected timed_out=true from per-process timeout")
+	}
+}
+
+func TestProcessKilledBySignalNotTimedOut(t *testing.T) {
+	client := setupTestServer(t)
+	started := sh(t, client, "kill -9 $$")
+	proc := wait(t, client, started.GetProcessId())
+	if proc.GetExitCode() != 137 {
+		t.Fatalf("expected 137, got %d", proc.GetExitCode())
+	}
+	if proc.TimedOut == nil || *proc.TimedOut {
+		t.Fatalf("timed_out = %v, want present and false for kill -9", proc.TimedOut)
+	}
+}
+
+// A caller's SignalProcess(KILL) before the timeout fires is not a timeout,
+// though the exit code (137) is the same.
+func TestSignalProcessKillNotTimedOut(t *testing.T) {
+	client := setupTestServer(t)
+	started := start(t, client, &ateenvv1alpha.StartProcessRequest{
+		Command: []string{"sleep", "30"},
+		Timeout: durationpb.New(time.Minute),
+	})
+	if _, err := client.SignalProcess(context.Background(), &ateenvv1alpha.SignalProcessRequest{
+		ProcessId: started.GetProcessId(), Signal: ateenvv1alpha.Signal_SIGNAL_KILL,
+	}); err != nil {
+		t.Fatalf("SignalProcess(KILL): %v", err)
+	}
+	proc := wait(t, client, started.GetProcessId())
+	if proc.GetExitCode() != 137 {
+		t.Fatalf("expected 137, got %d", proc.GetExitCode())
+	}
+	if proc.TimedOut == nil || *proc.TimedOut {
+		t.Fatalf("timed_out = %v, want present and false for SignalProcess(KILL)", proc.TimedOut)
 	}
 }
 

@@ -312,6 +312,7 @@ class FakeProc:
     running_polls: int = 0
     echo_stdin: bool = False
     hang_follow: bool = False  # a follow stream never ends (process never exits)
+    timed_out: bool | None = None  # None leaves Process.timed_out unset (an old guest)
     # request capture, filled by StartProcess / WriteProcessInput / SignalProcess:
     command: list[str] = field(default_factory=list)
     cwd: str = ""
@@ -354,6 +355,8 @@ class FakeProcessService(guest_pb2_grpc.ProcessServiceServicer):
         if exited:
             pb.finished_at.GetCurrentTime()
             pb.exit_code = 128 + proc.signal if proc.signal else proc.exit_code
+            if proc.timed_out is not None:
+                pb.timed_out = proc.timed_out
         return pb
 
     async def StartProcess(self, request, context):

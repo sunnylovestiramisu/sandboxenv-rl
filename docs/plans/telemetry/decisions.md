@@ -340,3 +340,11 @@ Append-only. Each entry: date, who, what, why.
   `ate_env.run_id` is Python fleet-only, `Env.shell` vs `Env.Run` (`ate_env.timed_out` and span
   name), and Go backfilling server-resolved `ate.template.*` on `Create`, `ImageStatus` and
   `EnsureImageTemplate` (to be reconciled in PR 7's parity vectors).
+- 2026-11-10, #330: the guest reports `Process.timed_out` (`optional bool`), so the 2026-10-28
+  entry's "the Go client cannot know" no longer holds. Go `Env.Run` and Python `SandboxHandle.exec`
+  record `ate_env.timed_out` from the guest's field and fall back to the exit-137 heuristic only
+  when it is absent. The PR 6 split stays: Python's direct `Env.shell` returns
+  `ShellResult.timed_out` but its span records no `ate_env.timed_out`. New AC-17.2 difference: Go's
+  `exec` span records `ate_env.exit_code` 137 with `ate_env.timed_out=true`, while Python's records
+  `ate_env.timed_out=true` without `ate_env.exit_code` (`ExecResult.exit_code` is None for a
+  timeout); to be reconciled in PR 7's parity vectors.

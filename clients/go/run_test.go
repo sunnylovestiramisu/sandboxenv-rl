@@ -60,6 +60,8 @@ type fakeProcesses struct {
 	outputDelay    time.Duration
 	outputCode     codes.Code
 	exitCode       int32
+	timedOut       *bool // Process.timed_out; nil leaves it absent (an old guest)
+	exitAtStart    bool  // the process has exited by the first output read
 	stdout, stderr string
 
 	nextID     int
@@ -73,7 +75,11 @@ func (f *fakeProcesses) StartProcess(context.Context, *ateenvv1alpha.StartProces
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
-	return &ateenvv1alpha.Process{ProcessId: fmt.Sprintf("p%d", f.nextID), State: ateenvv1alpha.ProcessState_PROCESS_STATE_RUNNING}, nil
+	id := fmt.Sprintf("p%d", f.nextID)
+	if f.exitAtStart {
+		f.exited[id] = true
+	}
+	return &ateenvv1alpha.Process{ProcessId: id, State: ateenvv1alpha.ProcessState_PROCESS_STATE_RUNNING}, nil
 }
 
 func (f *fakeProcesses) GetProcess(ctx context.Context, req *ateenvv1alpha.GetProcessRequest) (*ateenvv1alpha.Process, error) {
@@ -103,6 +109,7 @@ func (f *fakeProcesses) GetProcess(ctx context.Context, req *ateenvv1alpha.GetPr
 	if f.exited[id] {
 		p.State = ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED
 		p.ExitCode = f.exitCode
+		p.TimedOut = f.timedOut
 	}
 	return p, nil
 }
@@ -110,7 +117,7 @@ func (f *fakeProcesses) GetProcess(ctx context.Context, req *ateenvv1alpha.GetPr
 func (f *fakeProcesses) StreamProcessOutput(req *ateenvv1alpha.StreamProcessOutputRequest, stream grpc.ServerStreamingServer[ateenvv1alpha.ProcessOutput]) error {
 	f.mu.Lock()
 	f.outputReqs = append(f.outputReqs, req)
-	stdout, stderr, exited, code, delay := f.stdout, f.stderr, f.exited[req.GetProcessId()], f.exitCode, f.outputDelay
+	stdout, stderr, exited, code, delay, tOut := f.stdout, f.stderr, f.exited[req.GetProcessId()], f.exitCode, f.outputDelay, f.timedOut
 	outputCode := f.outputCode
 	f.mu.Unlock()
 	time.Sleep(delay)
@@ -129,7 +136,7 @@ func (f *fakeProcesses) StreamProcessOutput(req *ateenvv1alpha.StreamProcessOutp
 	}
 	if exited {
 		return stream.Send(&ateenvv1alpha.ProcessOutput{Output: &ateenvv1alpha.ProcessOutput_Exit{Exit: &ateenvv1alpha.Process{
-			ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED, ExitCode: code}}})
+			ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED, ExitCode: code, TimedOut: tOut}}})
 	}
 	return nil
 }
@@ -464,5 +471,39 @@ func TestRunPollCancelKillsGuestProcess(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("process %d after the cancel: kill -0 = %v, want ESRCH", pid, err)
+	}
+}
+
+// Run reports the guest's Process.timed_out when the guest sends it, in
+// both modes, and uses the exit-code heuristic only when the field is
+// absent (a guest that predates it).
+func TestRunTimedOutGuestField(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name    string
+		guest   *bool
+		timeout time.Duration
+		want    bool
+	}{
+		{"guest true, no Timeout (default timeout)", &yes, 0, true},
+		{"guest false, no Timeout", &no, 0, false},
+		{"guest false beats the heuristic (OOM kill)", &no, time.Nanosecond, false},
+		{"absent, heuristic fires", nil, time.Nanosecond, true},
+		{"absent, no Timeout", nil, 0, false},
+	}
+	for _, poll := range []bool{false, true} {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("poll=%v/%s", poll, tc.name), func(t *testing.T) {
+				f := &fakeProcesses{pollsUntilExit: 1, exitAtStart: !poll, exitCode: 137, timedOut: tc.guest}
+				e := newFakeProcessEnv(t, f)
+				res, err := e.Run(t.Context(), env.ShellRequest{Command: "sleep 10", Timeout: tc.timeout, Poll: poll})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.ExitCode != 137 || res.TimedOut != tc.want {
+					t.Errorf("Run = exit %d, TimedOut %v; want exit 137, TimedOut %v", res.ExitCode, res.TimedOut, tc.want)
+				}
+			})
+		}
 	}
 }
