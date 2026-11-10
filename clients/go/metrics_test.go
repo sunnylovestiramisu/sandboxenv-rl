@@ -16,9 +16,11 @@ package env_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,6 +310,105 @@ func TestMetricsIdempotentRegistrationAndConflictErrors(t *testing.T) {
 	if err := badBucketsReg.Register(probeExec); err != nil {
 		t.Errorf("exec_seconds remained registered after failed NewClient: %v", err)
 	}
+
+	// An empty pre-registered HistogramVec is bucket-probed with documented
+	// label values ("ok", and "ok"/"direct") and keeps the pre-created series.
+	emptyPreReg := prometheus.NewRegistry()
+	emptyPreReg.MustRegister(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ate_env_client_exec_seconds",
+		Help:    "Time to run a command in an environment",
+		Buckets: wantClientBuckets,
+	}, []string{"status"}))
+	cPre := f.client(t, env.ClientOptions{MetricsRegisterer: emptyPreReg})
+	_ = cPre
+	preGot := gatherMap(t, emptyPreReg)
+	if len(preGot) != 3 {
+		t.Fatalf("pre-created families = %d (%v), want 3", len(preGot), preGot)
+	}
+	for name, mf := range preGot {
+		if len(mf.GetMetric()) != 1 {
+			t.Errorf("%s pre-created %d series, want 1", name, len(mf.GetMetric()))
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "status" && lp.GetValue() != "ok" {
+					t.Errorf("%s pre-created status=%q, want ok", name, lp.GetValue())
+				}
+				if lp.GetName() == "source" && lp.GetValue() != "direct" {
+					t.Errorf("%s pre-created source=%q, want direct", name, lp.GetValue())
+				}
+			}
+		}
+	}
+}
+
+type failOnceSuspendReg struct {
+	*prometheus.Registry
+	execOnce    sync.Once
+	execReady   chan struct{}
+	suspendCall atomic.Int32
+}
+
+func (r *failOnceSuspendReg) Register(c prometheus.Collector) error {
+	ch := make(chan *prometheus.Desc, 1)
+	go func() {
+		c.Describe(ch)
+		close(ch)
+	}()
+	desc := (<-ch).String()
+	if strings.Contains(desc, `"ate_env_client_suspend_seconds"`) && r.suspendCall.Add(1) == 1 {
+		time.Sleep(15 * time.Millisecond)
+		return errors.New("injected suspend registration failure")
+	}
+	err := r.Registry.Register(c)
+	if strings.Contains(desc, `"ate_env_client_exec_seconds"`) {
+		r.execOnce.Do(func() { close(r.execReady) })
+	}
+	return err
+}
+
+func TestMetricsConcurrentRegistrationRollbackDoesNotOrphanLiveClient(t *testing.T) {
+	f := newTracingFixture(t)
+	f.serveGuest(t, "race-reg")
+	reg := &failOnceSuspendReg{
+		Registry:  prometheus.NewRegistry(),
+		execReady: make(chan struct{}),
+	}
+
+	var wg sync.WaitGroup
+	var errA, errB error
+	var cB *env.Client
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errA = env.NewClient(env.ClientOptions{Endpoint: f.addr, MetricsRegisterer: reg})
+	}()
+	go func() {
+		defer wg.Done()
+		<-reg.execReady
+		cB, errB = env.NewClient(env.ClientOptions{Endpoint: f.addr, MetricsRegisterer: reg})
+	}()
+	wg.Wait()
+	if errA == nil {
+		t.Fatal("first NewClient succeeded despite injected suspend registration failure")
+	}
+	if errB != nil {
+		t.Fatalf("second NewClient failed: %v", errB)
+	}
+	t.Cleanup(func() { _ = cB.Close() })
+
+	ctx := t.Context()
+	e, err := cB.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "race-reg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Shell(ctx, "true"); err != nil {
+		t.Fatal(err)
+	}
+	got := gatherMap(t, reg.Registry)
+	if n := histCount(got["ate_env_client_exec_seconds"], map[string]string{"status": "ok"}); n != 1 {
+		t.Errorf("exec_seconds{status=ok} after concurrent rollback = %d, want 1", n)
+	}
 }
 
 func TestMetricsFirstCommandOnceUnderConcurrentStartProcessAndRun(t *testing.T) {
@@ -348,6 +449,9 @@ func TestMetricsFirstCommandOnceUnderConcurrentStartProcessAndRun(t *testing.T) 
 	wg.Wait()
 
 	got := gatherMap(t, reg)
+	if n := histCount(got["ate_env_client_exec_seconds"], map[string]string{"status": "ok"}); n != 4 {
+		t.Errorf("exec_seconds{status=ok} count = %d, want 4 (Shell only; StartProcess+Wait do not observe exec)", n)
+	}
 	if n := histCount(got["ate_env_client_ready_to_first_command_seconds"], map[string]string{"status": "ok", "source": "direct"}); n != 1 {
 		t.Errorf("ready_to_first_command count = %d, want 1", n)
 	}

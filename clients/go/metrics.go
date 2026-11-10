@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -51,18 +52,26 @@ type clientMetrics struct {
 	readyToFirstCommand *prometheus.HistogramVec
 }
 
+// metricsRegisterMu serializes collector registration and rollback so a
+// concurrent NewClient cannot reuse a collector that a failing NewClient is
+// about to unregister.
+var metricsRegisterMu sync.Mutex
+
 func newClientMetrics(reg prometheus.Registerer) (clientMetrics, error) {
 	if reg == nil {
 		return clientMetrics{}, nil
 	}
+	metricsRegisterMu.Lock()
+	defer metricsRegisterMu.Unlock()
+
 	var added []prometheus.Collector
 	rollback := func() {
 		for _, col := range added {
 			reg.Unregister(col)
 		}
 	}
-	regOne := func(name, help string, labels []string) (*prometheus.HistogramVec, error) {
-		h, created, err := registerHistogramVec(reg, name, help, labels)
+	regOne := func(name, help string, labels, initValues []string) (*prometheus.HistogramVec, error) {
+		h, created, err := registerHistogramVec(reg, name, help, labels, initValues)
 		if err != nil {
 			rollback()
 			return nil, err
@@ -73,15 +82,15 @@ func newClientMetrics(reg prometheus.Registerer) (clientMetrics, error) {
 		return h, nil
 	}
 
-	execHist, err := regOne(metricExecSeconds, helpExecSeconds, []string{"status"})
+	execHist, err := regOne(metricExecSeconds, helpExecSeconds, []string{"status"}, []string{"ok"})
 	if err != nil {
 		return clientMetrics{}, err
 	}
-	suspendHist, err := regOne(metricSuspendSeconds, helpSuspendSeconds, []string{"status"})
+	suspendHist, err := regOne(metricSuspendSeconds, helpSuspendSeconds, []string{"status"}, []string{"ok"})
 	if err != nil {
 		return clientMetrics{}, err
 	}
-	readyHist, err := regOne(metricReadyToFirstCommandSeconds, helpReadyToFirstCommandSeconds, []string{"status", "source"})
+	readyHist, err := regOne(metricReadyToFirstCommandSeconds, helpReadyToFirstCommandSeconds, []string{"status", "source"}, []string{"ok", metricSourceDirect})
 	if err != nil {
 		return clientMetrics{}, err
 	}
@@ -94,13 +103,15 @@ func newClientMetrics(reg prometheus.Registerer) (clientMetrics, error) {
 
 // registerHistogramVec registers a HistogramVec on reg, reusing an existing
 // HistogramVec only when its descriptor (including variable-label order) and
-// bucket upper bounds match.
-func registerHistogramVec(reg prometheus.Registerer, name, help string, labels []string) (*prometheus.HistogramVec, bool, error) {
+// bucket upper bounds match. Newly created and verified collectors pre-create
+// their default ("ok") series.
+func registerHistogramVec(reg prometheus.Registerer, name, help string, labels, initValues []string) (*prometheus.HistogramVec, bool, error) {
 	h := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    name,
 		Help:    help,
 		Buckets: slices.Clone(secondsBuckets),
 	}, labels)
+	h.WithLabelValues(initValues...)
 	if err := reg.Register(h); err != nil {
 		var are prometheus.AlreadyRegisteredError
 		if errors.As(err, &are) {
@@ -108,7 +119,7 @@ func registerHistogramVec(reg prometheus.Registerer, name, help string, labels [
 			if !ok {
 				return nil, false, fmt.Errorf("env: metric %s already registered as %T, want *prometheus.HistogramVec", name, are.ExistingCollector)
 			}
-			if err := verifyExistingHistogramVec(existing, h, name, labels); err != nil {
+			if err := verifyExistingHistogramVec(existing, h, name, initValues); err != nil {
 				return nil, false, err
 			}
 			return existing, false, nil
@@ -118,11 +129,11 @@ func registerHistogramVec(reg prometheus.Registerer, name, help string, labels [
 	return h, true, nil
 }
 
-func verifyExistingHistogramVec(existing, want *prometheus.HistogramVec, name string, labels []string) error {
+func verifyExistingHistogramVec(existing, want *prometheus.HistogramVec, name string, initValues []string) error {
 	if gotDesc, wantDesc := descString(existing), descString(want); gotDesc != wantDesc {
 		return fmt.Errorf("env: metric %s already registered with descriptor %s, want %s", name, gotDesc, wantDesc)
 	}
-	bounds, err := histogramVecBounds(existing, labels)
+	bounds, err := histogramVecBounds(existing, initValues)
 	if err != nil {
 		return fmt.Errorf("env: inspecting existing metric %s: %w", name, err)
 	}
@@ -147,7 +158,7 @@ func descString(c prometheus.Collector) string {
 	return out
 }
 
-func histogramVecBounds(hv *prometheus.HistogramVec, labels []string) ([]float64, error) {
+func histogramVecBounds(hv *prometheus.HistogramVec, initValues []string) ([]float64, error) {
 	ch := make(chan prometheus.Metric, 1)
 	go func() {
 		hv.Collect(ch)
@@ -160,15 +171,10 @@ func histogramVecBounds(hv *prometheus.HistogramVec, labels []string) ([]float64
 		}
 	}
 	if sample == nil {
-		probe := make([]string, len(labels))
-		for i := range probe {
-			probe[i] = "__ate_env_bucket_probe__"
-		}
-		obs, err := hv.GetMetricWithLabelValues(probe...)
+		obs, err := hv.GetMetricWithLabelValues(initValues...)
 		if err != nil {
 			return nil, err
 		}
-		defer hv.DeleteLabelValues(probe...)
 		m, ok := obs.(prometheus.Metric)
 		if !ok {
 			return nil, fmt.Errorf("observer %T does not implement prometheus.Metric", obs)

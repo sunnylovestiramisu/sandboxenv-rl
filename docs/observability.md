@@ -134,6 +134,9 @@ spans carry its own `run`, `env` and `instance`.
   the [Python client README](../clients/python/README.md#observability). In Go,
   `ClientOptions.MetricsRegisterer` registers `ate_env_client_{exec,suspend}_seconds`
   and `ate_env_client_ready_to_first_command_seconds` (`source="direct"`).
+  `Env.Run` and `Env.Shell` observe `ate_env_client_exec_seconds` (a non-zero
+  exit code counts as `status="ok"`); `Env.StartProcess` and `Process.Wait` do
+  not.
 
 Collectors register on the first metrics-enabled `Observer`, never at import,
 and the NeMo Gym provider never creates one, so a provider process has no

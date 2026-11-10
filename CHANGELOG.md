@@ -12,12 +12,14 @@ user needs to know across them.
   `ate_env_client_suspend_seconds{status}` and
   `ate_env_client_ready_to_first_command_seconds{status,source}`
   (`source="direct"`, shared `0.05`–`600` s buckets), idempotently per
-  registerer. `Env.StartProcess` emits a `<TraceServiceName>.start_process`
-  span (`Env.Run` keeps `exec` without nesting `start_process`), the first
-  `Run` or `StartProcess` on an `Env` sets `ate_env.first_command=true`
-  (`AttrFirstCommand`), `exec` sets `ate_env.timed_out` (`AttrTimedOut`), and
-  `WriteFile` / `ReadFile` record `ate_env.file.size` only when the transfer
-  completes without error, matching `ate_env_rl.Env`.
+  registerer (importing `clients/go` now links
+  `github.com/prometheus/client_golang/prometheus`). `Env.StartProcess` emits a
+  `<TraceServiceName>.start_process` span (`Env.Run` keeps `exec` without
+  nesting `start_process`), the first `Run` or `StartProcess` on an `Env` sets
+  `ate_env.first_command=true` (`AttrFirstCommand`), `exec` sets
+  `ate_env.timed_out` (`AttrTimedOut`), and `WriteFile` / `ReadFile` record
+  `ate_env.file.size` only when the transfer completes without error, matching
+  `ate_env_rl.Env`.
 - `swebench-loader report` and `bench report`: `fault_classification` in
   `report.json` (top level and per job), in `stats.jsonl` (an
   `infra_fault_rate` measurement on the trial row and a `fault_classification`

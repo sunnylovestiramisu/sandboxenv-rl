@@ -80,9 +80,14 @@ type ClientOptions struct {
 	// histograms on it: ate_env_client_exec_seconds{status},
 	// ate_env_client_suspend_seconds{status}, and
 	// ate_env_client_ready_to_first_command_seconds{status,source} with
-	// source="direct". Registration is idempotent per registry, so two
-	// Clients sharing one registerer share the collectors. Nil registers
-	// nothing and touches no global registry.
+	// source="direct". Env.Run and Env.Shell observe
+	// ate_env_client_exec_seconds (a non-zero exit code still counts as
+	// status="ok"); Env.StartProcess and Process.Wait do not. Registration
+	// is idempotent per registry, so two Clients sharing one registerer
+	// share the collectors; NewClient returns an error if a conflicting
+	// collector (another type, label set or order, or bucket list) is
+	// already registered under one of those names. Nil registers nothing
+	// and touches no global registry.
 	MetricsRegisterer prometheus.Registerer
 
 	// Connections is how many connections the client dials to Endpoint,
