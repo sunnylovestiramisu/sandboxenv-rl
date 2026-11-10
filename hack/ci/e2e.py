@@ -23,7 +23,7 @@ What it does:
   5. Compiles container images (ateworker-gvisor, ate-env-api, ate-env-guest) using ko to target registry.
   6. Applies Kubernetes manifests (atespace, access policy, caller auth Secret, WorkerPool, and ate-env-api with metrics).
   7. Registers the ActorTemplate (snapshots under the cluster snapshot location) with an environment marker, and waits for its golden snapshot.
-  8. Forwards a free local port and runs portable smoke test, Python SDK full-stack tests, NeMo Gym provider live test, swebench-loader Go SDK smoke test, and Harbor provider live trial test.
+  8. Forwards a free local port and runs portable smoke test, Python SDK full-stack tests, Go SDK full-stack tests, NeMo Gym provider live test, swebench-loader Go SDK smoke test, and Harbor provider live trial test.
 
 When it runs:
   - CI: .github/workflows/ci.yaml in job `e2e-kind` on PR and push to main.
@@ -51,7 +51,7 @@ Environment variables:
   NAMESPACE                       ate-env             Kubernetes namespace for ate-env deployment
   LOCAL_PORT                      (free port)         Local port on host for ate-env-api port-forward (free port by default)
   TEMPLATE_NAME                   default-template    Name of ActorTemplate to register and test
-  ATE_ENV_ROOTFS_IMAGE            (target default)    Rootfs image for test_create_from_image and swebench-loader; empty skips both
+  ATE_ENV_ROOTFS_IMAGE            (target default)    Rootfs image for create-from-image E2E and swebench-loader; empty skips them
   ATE_INGRESS_ALLOWED_SPIFFE_IDS  (auto)              Allowed SPIFFE IDs for router TLS ingress
   PYTEST_BIN                      (auto)              Path to pytest binary or python test runner
   HARBOR_PYTEST_BIN               (auto)              Path to pytest binary with harbor installed (defaults to .#python-env-harbor or host PATH)
@@ -69,8 +69,9 @@ Troubleshooting:
 
 See also:
   hack/ci/targets.py, hack/ci/test_smoke.py, hack/ci/ensure-substrate.sh,
-  clients/python/tests/e2e/test_full_stack.py, integrations/nemo-gym/tests/test_e2e.py,
-  integrations/harbor/tests/test_e2e.py, cmd/benchmarking/swebench-loader, Makefile, nix/ci.nix.
+  clients/python/tests/e2e/test_full_stack.py, clients/go/e2e_test.go,
+  integrations/nemo-gym/tests/test_e2e.py, integrations/harbor/tests/test_e2e.py,
+  cmd/benchmarking/swebench-loader, Makefile, nix/ci.nix.
 """
 
 from __future__ import annotations
@@ -375,6 +376,23 @@ def run_tests(
         lib.run(*py, str(root / "hack/ci/test_smoke.py"), "-v", env=test_env, capture=False)
         lib.step("Running live Python SDK integration tests...")
         lib.run(*py, str(root / "clients/python/tests/e2e/test_full_stack.py"), "-v", env=test_env, capture=False)
+        lib.step("Running live Go SDK integration tests...")
+        lib.run(
+            "go",
+            "-C",
+            str(root),
+            "test",
+            "-v",
+            "-race",
+            "-count=1",
+            "-timeout",
+            "15m",
+            "./clients/go",
+            "-run",
+            "^TestE2EFullStack$",
+            env={**test_env, "ATE_ENV_GUEST_TARGET": ""},
+            capture=False,
+        )
 
         lib.step("Running NeMo Gym provider live E2E tests...")
         lib.run(

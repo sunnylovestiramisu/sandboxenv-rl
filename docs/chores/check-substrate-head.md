@@ -75,16 +75,17 @@ Verify that all automated checks in [`.github/workflows/ci.yaml`](../../.github/
 Automated E2E coverage breakdown:
 - [`hack/ci/test_smoke.py`](../../hack/ci/test_smoke.py): an environment-creation fixture plus 9 subtests covering shell execution with stdout and stdin stream piping, file write/read roundtrip, built-in MCP server (`tools/list` and `read_file`), suspend and on-demand resume, caller authentication and port-proxy atespace allowlist, Prometheus `/metrics` exposition, and deletion.
 - [`clients/python/tests/e2e/test_full_stack.py`](../../clients/python/tests/e2e/test_full_stack.py): exercises async `Client` lifecycle, process streaming, signal delivery (`SIGTERM`), image validation error cases, template environment variable inheritance, port-proxy HTTP/WebSocket capability routing, transparent wake-on-request, and `SandboxFleet` with `LookaheadWarmer` warm-pool lifecycle.
+- [`clients/go/e2e_test.go`](../../clients/go/e2e_test.go) (`TestE2EFullStack`): exercises the Go `Client` across the same five full-stack client cases (missing environment lookup, lifecycle with file/process/signal/suspend/delete, rootfs image validation, derived template reuse, port-proxy HTTP/WebSocket capability routing, and wake-on-request).
 - [`integrations/nemo-gym/tests/test_e2e.py`](../../integrations/nemo-gym/tests/test_e2e.py): exercises NeMo Gym provider live end-to-end lifecycle.
 - [`cmd/benchmarking/swebench-loader`](../../cmd/benchmarking/swebench-loader): runs live smoke evaluation and report generation against an in-sandbox command task.
 - [`integrations/harbor/tests/test_e2e.py`](../../integrations/harbor/tests/test_e2e.py): runs Harbor provider oracle trial live test against ate-env-api.
 
 Areas not covered by standard CI that should be manually verified:
 - Multi-node and `AsyncSandboxFleet` scale runs: `SandboxFleet` warm-pool lifecycle runs in `e2e-kind`, but high-concurrency multi-node stress tests and `AsyncSandboxFleet` require manual cluster verification.
-- Rootfs image injection and loader smoke: `test_create_from_image` and `swebench-loader` are exercised by default on Kind using a pinned python rootfs image (`docker.io/library/python:3.13-slim@sha256:...`). Setting `ATE_ENV_ROOTFS_IMAGE=` skips both tests:
+- Rootfs image injection and loader smoke: `test_create_from_image`, `TestE2EFullStack/create_from_image`, and `swebench-loader` are exercised by default on Kind using a pinned python rootfs image (`docker.io/library/python:3.13-slim@sha256:...`). Setting `ATE_ENV_ROOTFS_IMAGE=` skips them:
   ```bash
   ATE_ENV_ROOTFS_IMAGE="docker.io/library/python@sha256:..." make ci-e2e
-  ATE_ENV_ROOTFS_IMAGE= make ci-e2e  # skips test_create_from_image and swebench-loader
+  ATE_ENV_ROOTFS_IMAGE= make ci-e2e  # skips create_from_image E2E and swebench-loader
   ```
 
 ## Troubleshooting
