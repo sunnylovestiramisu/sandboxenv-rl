@@ -271,6 +271,9 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
   `test_guest_daemon.py`, against a cluster the 5 client cases of `test_full_stack.py`, same names.
 - `hack/ci/e2e.py` runs `go test ./clients/go -run TestE2E` with `ATE_ENV_API_TARGET` set, next to
   the Python full-stack tests and the loader smoke test.
+- As built: `TestE2EGuestDaemon` runs in `ci-go` (`nix/ci.nix`) against `examples/guest-daemon`
+  under `-race`, and `hack/ci/e2e.py` runs
+  `go test -v -race -count=1 ./clients/go -run ^TestE2EFullStack$` right after `test_full_stack.py`.
 
 ## 6. Acceptance criteria
 

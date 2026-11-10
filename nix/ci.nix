@@ -191,7 +191,56 @@ let
       echo "--> Go vet..."
       go vet ./...
       echo "--> Go test (-race, -cover)..."
-      go test -race -covermode=atomic -coverpkg=./... -coverprofile="$covdir/go.out" ./... -args -test.gocoverdir="$covdir/go-unit"
+      ATE_ENV_GUEST_TARGET="" ATE_ENV_API_TARGET="" \
+        go test -race -covermode=atomic -coverpkg=./... -coverprofile="$covdir/go.out" ./... -args -test.gocoverdir="$covdir/go-unit"
+      echo "--> Go client guest-daemon integration (-race, -cover)..."
+      run_go_guest_daemon_suite() (
+        set -euo pipefail
+        local workspace daemon_dir daemon_log daemon_pid="" addr=""
+        workspace="$(mktemp -d)"
+        daemon_dir="$(mktemp -d)"
+        daemon_log="$daemon_dir/daemon.log"
+        mkdir -p "$workspace/logs"
+
+        # shellcheck disable=SC2329
+        cleanup_go_daemon() {
+          if [[ -n "''${daemon_pid:-}" ]]; then
+            kill -TERM "$daemon_pid" 2>/dev/null || true
+            wait "$daemon_pid" 2>/dev/null || true
+          fi
+          rm -rf "$workspace" "$daemon_dir"
+        }
+        trap cleanup_go_daemon EXIT INT TERM
+
+        go build -cover -covermode=atomic -coverpkg=./... -o "$daemon_dir/guest-daemon-cover" ./examples/guest-daemon
+        : >"$daemon_log"
+        GOCOVERDIR="$covdir/go-unit" "$daemon_dir/guest-daemon-cover" \
+          --listen "127.0.0.1:0" \
+          --workspace "$workspace" \
+          --log-dir "$workspace/logs" >"$daemon_log" 2>&1 &
+        daemon_pid=$!
+
+        for _ in $(seq 1 50); do
+          addr="$(sed -nE 's/.*listening on gRPC (127\.0\.0\.1:[1-9][0-9]*).*/\1/p' "$daemon_log" | head -n1)"
+          if [[ -n "$addr" ]]; then
+            break
+          fi
+          sleep 0.1
+        done
+        if [[ -z "$addr" ]]; then
+          echo "guest daemon failed to start:" >&2
+          cat "$daemon_log" >&2
+          exit 1
+        fi
+
+        ATE_ENV_GUEST_TARGET="$addr" ATE_ENV_API_TARGET="" \
+          go test -race -count=1 -covermode=atomic -coverpkg=./... ./clients/go -run '^TestE2EGuestDaemon$' -args -test.gocoverdir="$covdir/go-unit"
+
+        kill -TERM "$daemon_pid"
+        wait "$daemon_pid" 2>/dev/null || true
+        daemon_pid=""
+      )
+      run_go_guest_daemon_suite
       echo "--> Format & boilerplate..."
       make verify-gofmt
       make verify-boilerplate

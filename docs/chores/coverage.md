@@ -11,7 +11,7 @@ The test coverage workflow provides unified visibility into Go and Python test s
 | Component | Test Suite | Tooling | Output Artifacts |
 |---|---|---|---|
 | **Go packages** (`clients/go`, `cmd/*`, `guest/*`, `internal/*`) | Unit & integration tests (`ci-go`) | `go test -race -covermode=atomic -coverpkg=./...` | `coverage/go.filtered.out`, `coverage/go.html`, `coverage/go.xml` |
-| **Guest Daemon** (`examples/guest-daemon`) | Guest daemon integration suite (`ci-python`) | `go build -cover`, executed against `test_guest_daemon.py`, counters flushed on `SIGTERM` | `coverage/go-daemon/` (merged into Go coverage via `go tool covdata`) |
+| **Guest Daemon** (`examples/guest-daemon`) | Guest daemon integration suites (`ci-go`, `ci-python`) | `go build -cover`, executed against `TestE2EGuestDaemon` (`ci-go`) and `test_guest_daemon.py` (`ci-python`), counters flushed on `SIGTERM` | `coverage/go-unit/` (`ci-go`) and `coverage/go-daemon/` (`ci-python`), merged via `go tool covdata` |
 | **Python client & integrations** (`clients/python`, `integrations/nemo-gym`, `integrations/uni-agent`, `examples/Qwen3-1.7B-verl`, `benchmarking/*`, `internal/benchmarking/swebench/trajectories`) | Parallel pytest suites (`ci-python`) | `coverage run -m pytest`, combined via [`.coveragerc`](../../.coveragerc) | `coverage/py.xml`, `coverage/py.json`, `coverage/py-html/` |
 | **Diff coverage** | Changed lines vs. base branch | `diff-cover` over combined Cobertura XMLs | `coverage/diff-cover.md`, included in `coverage/summary.md` |
 
@@ -101,9 +101,9 @@ In GitHub Actions (`.github/workflows/ci.yaml`):
 ## Architecture & Implementation Notes
 
 ### Go Coverage & Covdata Merging
-Go tests are run with `-coverpkg=./...` to record cross-package coverage during unit tests. In addition, the guest daemon (`examples/guest-daemon`) is built with `go build -cover` and executed against the Python client's E2E tests (`test_guest_daemon.py`). When the daemon receives `SIGTERM`, Go's runtime coverage counters are flushed to `coverage/go-daemon/`.
+Go tests are run with `-coverpkg=./...` to record cross-package coverage during unit tests and `TestE2EGuestDaemon` (`ci-go`). In addition, the guest daemon (`examples/guest-daemon`) is built with `go build -cover` and executed against `TestE2EGuestDaemon` in `ci-go` (writing counters to `coverage/go-unit/`) and `test_guest_daemon.py` in `ci-python` (writing counters to `coverage/go-daemon/`). When the daemon receives `SIGTERM`, Go's runtime coverage counters are flushed to disk.
 
-The script `hack/ci/coverage-summary.py` merges unit test counter files (`coverage/go-unit/`) and daemon counter files (`coverage/go-daemon/`) using `go tool covdata merge`, converts them to a unified `go.out`, filters out protobuf stubs, and generates Cobertura XML via `gocover-cobertura`. The unified Go report (combining unit tests and guest-daemon integration) comes from `make ci` and `make coverage`. In GitHub Actions, the `go` and `python` jobs run on separate machines and each reports its own language (the Python job's artifact still contains `coverage/go-daemon`).
+The script `hack/ci/coverage-summary.py` formats `coverage/go-unit/` (which in `make ci-go` and the GitHub Actions `go` job already combines unit tests and `TestE2EGuestDaemon`), and when `coverage/go-daemon/` is also present (`make ci` and `make coverage`, after `ci-python`) merges both directories with `go tool covdata merge`, converts them to a unified `go.out`, filters out protobuf stubs, and generates Cobertura XML via `gocover-cobertura`. In GitHub Actions, the `go` and `python` jobs run on separate machines and each reports its own language (the `go` job includes `TestE2EGuestDaemon` daemon counters, and the `python` job's artifact also contains `coverage/go-daemon/` from `test_guest_daemon.py`).
 
 ### Python Coverage Path Mapping
 [`.coveragerc`](../../.coveragerc) at the repository root configures `coverage.py` with:
@@ -112,4 +112,4 @@ The script `hack/ci/coverage-summary.py` merges unit test counter files (`covera
 - Unique `COVERAGE_FILE` paths per parallel pytest suite under `coverage/py/`, combined by `coverage combine`.
 
 ### Guest Daemon Graceful Stop
-The guest daemon handles `SIGINT` and `SIGTERM` signals gracefully to ensure Go coverage runtime data is flushed to disk before process exit. When running under `ci-python`, the daemon process is supervised and automatically terminated and cleaned up via bash traps upon completion or unexpected failure.
+The guest daemon handles `SIGINT` and `SIGTERM` signals gracefully to ensure Go coverage runtime data is flushed to disk before process exit. When running under `ci-go` and `ci-python`, each daemon process is supervised and automatically terminated and cleaned up via bash traps upon completion or unexpected failure.

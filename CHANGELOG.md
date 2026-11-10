@@ -25,6 +25,11 @@ user needs to know across them.
   or above the rate, and when the candidate has no classification.
 - ate-env-api: `-wake-state-read-cap` (default 5 s) bounds each control-plane
   state read during a wake; 0 or less means the default.
+- Go client: end-to-end suites in `clients/go/e2e_test.go`, gated by
+  `ATE_ENV_GUEST_TARGET` (`TestE2EGuestDaemon`, the 24 guest-daemon cases of
+  `test_guest_daemon.py`, run in `ci-go`) and `ATE_ENV_API_TARGET`
+  (`TestE2EFullStack`, the 5 client cases of `test_full_stack.py`, run in
+  `e2e-kind`).
 - Go client: `env.DefaultAtespace`. The client no longer imports `internal/ate`, and with it
   `internal/routertls` and Substrate's API package (`go.ate.dev/substrate/api/ateapi/v1`);
   `hack/verify/go-client-deps.sh` keeps it that way in the Go CI job.
