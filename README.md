@@ -326,7 +326,11 @@ Across calls, `ate-env-api` caps the probes in flight per node of one worker sel
 probes_per_node` slots on its selector before it creates its probes and gives them back once they
 are deleted, so a pre-flight that fans out one `warm-image` per image puts at most that many first
 boots on a node at once; a request's `probes_per_node` above the cap is refused, a round that waits
-for slots is logged, and the coverage's `waited` sums the wait.
+for slots is logged, and the coverage's `waited` sums the wait. The node count the cap multiplies
+is the one the workers report, whatever a request asks to cover, so two calls on one selector share
+one limit; a request whose `nodes` is above it is refused. Only the missing global viewer binding
+leaves a request's `nodes` trusted; a selector no active worker carries, or a listing the control
+plane keeps failing after the transient failures are retried, fails the call.
 
 Since Substrate v0.6.0 the atenet router serves only TLS listeners and admits
 only clients whose SPIFFE ID is on its allow-list. The manifest mounts the pod

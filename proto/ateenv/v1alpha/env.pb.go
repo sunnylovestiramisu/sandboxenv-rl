@@ -1400,12 +1400,17 @@ type WarmImageRequest struct {
 	// own pools.
 	WorkerSelector map[string]string `protobuf:"bytes,4,rep,name=worker_selector,json=workerSelector,proto3" json:"worker_selector,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Nodes to cover. 0 means the distinct nodes of the schedulable workers
-	// the selector matches, which takes ListPlacementDomains's permission.
-	// A selector that sets a key of the template's selector to another value
-	// is FailedPrecondition: no worker carries both.
+	// the selector matches, which takes ListPlacementDomains's permission. A
+	// value above that count is InvalidArgument when the server can list the
+	// workers; without that permission the value is trusted. nodes x
+	// probes_per_node is at most 256 per round. A selector that sets a key
+	// of the template's selector to another value is FailedPrecondition: no
+	// worker carries both.
 	Nodes int32 `protobuf:"varint,5,opt,name=nodes,proto3" json:"nodes,omitempty"`
 	// Probes a round starts per node; the round holds them until all are
-	// RUNNING, so the scheduler spreads them. Default 2, at most 8.
+	// RUNNING, so the scheduler spreads them. Default 2, at most 8, and at
+	// most the server's -warm-max-probes-per-node (2 unless raised), which
+	// refuses more with InvalidArgument.
 	ProbesPerNode int32 `protobuf:"varint,6,opt,name=probes_per_node,json=probesPerNode,proto3" json:"probes_per_node,omitempty"`
 	// Rounds before the call gives up. Default 3, at most 10.
 	MaxRounds int32 `protobuf:"varint,7,opt,name=max_rounds,json=maxRounds,proto3" json:"max_rounds,omitempty"`

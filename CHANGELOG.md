@@ -115,7 +115,11 @@ user needs to know across them.
   `list_placement_domains()`, `warm_image()`, `PlacementDomain`, `WarmProbe`,
   `WarmImageCoverage`; an `ImagePlacement` plan's domains are `PlacementDomain`
   too, thus a plan can carry what `list_placement_domains()` returns. A
-  probe's create and resume are retried within the
+  `nodes` above the distinct nodes of the workers the selector matches is
+  `InvalidArgument` when the server can list them, the per-node cap
+  multiplies the count the workers report for every call on the selector,
+  and only the missing global viewer binding leaves a request's `nodes`
+  trusted. A probe's create and resume are retried within the
   probe's timeout on the transient failures of a loaded control plane
   (`Unavailable`, `DeadlineExceeded`, a derived template not visible yet),
   its delete on `Aborted`, `Unavailable` and `ResourceExhausted`; the probes

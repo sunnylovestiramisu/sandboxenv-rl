@@ -92,6 +92,9 @@ type Server struct {
 	// DenyListWorkers makes ListWorkers fail with PermissionDenied, as
 	// Substrate does for an identity without the global viewer role.
 	DenyListWorkers bool
+	// ListWorkersUnavailable is how many ListWorkers calls answer
+	// Unavailable first, as an api server restarting does.
+	ListWorkersUnavailable int
 	// BornSuspended makes CreateActor leave a new actor SUSPENDED and
 	// unplaced, as Substrate does: only ResumeActor (the router's wake on a
 	// guest call, or a direct resume) places it on a worker and runs it. Off,
@@ -273,6 +276,10 @@ func (s *Server) ListWorkers(ctx context.Context, req *ateapipb.ListWorkersReque
 	defer s.mu.Unlock()
 	if s.DenyListWorkers {
 		return nil, status.Error(codes.PermissionDenied, "not allowed to list workers")
+	}
+	if s.ListWorkersUnavailable > 0 {
+		s.ListWorkersUnavailable--
+		return nil, status.Error(codes.Unavailable, "api server restarting")
 	}
 	resp := &ateapipb.ListWorkersResponse{}
 	for _, w := range s.workers {

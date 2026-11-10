@@ -312,9 +312,11 @@ func TestWarmImageProbeFailures(t *testing.T) {
 	}
 
 	// A round in which every probe fails ends the call before max_rounds:
-	// nodes given for a selector no worker carries leaves the probes
-	// nowhere to resume (RESOURCE_EXHAUSTED).
+	// nodes given for a selector no worker carries, trusted because the
+	// workers cannot be listed, leaves the probes nowhere to resume
+	// (RESOURCE_EXHAUSTED).
 	control.PendingGets = 0
+	control.DenyListWorkers = true
 	_, cov, err = warm(t, client, &ateenvv1alpha.WarmImageRequest{
 		RootfsImage:    testRootfsImage,
 		WorkerSelector: map[string]string{"ate-env/domain": "d9"},
@@ -829,5 +831,144 @@ func TestWarmImageDeletesAProbeWhoseLostCreateLanded(t *testing.T) {
 	}
 	if len(cov.GetUndeletedProbes()) != 0 {
 		t.Errorf("undeleted = %v, want none", cov.GetUndeletedProbes())
+	}
+}
+
+// The per-node cap multiplies the node count, so a request that claims more
+// nodes than the selector's workers run on is refused while the workers can
+// be listed; without that permission the request's nodes is trusted.
+func TestWarmImageRefusesMoreNodesThanTheWorkersRunOn(t *testing.T) {
+	client, control := newTestEnv(t)
+	seedDomains(t, control)
+	_, _, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{
+		RootfsImage:    testRootfsImage,
+		WorkerSelector: map[string]string{"ate-env/domain": "d0"},
+		Nodes:          8,
+		ProbesPerNode:  1,
+	})
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "exceeds the 2 nodes") {
+		t.Errorf("nodes 8 on a 2-node domain: err = %v, want InvalidArgument naming the 2 nodes", err)
+	}
+	// An honest count, and one below the real one, pass.
+	for _, n := range []int32{2, 1} {
+		if _, cov, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, Nodes: n, ProbesPerNode: 1}); err != nil || cov.GetWanted() != n {
+			t.Errorf("nodes %d: err=%v coverage=%v", n, err, cov)
+		}
+	}
+	// Without the permission to list the workers the request's nodes is
+	// what the cap has; the call runs and reports what it covered.
+	control.DenyListWorkers = true
+	_, cov, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{
+		RootfsImage:    testRootfsImage,
+		WorkerSelector: map[string]string{"ate-env/domain": "d0"},
+		Nodes:          8,
+		ProbesPerNode:  1,
+		MaxRounds:      1,
+	})
+	if err != nil || cov.GetWanted() != 8 || cov.GetComplete() {
+		t.Errorf("nodes 8 without the role: err=%v coverage=%v, want a run with wanted 8, incomplete", err, cov)
+	}
+}
+
+// The node count comes from the workers whenever they can be listed: a
+// selector no active worker carries is refused up front (FailedPrecondition)
+// even with nodes given, a transient listing failure is retried, and one the
+// control plane keeps failing fails the call; only the missing permission
+// leaves the request's nodes trusted.
+func TestWarmImageNodeCountFromTheWorkers(t *testing.T) {
+	te := newFullTestEnv(t)
+	client, control := te.envClient, te.control
+	seedDomains(t, control)
+	apiservice.SetWarmTimings(t, time.Millisecond, 5*time.Millisecond, 60*time.Second)
+
+	_, _, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d9"}, Nodes: 1})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "no active worker matches") {
+		t.Errorf("nodes 1 on a selector no worker carries: err = %v, want FailedPrecondition", err)
+	}
+	if n := control.ActorCount(); n != 0 {
+		t.Errorf("%d probes created for a refused request, want 0", n)
+	}
+
+	control.ListWorkersUnavailable = 1
+	_, cov, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, Nodes: 2})
+	if err != nil || !cov.GetComplete() {
+		t.Errorf("one Unavailable listing: err=%v coverage=%v, want the retry to carry the call", err, cov)
+	}
+
+	control.ListWorkersUnavailable = 10
+	_, _, err = warm(t, client, &ateenvv1alpha.WarmImageRequest{RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, Nodes: 2})
+	if status.Code(err) != codes.Unavailable {
+		t.Errorf("a control plane that keeps failing the listing: err = %v, want Unavailable, not a trusted nodes", err)
+	}
+	control.ListWorkersUnavailable = 0
+	if n := control.ActorCount(); n != 0 {
+		t.Errorf("%d actors left, want 0", n)
+	}
+}
+
+// The per-node cap multiplies the node count the workers report, whatever a
+// request asked to cover, so two calls on one selector share one limit: a
+// call that covers one node of a two-node pool is not held to one node's
+// slots while another call holds the pool's.
+func TestWarmImageCapUsesTheListedNodesForEveryCall(t *testing.T) {
+	te := newFullTestEnv(t)
+	client, control := te.envClient, te.control
+	seedDomains(t, control)
+	// Call A covers d0's two nodes with one probe per node and holds them
+	// for many polls: 2 of the selector's 2 x 2 slots.
+	control.PendingGets = 40
+	type result struct {
+		cov *ateenvv1alpha.WarmImageCoverage
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, cov, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{
+			RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, ProbesPerNode: 1, MaxRounds: 1, RunId: "pf-a",
+		})
+		done <- result{cov, err}
+	}()
+	for deadline := time.Now().Add(5 * time.Second); control.ActorCount() < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("call A did not create its two probes")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Call B covers one node with one probe. Its limit is the pool's 4, not
+	// 1 x 2, so it runs next to A instead of waiting for A to end.
+	control.PendingGets = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.WarmImage(ctx, &ateenvv1alpha.WarmImageRequest{
+		RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, Nodes: 1, ProbesPerNode: 1, MaxRounds: 1, RunId: "pf-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var covB *ateenvv1alpha.WarmImageCoverage
+	for {
+		ev, rerr := stream.Recv()
+		if rerr != nil {
+			if covB == nil {
+				t.Fatalf("call B next to call A: %v (want it to run under the pool's limit, not wait for A)", rerr)
+			}
+			break
+		}
+		if c := ev.GetCoverage(); c != nil {
+			covB = c
+		}
+	}
+	if !covB.GetComplete() || covB.GetWaited().AsDuration() > 0 {
+		t.Errorf("call B coverage = %v, want complete with no wait", covB)
+	}
+	if n := control.MaxActors(); n != 3 {
+		t.Errorf("%d probes existed at once, want A's 2 and B's 1", n)
+	}
+	r := <-done
+	if r.err != nil || !r.cov.GetComplete() {
+		t.Errorf("call A: err=%v coverage=%v", r.err, r.cov)
+	}
+	if n := control.ActorCount(); n != 0 {
+		t.Errorf("%d actors left, want 0", n)
 	}
 }

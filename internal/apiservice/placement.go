@@ -304,12 +304,17 @@ func parseWarmOptions(req *ateenvv1alpha.WarmImageRequest, maxPerNode int) (warm
 // attempt of the probe was cut off and may have made it (the run id is
 // unique per call, so the name is then this call's).
 //
-// Errors: InvalidArgument for a bad request, or probes_per_node above the
-// server's cap; FailedPrecondition when the base template is missing, the
-// selector contradicts the template's or no worker matches it;
-// PermissionDenied when nodes is 0 and the server may not list workers;
-// Canceled or DeadlineExceeded when the stream ends first (the probes of
-// the round are still deleted).
+// Errors: InvalidArgument for a bad request, probes_per_node above the
+// server's cap, nodes above the distinct nodes of the workers the selector
+// matches (when the server can list them), or nodes x probes_per_node above
+// MaxWarmProbes; FailedPrecondition when the base template is missing, the
+// selector contradicts the template's or no active worker matches it;
+// PermissionDenied when nodes is 0 and the server may not list workers
+// (with nodes given, that permission's absence leaves nodes trusted); the
+// control plane's own error when the workers cannot be listed for another
+// reason after the transient failures are retried; Canceled or
+// DeadlineExceeded when the stream ends first (the probes of the round are
+// still deleted).
 func (s *Server) WarmImage(req *ateenvv1alpha.WarmImageRequest, stream grpc.ServerStreamingServer[ateenvv1alpha.WarmImageEvent]) error {
 	ctx := stream.Context()
 	maxPerNode := s.warmMaxProbesPerNode()
@@ -330,12 +335,29 @@ func (s *Server) WarmImage(req *ateenvv1alpha.WarmImageRequest, stream grpc.Serv
 	if err != nil {
 		return err
 	}
+	// The workers give the node count a request leaves out and the count the
+	// cap below multiplies. A request that claims more nodes than the
+	// selector's workers run on would put more first boots on each real node
+	// than the cap allows, so it is refused. Only the missing permission to
+	// list the workers (PermissionDenied) leaves the request's nodes
+	// trusted, as the README and the threat model say; a selector no active
+	// worker carries, or a listing the control plane fails after the
+	// transient failures are retried, fails the call.
 	wanted := int(req.GetNodes())
-	if wanted == 0 {
-		wanted, err = s.domainNodes(ctx, selector)
-		if err != nil {
-			return err
+	listed, lerr := s.listedNodes(ctx, selector)
+	capNodes := wanted
+	switch {
+	case lerr == nil:
+		if wanted == 0 {
+			wanted = listed
+		} else if wanted > listed {
+			return status.Errorf(codes.InvalidArgument, "nodes %d exceeds the %d nodes the selector's workers run on", wanted, listed)
 		}
+		capNodes = listed
+	case wanted > 0 && grpcCode(lerr) == codes.PermissionDenied:
+		// Trusted: the cap multiplies the request's nodes.
+	default:
+		return lerr
 	}
 	width := wanted * opts.probesPerNode
 	if width > MaxWarmProbes {
@@ -359,9 +381,11 @@ func (s *Server) WarmImage(req *ateenvv1alpha.WarmImageRequest, stream grpc.Serv
 		}
 	}
 	// The cap on the selector: its nodes times the per-node cap, with the
-	// nodes as the request gave or the workers reported them.
+	// nodes as the workers reported them, whatever the request asked to
+	// cover, so two calls on one selector share one limit; the request's
+	// nodes stand in only when the workers cannot be listed.
 	key := selectorKey(selector)
-	limit := wanted * maxPerNode
+	limit := capNodes * maxPerNode
 	slots := s.warmSlots.get(key)
 	var waited time.Duration
 	for round := 1; round <= opts.maxRounds && len(nodes) < wanted && ctx.Err() == nil; round++ {
@@ -606,6 +630,30 @@ func (s *Server) domainNodes(ctx context.Context, selector map[string]string) (i
 		return 0, status.Errorf(codes.FailedPrecondition, "no active worker matches the selector %v", selector)
 	}
 	return len(nodes), nil
+}
+
+// listedNodes is domainNodes with the transient failures of ListWorkers
+// (an api server restarting, a deadline on the call) retried a few times
+// inside ctx; PermissionDenied and FailedPrecondition are final.
+func (s *Server) listedNodes(ctx context.Context, selector map[string]string) (int, error) {
+	wait := warmRetryInitial
+	for attempt := 1; ; attempt++ {
+		n, err := s.domainNodes(ctx, selector)
+		if err == nil || attempt == 3 || ctx.Err() != nil {
+			return n, err
+		}
+		switch grpcCode(err) {
+		case codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.Aborted, codes.Unknown:
+		default:
+			return n, err
+		}
+		select {
+		case <-ctx.Done():
+			return n, err
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, warmRetryMax)
+	}
 }
 
 // labelsCarry reports whether labels has every pair of selector.
