@@ -204,9 +204,14 @@ let
 
         # shellcheck disable=SC2329
         cleanup_go_daemon() {
+          local rc=$?
           if [[ -n "''${daemon_pid:-}" ]]; then
             kill -TERM "$daemon_pid" 2>/dev/null || true
             wait "$daemon_pid" 2>/dev/null || true
+          fi
+          if [[ $rc -ne 0 && -f "''${daemon_log:-}" ]]; then
+            echo "guest daemon log (exit $rc):" >&2
+            cat "$daemon_log" >&2
           fi
           rm -rf "$workspace" "$daemon_dir"
         }
@@ -234,7 +239,7 @@ let
         fi
 
         ATE_ENV_GUEST_TARGET="$addr" ATE_ENV_API_TARGET="" \
-          go test -race -count=1 -covermode=atomic -coverpkg=./... ./clients/go -run '^TestE2EGuestDaemon$' -args -test.gocoverdir="$covdir/go-unit"
+          go test -race -count=1 -timeout 5m -covermode=atomic -coverpkg=./... ./clients/go -run '^TestE2EGuestDaemon$' -args -test.gocoverdir="$covdir/go-unit"
 
         kill -TERM "$daemon_pid"
         wait "$daemon_pid" 2>/dev/null || true

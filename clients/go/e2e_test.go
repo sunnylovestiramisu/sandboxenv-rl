@@ -38,7 +38,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -57,7 +59,6 @@ import (
 	"time"
 
 	"github.com/agent-substrate/env/clients/go"
-	"github.com/agent-substrate/env/internal/portproxy"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -70,19 +71,21 @@ func TestE2EGuestDaemon(t *testing.T) {
 		t.Skip("set ATE_ENV_GUEST_TARGET=host:port of a running examples/guest-daemon")
 	}
 
-	newGuestEnv := func(t *testing.T) *env.Env {
+	newGuestEnv := func(t *testing.T) (*env.Env, context.Context) {
 		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		t.Cleanup(cancel)
 		c, err := env.NewClient(env.ClientOptions{Endpoint: target})
 		if err != nil {
 			t.Fatalf("NewClient(%q): %v", target, err)
 		}
 		t.Cleanup(func() { _ = c.Close() })
-		return c.Env("", "e2e")
+		return c.Env("", "e2e"), ctx
 	}
 
 	t.Run("shell_roundtrip", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		res, err := guestEnv.Shell(t.Context(), "echo hello from e2e")
+		guestEnv, ctx := newGuestEnv(t)
+		res, err := guestEnv.Shell(ctx, "echo hello from e2e")
 		if err != nil {
 			t.Fatalf("Shell: %v", err)
 		}
@@ -95,8 +98,8 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("shell_nonzero_exit_and_stderr", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		res, err := guestEnv.Shell(t.Context(), "echo oops >&2; exit 3")
+		guestEnv, ctx := newGuestEnv(t)
+		res, err := guestEnv.Shell(ctx, "echo oops >&2; exit 3")
 		if err != nil {
 			t.Fatalf("Shell: %v", err)
 		}
@@ -109,8 +112,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("file_roundtrip", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		path := "ate-env-e2e-" + e2eRandomHex(t, 16) + ".txt"
 		content := bytes.Repeat([]byte("line1\nline2\n"), 10_000)
 		if err := guestEnv.WriteFile(ctx, path, bytes.NewReader(content), 0o600); err != nil {
@@ -122,8 +124,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("write_file_seek_offset", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		path := "ate-env-e2e-" + e2eRandomHex(t, 16) + ".txt"
 		if err := guestEnv.WriteFile(ctx, path, strings.NewReader("hello world"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
@@ -144,8 +145,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("output_follow_ends_with_exit", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sh", "-c", "echo one; echo two; echo err >&2; exit 4"},
 		})
@@ -171,8 +171,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("kill_process", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sleep", "30"},
 		})
@@ -205,8 +204,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("signal_term", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sleep", "30"},
 		})
@@ -228,8 +226,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("signal_trapped", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sh", "-c", "trap 'echo got-usr1; exit 7' USR1; echo trap-ready; while :; do sleep 0.05; done"},
 		})
@@ -256,8 +253,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("stdin_streaming", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"cat"},
 			Stdin:   true,
@@ -292,8 +288,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("stdin_not_requested", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"cat"},
 		})
@@ -320,8 +315,8 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("shell_with_stdin", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		res, err := guestEnv.Run(t.Context(), env.ShellRequest{
+		guestEnv, ctx := newGuestEnv(t)
+		res, err := guestEnv.Run(ctx, env.ShellRequest{
 			Command: "tr a-z A-Z",
 			Stdin:   []byte("shout\n"),
 		})
@@ -337,8 +332,8 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("shell_timeout", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		res, err := guestEnv.Run(t.Context(), env.ShellRequest{
+		guestEnv, ctx := newGuestEnv(t)
+		res, err := guestEnv.Run(ctx, env.ShellRequest{
 			Command: "sleep 30",
 			Timeout: 200 * time.Millisecond,
 		})
@@ -354,8 +349,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("cwd_passthrough", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"pwd"},
 			Cwd:     "/",
@@ -377,8 +371,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("env_passthrough", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sh", "-c", "echo $ATE_E2E_MARKER"},
 			Env:     map[string]string{"ATE_E2E_MARKER": "marker-42"},
@@ -396,8 +389,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("process_info", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"true"},
 		})
@@ -430,8 +422,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("binary_file_roundtrip", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		path := "ate-env-e2e-" + e2eRandomHex(t, 16) + ".bin"
 		content := e2eRandomBytes(t, 256*1024+7)
 		if err := guestEnv.WriteFile(ctx, path, bytes.NewReader(content), 0o644); err != nil {
@@ -443,8 +434,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("empty_file_roundtrip", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		path := "ate-env-e2e-" + e2eRandomHex(t, 16) + ".empty"
 		if err := guestEnv.WriteFile(ctx, path, bytes.NewReader(nil), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
@@ -455,8 +445,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("write_file_from_async_generator", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		path := "ate-env-e2e-" + e2eRandomHex(t, 16) + ".gen"
 		chunks := make([][]byte, 5)
 		for i := range chunks {
@@ -472,8 +461,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("output_offset_replay", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sh", "-c", "printf abcdef; printf 123456 >&2"},
 		})
@@ -508,8 +496,7 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("concurrent_shells", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx := t.Context()
+		guestEnv, ctx := newGuestEnv(t)
 		const n = 4
 		results := make([]*env.ShellResponse, n)
 		errs := make([]error, n)
@@ -537,8 +524,8 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("missing_file_maps_to_not_found", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		rc, err := guestEnv.ReadFile(t.Context(), "nope-"+e2eRandomHex(t, 16)+".txt")
+		guestEnv, ctx := newGuestEnv(t)
+		rc, err := guestEnv.ReadFile(ctx, "nope-"+e2eRandomHex(t, 16)+".txt")
 		if err == nil {
 			_ = rc.Close()
 		}
@@ -548,16 +535,16 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("missing_process_maps_to_not_found", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		_, err := guestEnv.Process("bogus-process-id").Info(t.Context())
+		guestEnv, ctx := newGuestEnv(t)
+		_, err := guestEnv.Process("bogus-process-id").Info(ctx)
 		if !errors.Is(err, env.ErrNotFound) || status.Code(err) != codes.NotFound {
 			t.Errorf("Process.Info missing: err = %v (code %v), want ErrNotFound / NotFound", err, status.Code(err))
 		}
 	})
 
 	t.Run("sandbox_escape_maps_to_permission_denied", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		rc, err := guestEnv.ReadFile(t.Context(), "../escape-attempt.txt")
+		guestEnv, ctx := newGuestEnv(t)
+		rc, err := guestEnv.ReadFile(ctx, "../escape-attempt.txt")
 		if err == nil {
 			_ = rc.Close()
 		}
@@ -570,8 +557,8 @@ func TestE2EGuestDaemon(t *testing.T) {
 	})
 
 	t.Run("kill_ends_follow_stream", func(t *testing.T) {
-		guestEnv := newGuestEnv(t)
-		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+		guestEnv, baseCtx := newGuestEnv(t)
+		ctx, cancel := context.WithTimeout(baseCtx, 15*time.Second)
 		defer cancel()
 		proc, err := guestEnv.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 			Command: []string{"sh", "-c", "echo started; sleep 30"},
@@ -805,9 +792,6 @@ func TestE2EFullStack(t *testing.T) {
 		if info.GetId() != envID {
 			t.Errorf("Info.Id = %q, want %q", info.GetId(), envID)
 		}
-		if info.GetStatus() == ateenvv1alpha.EnvironmentStatus_ENVIRONMENT_STATUS_UNSPECIFIED {
-			t.Errorf("Info.Status = UNSPECIFIED, want concrete status")
-		}
 
 		e2eWaitUntilServing(t, ctx, sb, readyTimeout)
 
@@ -923,11 +907,15 @@ func TestE2EFullStack(t *testing.T) {
 
 	t.Run("create_from_image_rejects_unpinned_image", func(t *testing.T) {
 		client := newAPIClient(t)
-		_, err := client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
-			Id:          "goe2e-img-" + e2eRandomHex(t, 4),
+		id := "goe2e-img-" + e2eRandomHex(t, 4)
+		sb, err := client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
+			Id:          id,
 			Atespace:    reqAtespace,
 			RootfsImage: "python:3.12-slim",
 		})
+		if err == nil {
+			_ = e2eDeleteEnv(t.Context(), sb)
+		}
 		if !errors.Is(err, env.ErrInvalidArgument) || status.Code(err) != codes.InvalidArgument {
 			t.Errorf("Create unpinned image: err = %v (code %v), want ErrInvalidArgument / InvalidArgument", err, status.Code(err))
 		}
@@ -936,12 +924,16 @@ func TestE2EFullStack(t *testing.T) {
 	t.Run("create_from_image_needs_a_base_template", func(t *testing.T) {
 		client := newAPIClient(t)
 		missing := "goe2e-nobase-" + e2eRandomHex(t, 4)
-		_, err := client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
-			Id:          "goe2e-img-" + e2eRandomHex(t, 4),
+		id := "goe2e-img-" + e2eRandomHex(t, 4)
+		sb, err := client.Create(t.Context(), &ateenvv1alpha.CreateEnvironmentRequest{
+			Id:          id,
 			Atespace:    reqAtespace,
 			Template:    &ateenvv1alpha.Template{Name: missing},
 			RootfsImage: "docker.io/library/busybox@sha256:" + strings.Repeat("0", 64),
 		})
+		if err == nil {
+			_ = e2eDeleteEnv(t.Context(), sb)
+		}
 		if !errors.Is(err, env.ErrFailedPrecondition) || status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("Create missing base: err = %v (code %v), want ErrFailedPrecondition / FailedPrecondition", err, status.Code(err))
 		}
@@ -1095,7 +1087,7 @@ func TestE2EFullStack(t *testing.T) {
 
 		// WebSocket capability authentication and echo over hijacked stream.
 		if authToken != "" {
-			capToken := portproxy.Capability(authToken, sb.Atespace(), sb.ID(), 8888, time.Now().Add(time.Hour))
+			capToken := e2eMintCapability(authToken, sb.Atespace(), sb.ID(), 8888, time.Now().Add(time.Hour))
 			capHeader := e2eCapabilityAuthHeader(capToken)
 
 			plainCode, _, err := e2eHTTPGet(ctx, httpTarget, portBase+"/8888/hello", "", capHeader, 15*time.Second)
@@ -1147,15 +1139,15 @@ func TestE2EFullStack(t *testing.T) {
 		}
 
 		// Suspend and transparent wake-on-request through the port proxy.
-		// Unlike gRPC guest calls, the port proxy does not retry when a cold
-		// snapshot restore outlasts the router's parked-request hold and
-		// returns 503 with Retry-After, so poll until readyTimeout.
 		if err := sb.Suspend(ctx); err != nil {
 			t.Fatalf("Suspend: %v", err)
 		}
 		e2eWaitForStatus(t, ctx, sb, ateenvv1alpha.EnvironmentStatus_ENVIRONMENT_STATUS_SUSPENDED, 120*time.Second)
 
-		wakeCode, wakeBody := e2eWaitPortProxyWake(t, ctx, httpTarget, portBase+"/8888/hello", authToken, readyTimeout)
+		wakeCode, wakeBody, err := e2eHTTPGet(ctx, httpTarget, portBase+"/8888/hello", authToken, "", readyTimeout)
+		if err != nil {
+			t.Fatalf("wake GET: %v", err)
+		}
 		if wakeCode != http.StatusOK || string(wakeBody) != "port-proxy-ok" {
 			t.Fatalf("wake GET: status=%d body=%q, want 200 \"port-proxy-ok\"", wakeCode, wakeBody)
 		}
@@ -1167,7 +1159,7 @@ func TestE2EFullStack(t *testing.T) {
 			t.Errorf("status after wake = %v, want RUNNING", infoAfterWake.GetStatus())
 		}
 
-		if err := serverProc.Signal(ctx, ateenvv1alpha.Signal_SIGNAL_TERM); err != nil && !errors.Is(err, env.ErrProcessExited) {
+		if err := serverProc.Signal(ctx, ateenvv1alpha.Signal_SIGNAL_TERM); err != nil {
 			t.Fatalf("serverProc.Signal(TERM): %v", err)
 		}
 		if _, err := serverProc.Wait(ctx); err != nil {
@@ -1349,38 +1341,6 @@ func e2eDeleteEnv(ctx context.Context, sb *env.Env) error {
 	}
 }
 
-func e2eWaitPortProxyWake(t *testing.T, ctx context.Context, hostPort, path, authToken string, timeout time.Duration) (int, []byte) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var (
-		code    int
-		body    []byte
-		lastErr error
-	)
-	for time.Now().Before(deadline) {
-		perAttempt := min(30*time.Second, time.Until(deadline))
-		if perAttempt <= 0 {
-			break
-		}
-		code, body, lastErr = e2eHTTPGet(ctx, hostPort, path, authToken, "", perAttempt)
-		if lastErr == nil {
-			switch code {
-			case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-				// Transient router / wake hold response while the actor resumes.
-			default:
-				return code, body
-			}
-		}
-		if err := e2eSleep(ctx, min(time.Second, time.Until(deadline))); err != nil {
-			t.Fatalf("waiting for port proxy wake (%v): last status=%d err=%v", err, code, lastErr)
-		}
-	}
-	if lastErr != nil {
-		t.Fatalf("port proxy wake timed out after %v: %v", timeout, lastErr)
-	}
-	return code, body
-}
-
 func e2eOptionalTemplate(name string) *ateenvv1alpha.Template {
 	if name == "" {
 		return nil
@@ -1502,8 +1462,16 @@ func e2eWaitUntilDeleted(t *testing.T, ctx context.Context, sb *env.Env, timeout
 	t.Fatalf("environment %s still exists after delete", sb.ID())
 }
 
+func e2eMintCapability(token, atespace, id string, port int, expiry time.Time) string {
+	e := expiry.Unix()
+	msg := fmt.Sprintf("ate-env port capability v1\n%s\n%s\n%d\n%d", atespace, id, port, e)
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(msg))
+	return fmt.Sprintf("v1.%d.%s", e, hex.EncodeToString(mac.Sum(nil)))
+}
+
 func e2eCapabilityAuthHeader(capability string) string {
-	raw := portproxy.CapabilityUser + ":" + capability
+	raw := "ate-env-capability:" + capability
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
 }
 

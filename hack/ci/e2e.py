@@ -386,7 +386,7 @@ def run_tests(
             "-race",
             "-count=1",
             "-timeout",
-            "25m",
+            "15m",
             "./clients/go",
             "-run",
             "^TestE2EFullStack$",
