@@ -215,8 +215,10 @@ unknown fields and ignores them. Thus a client from another version or fork of t
 the same `ateenv.v1alpha` names, can get a behavior other than the one it asked for, without an
 error. This is a compatibility risk, not a boundary of this threat model.
 
-Likewise, a new client talking to an old server receives a response where new fields are simply absent
-(e.g., a missing `timed_out` boolean reads as `false`), and must safely fall back to a heuristic.
+A new client that talks to an older guest gets responses without the fields that guest predates. A
+field whose absence matters is declared `optional`: `Process.timed_out` is absent from an older
+guest, and the clients then fall back to the exit-137 heuristic for timeouts; a newer guest always
+sets it.
 
 ## Supply chain and dependencies
 

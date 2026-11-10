@@ -71,6 +71,30 @@ async def test_substrate_env_client_timeout(fake_stack):
     assert res.exit_code is None
 
 
+async def test_substrate_env_client_timed_out_from_guest(fake_stack):
+    # The guest reports timed_out; exec_async takes it though the deadline
+    # (100 s) has not passed by the client's clock.
+    client, fakes = fake_stack
+    await client.create("dev1")
+    fakes.processes.next_procs.append(FakeProc(signal=9, timed_out=True))
+    rt = SubstrateEnvClientRuntime(client=client, env_id="dev1")
+    res = await rt.exec_async("sleep 100", timeout_s=100)
+    assert res.timed_out
+    assert res.exit_code is None
+
+
+async def test_substrate_env_client_guest_not_timed_out_beats_heuristic(fake_stack):
+    # A new guest says the 137 was not its timeout (an OOM kill, say): the
+    # exit-code heuristic, which would fire at timeout_s=0, is not used.
+    client, fakes = fake_stack
+    await client.create("dev1")
+    fakes.processes.next_procs.append(FakeProc(signal=9, timed_out=False))
+    rt = SubstrateEnvClientRuntime(client=client, env_id="dev1")
+    res = await rt.exec_async("sleep 100", timeout_s=0.0)
+    assert not res.timed_out
+    assert res.exit_code == 137
+
+
 async def test_substrate_env_client_file_io(fake_stack):
     client, fakes = fake_stack
     await client.create("dev1")

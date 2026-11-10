@@ -1523,16 +1523,22 @@ func (r *runner) replay(ctx context.Context, e *environment, step int) {
 		)
 		if s.Run != "" && err == nil {
 			ev.Exit = intp(res.ExitCode)
-			// The guest kills a command at its timeout with SIGKILL and the
-			// process API carries no timeout flag, so the loader infers one
-			// from exit 137 at or past the deadline, as the Python SDK's
-			// ExecResult.timed_out does. An OOM kill is 137 too, but it
-			// rarely lands exactly at the deadline.
 			stepTimeout = time.Duration(s.Timeout)
 			if stepTimeout <= 0 {
 				stepTimeout = r.cfg.StepTimeout
 			}
-			timedOut = stepTimeout > 0 && res.ExitCode == 137 && dur >= stepTimeout
+			if res.TimedOut != nil {
+				// The SDK drivers: env.ShellResponse.TimedOut, the guest's
+				// Process.timed_out (the SDK's own exit-code heuristic for
+				// a guest that predates it), for the same timeout.
+				timedOut = *res.TimedOut
+			} else {
+				// agent-sandbox reports no timeout flag, so the loader
+				// infers one from exit 137 at or past the deadline, as the
+				// SDKs do for an old guest. An OOM kill is 137 too, but it
+				// rarely lands exactly at the deadline.
+				timedOut = stepTimeout > 0 && res.ExitCode == 137 && dur >= stepTimeout
+			}
 			if timedOut {
 				ev.Timeout = &timedOut
 			}

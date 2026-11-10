@@ -135,16 +135,21 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 	}
 
 	var res *ShellResponse
+	var guestTimedOut *bool
 	if req.Poll {
-		res, err = e.runPolled(ctx, proc, req.Stdin, began)
+		res, guestTimedOut, err = e.runPolled(ctx, proc, req.Stdin, began)
 	} else {
-		res, err = runStreamed(ctx, proc, req.Stdin, began)
+		res, guestTimedOut, err = runStreamed(ctx, proc, req.Stdin, began)
 	}
 	if err != nil {
 		return nil, err
 	}
-	heuristic := res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
-	res.TimedOut = res.TimedOut || heuristic
+	if guestTimedOut != nil {
+		res.TimedOut = *guestTimedOut
+	} else {
+		// A guest that predates Process.timed_out: the exit-code heuristic.
+		res.TimedOut = res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
+	}
 	span.SetAttributes(AttrExitCode.Int(res.ExitCode), AttrTimedOut.Bool(res.TimedOut))
 	return res, nil
 }
@@ -165,14 +170,16 @@ func writeStdin(ctx context.Context, proc *Process, data []byte) error {
 	return w.Close()
 }
 
-// runStreamed follows the process's output in one stream until it exits.
-func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Time) (*ShellResponse, error) {
+// runStreamed follows the process's output in one stream until it exits. It
+// also returns the guest's Process.timed_out, nil when the guest does not
+// report it.
+func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Time) (*ShellResponse, *bool, error) {
 	if err := writeStdin(ctx, proc, stdin); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{Follow: true})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var exit *ateenvv1alpha.Process
@@ -183,7 +190,7 @@ func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Ti
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		switch out := msg.GetOutput().(type) {
 		case *ateenvv1alpha.ProcessOutput_Stdout:
@@ -196,15 +203,14 @@ func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Ti
 		}
 	}
 	if exit == nil {
-		return nil, errors.New("env: output stream ended before the process exited")
+		return nil, nil, errors.New("env: output stream ended before the process exited")
 	}
 	return &ShellResponse{
 		Stdout:   stdoutBuf.String(),
 		Stderr:   stderrBuf.String(),
 		ExitCode: int(exit.GetExitCode()),
 		Duration: exited.Sub(began),
-		TimedOut: exit.GetTimedOut(),
-	}, nil
+	}, exit.TimedOut, nil
 }
 
 const (
@@ -225,7 +231,7 @@ const (
 // the process runs. If it returns before the process has exited, it kills
 // the process, so a retry of the same command never runs beside the first
 // copy.
-func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began time.Time) (_ *ShellResponse, err error) {
+func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began time.Time) (_ *ShellResponse, _ *bool, err error) {
 	exited := false
 	defer func() {
 		if exited {
@@ -238,7 +244,7 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 		}
 	}()
 	if err := writeStdin(ctx, proc, stdin); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	pMin, pMax := e.client.pollMin, e.client.pollMax
@@ -253,7 +259,7 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-time.After(wait):
 		}
 		// No deadline of its own: a poll that finds the environment
@@ -269,25 +275,25 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 				// Measured before the output read, which a large
 				// output over a slow link can stretch.
 				d := time.Since(began)
-				res, err := collectOutput(ctx, proc, int(p.GetExitCode()), p.GetTimedOut())
+				res, timedOut, err := collectOutput(ctx, proc, int(p.GetExitCode()), p.TimedOut)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				res.Duration = d
-				return res, nil
+				return res, timedOut, nil
 			}
 		case status.Code(perr) == codes.Unavailable || status.Code(perr) == codes.DeadlineExceeded:
 			failures++
 			if failures > pollRetries {
-				return nil, fmt.Errorf("polling process %s: %w", proc.ID(), perr)
+				return nil, nil, fmt.Errorf("polling process %s: %w", proc.ID(), perr)
 			}
 		default:
 			// A cancel during the poll comes back as a gRPC Canceled
 			// status, which errors.Is does not match to ctx.Err().
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
-			return nil, perr
+			return nil, nil, perr
 		}
 		if wait < pMax {
 			wait = min(wait*2, pMax)
@@ -296,11 +302,13 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 }
 
 // collectOutput reads an exited process's buffered output in one
-// non-following stream until EOF.
-func collectOutput(ctx context.Context, proc *Process, exitCode int, timedOut bool) (*ShellResponse, error) {
+// non-following stream until EOF. It returns the guest's Process.timed_out
+// (timedOut, or the exit message's when it carries one), nil when the guest
+// does not report it.
+func collectOutput(ctx context.Context, proc *Process, exitCode int, timedOut *bool) (*ShellResponse, *bool, error) {
 	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var stdout, stderr bytes.Buffer
 	for {
@@ -309,7 +317,7 @@ func collectOutput(ctx context.Context, proc *Process, exitCode int, timedOut bo
 			break
 		}
 		if err != nil {
-			return nil, err // Output's Recv maps it already
+			return nil, nil, err // Output's Recv maps it already
 		}
 		switch out := msg.GetOutput().(type) {
 		case *ateenvv1alpha.ProcessOutput_Stdout:
@@ -318,10 +326,12 @@ func collectOutput(ctx context.Context, proc *Process, exitCode int, timedOut bo
 			stderr.Write(out.Stderr)
 		case *ateenvv1alpha.ProcessOutput_Exit:
 			exitCode = int(out.Exit.GetExitCode())
-			timedOut = out.Exit.GetTimedOut()
+			if out.Exit.TimedOut != nil {
+				timedOut = out.Exit.TimedOut
+			}
 		}
 	}
-	return &ShellResponse{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode, TimedOut: timedOut}, nil
+	return &ShellResponse{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, timedOut, nil
 }
 
 // ReadFile streams the contents of the file at path inside the environment using FileSystemService.

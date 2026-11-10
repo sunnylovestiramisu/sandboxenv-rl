@@ -258,7 +258,9 @@ class ProcessInfo:
     exit_code: int  # valid once EXITED; 128 + signal number if killed by a signal
     started_at: datetime | None
     finished_at: datetime | None
-    timed_out: bool = False
+    # set once EXITED: True if the guest killed it at its timeout; None from a
+    # guest that predates the field
+    timed_out: bool | None = None
 
     @property
     def running(self) -> bool:
@@ -286,7 +288,7 @@ class ShellResult:
     stdout: str
     stderr: str
     exit_code: int  # 128 + signal number if killed by a signal
-    timed_out: bool = False
+    timed_out: bool | None = None  # the guest's report; None from an older guest
 
 
 def _template_from_pb(pb: env_pb2.Template) -> Template:
@@ -340,7 +342,7 @@ def _process_info_from_pb(pb: guest_pb2.Process) -> ProcessInfo:
         exit_code=pb.exit_code,
         started_at=started_at,
         finished_at=finished_at,
-        timed_out=getattr(pb, "timed_out", False),
+        timed_out=pb.timed_out if pb.HasField("timed_out") else None,
     )
 
 
@@ -418,12 +420,14 @@ class ExecResult:
     response) raises ``InfrastructureError`` instead, so transport failures
     can never be mistaken for agent failures.
 
+    ``timed_out`` comes from the guest's ``Process.timed_out``. A guest that
+    predates that field does not report it; then a runtime infers a timeout
+    from ``exit_code == 137 and duration >= timeout_s``, which also reads an
+    external SIGKILL near the deadline (an out-of-memory kill, for example)
+    as a timeout.
+
     Exit codes follow standard POSIX/Linux conventions: a command killed by
     a signal reports 128 plus the signal number (for example 137 for SIGKILL).
-    Note: checking ``exit_code == 137 and duration >= timeout_s`` to detect
-    timeouts is a heuristic and may produce false positives if a process was
-    terminated by an external signal (such as an out-of-memory killer) near
-    its deadline.
     """
     exit_code: int | None
     stdout: str

@@ -261,13 +261,7 @@ class Env:
                         "ate_env_rl: output stream ended before the process exited"
                     )
                 if span is not None:
-                    set_attributes(
-                        span,
-                        {
-                            "ate_env.exit_code": exit_info.exit_code,
-                            "ate_env.timed_out": exit_info.timed_out,
-                        },
-                    )
+                    set_attributes(span, {"ate_env.exit_code": exit_info.exit_code})
                     annotate_span(
                         span,
                         exit=exit_info.exit_code,

@@ -222,10 +222,13 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
                 )
 
             duration = time.monotonic() - t0
-            # 137 = 128 + 9 (SIGKILL sent by guest when guest-side timeout elapsed).
-            # Note: A guest that predates the timed_out field does not report it;
-            # the heuristic fallback (137 and duration) catches those timeouts.
-            timed_out = shell_res.timed_out or (shell_res.exit_code == 137 and duration >= timeout_s)
+            if shell_res.timed_out is not None:
+                timed_out = shell_res.timed_out
+            else:
+                # A guest that predates Process.timed_out: infer it from 137
+                # (128 + SIGKILL, what the guest sends at the timeout) at or
+                # past the deadline. An OOM kill that late reads as one too.
+                timed_out = shell_res.exit_code == 137 and duration >= timeout_s
             return ExecResult(
                 exit_code=None if timed_out else shell_res.exit_code,
                 stdout=shell_res.stdout,
