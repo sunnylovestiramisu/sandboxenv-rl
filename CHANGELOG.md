@@ -11,6 +11,10 @@ user needs to know across them.
   the dataset (under the plan's own file name, so the run's `placement` label
   tells plans apart) and rewrites the flag to the baked path; relative paths
   resolve against the caller's directory.
+- Go client: `clients/go/README.md` covers the Go client API and operations in
+  the Python README's section order, with compiled examples in
+  `clients/go/example_test.go` (`go test` runs `ExampleNewClient`, which needs
+  no server).
 - Go client: `ClientOptions.MetricsRegisterer` registers the Prometheus
   histograms `ate_env_client_exec_seconds{status}`,
   `ate_env_client_suspend_seconds{status}` and

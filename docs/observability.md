@@ -22,7 +22,7 @@ imported, no exporter is created and no collector is registered.
 | ate-env-api | `--enable-tracing` | `--metrics-listen-addr`, for example `:9090` (default empty: metrics off) |
 | `ate-env manifest` | `--enable-tracing`, `--otlp-endpoint`, `--otlp-insecure` | `--metrics-port` (adds a `metrics` container and Service port and `prometheus.io` scrape annotations) |
 | ate-env-guest | `--enable-tracing` in the ActorTemplate's guest arguments | `--enable-metrics` (serves `/metrics` on the guest listener, without authentication; reachable only inside the environment and through the atenet router, see [metrics.md](metrics.md)) |
-| Go client (`clients/go`) | `ClientOptions.TracerProvider` (any `trace.TracerProvider`; `env.NewTracerProvider(ctx, name)` is the OTLP default) and `ClientOptions.TraceServiceName` (default `ate-env-go-client`) | `ClientOptions.MetricsRegisterer` (any `prometheus.Registerer`, such as `prometheus.DefaultRegisterer` or `prometheus.NewRegistry()`; nil registers nothing) |
+| Go client ([`clients/go`](../clients/go/README.md)) | `ClientOptions.TracerProvider` (any `trace.TracerProvider`; `env.NewTracerProvider(ctx, name)` is the OTLP default) and `ClientOptions.TraceServiceName` (default `ate-env-go-client`) | `ClientOptions.MetricsRegisterer` (any `prometheus.Registerer`, such as `prometheus.DefaultRegisterer` or `prometheus.NewRegistry()`; nil registers nothing) |
 | swebench-loader | `swebench-loader run -enable-tracing` | none (the JSONL events are its record) |
 
 Install the Python extras with:
