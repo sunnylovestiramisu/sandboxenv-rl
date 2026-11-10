@@ -20,10 +20,18 @@ import asyncio
 import json
 import time
 
+import grpc
 import pytest
 
 from ate_env_rl import ImagePlacement, Observer, PreflightWarmer
 from ate_env_rl._gen.ateenv.v1alpha import env_pb2
+from ate_env_rl.errors import (
+    FailedPreconditionError,
+    InvalidArgumentError,
+    PermissionDeniedError,
+    SandboxUnavailableError,
+)
+from ate_env_rl.preflight import _create_refused
 
 IMG_A = "registry.example/swebench/a@sha256:" + "a" * 64
 IMG_B = "registry.example/swebench/b@sha256:" + "b" * 64
@@ -323,3 +331,77 @@ def test_plan_domains_are_the_api_placement_domain() -> None:
     assert [type(d) for d in plan.domains] == [PlacementDomain]
     assert plan.domains[0] == want
     assert plan.domains[0].worker_namespace == "" and plan.domains[0].workers == 0
+
+
+async def test_a_colliding_name_is_left_alone(fake_stack):
+    client, fakes = fake_stack
+    fakes.environments.domain_nodes = dict(NODES)
+    _set_golden(fakes, IMG_A, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    # Someone else holds the name of our first probe.
+    taken = "pf-test-0-0-1-0"
+    await client.create(taken, rootfs_image=IMG_A)
+    coverage = await _warmer(client, images=[IMG_A], domains=["d0"], max_rounds=1).run()
+    ic = coverage.domains[0].images[0]
+    assert ic.probes == 2 and ic.failed == 1 and "already exists" in ic.error
+    assert ("ate-env", taken) in fakes.environments.environments, "the environment that is not ours survived"
+    assert len(fakes.environments.environments) == 1, "our own probe was deleted"
+
+
+def test_default_run_id_is_unique_per_pass(fake_stack):
+    client, _ = fake_stack
+    a = PreflightWarmer(client, PLAN)
+    b = PreflightWarmer(client, PLAN)
+    for w in (a, b):
+        assert w.run_id.startswith("pf-") and len(w.run_id) == 9
+    assert a.run_id != b.run_id
+    with pytest.raises(ValueError):
+        PreflightWarmer(client, PLAN, run_id="Not Valid")
+
+
+async def test_a_cut_off_create_is_deleted_by_id(fake_stack):
+    client, fakes = fake_stack
+    fakes.environments.domain_nodes = dict(NODES)
+    _set_golden(fakes, IMG_A, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    # The create lands on the server, then the call is cut off before the
+    # handle comes back: the probe fails and is deleted by its id.
+    original = client.create
+
+    async def cut_off(env_id, **kw):
+        await original(env_id, **kw)
+        raise SandboxUnavailableError("cut off")
+
+    client.create = cut_off  # type: ignore[method-assign]
+    coverage = await _warmer(client, images=[IMG_A], domains=["d0"], max_rounds=1).run()
+    ic = coverage.domains[0].images[0]
+    assert ic.probes == 2 and ic.failed == 2 and "cut off" in ic.error
+    assert fakes.environments.environments == {}, "the cut-off creates were deleted by id"
+
+
+def test_create_refused_classifies_the_errors():
+    class _Raw(grpc.RpcError):
+        def __init__(self, code):
+            self._code = code
+
+        def code(self):
+            return self._code
+
+    class _Mapped(Exception):
+        def __init__(self, code):
+            self.code = code
+
+    refused = [
+        InvalidArgumentError("bad"),
+        PermissionDeniedError("no"),
+        FailedPreconditionError("no template"),
+        _Raw(grpc.StatusCode.ALREADY_EXISTS),
+        _Mapped(grpc.StatusCode.RESOURCE_EXHAUSTED),
+        _Mapped(grpc.StatusCode.UNAUTHENTICATED),
+    ]
+    cut_off = [
+        SandboxUnavailableError("down"),
+        _Raw(grpc.StatusCode.DEADLINE_EXCEEDED),
+        _Mapped(grpc.StatusCode.UNKNOWN),
+        RuntimeError("plain"),
+    ]
+    assert all(_create_refused(e) for e in refused)
+    assert not any(_create_refused(e) for e in cut_off)

@@ -19,6 +19,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"reflect"
 	"sort"
 	"strings"
@@ -382,10 +385,13 @@ func TestPreflightGoldenTimeout(t *testing.T) {
 // placed some: round 1 lands both probes on one node, round 2's creates fail,
 // and no round 3 follows.
 func TestPreflightStopsWhenARoundFailsEntirely(t *testing.T) {
+	// Creates the control plane cut off (Unavailable) may have landed: they
+	// are deleted by id, next to the probes that were created.
 	api := newPreflightFake()
 	api.goldenReadyAfter = 0
 	api.sameNode = true
 	api.createFailAfter = 2
+	api.createFailCode = codes.Unavailable
 	report, err, _ := runPreflight(t, api, func(o *PreflightOptions) {
 		o.Images = []string{pfImgA}
 		o.Domains = []string{"d0"}
@@ -395,11 +401,9 @@ func TestPreflightStopsWhenARoundFailsEntirely(t *testing.T) {
 		t.Fatalf("Run error = %v, want a shortfall", err)
 	}
 	ic := report.Domains[0].Images[0]
-	if ic.Rounds != 2 || ic.Probes != 4 || ic.Failed != 2 || len(ic.Nodes) != 1 || !strings.Contains(ic.Error, "no worker has room") {
+	if ic.Rounds != 2 || ic.Probes != 4 || ic.Failed != 2 || len(ic.Nodes) != 1 || !strings.Contains(ic.Error, "cut the create off") {
 		t.Errorf("coverage = %+v, want two rounds, the second failed entirely", ic)
 	}
-	// Every created probe was deleted; the failed creates got a delete by id
-	// too, in case the server kept them.
 	deleted := map[string]bool{}
 	for _, id := range api.deleted {
 		deleted[id] = true
@@ -410,7 +414,28 @@ func TestPreflightStopsWhenARoundFailsEntirely(t *testing.T) {
 		}
 	}
 	if len(api.deleted) != 4 {
-		t.Errorf("deletes = %d, want 4: two probes and two failed creates", len(api.deleted))
+		t.Errorf("deletes = %d, want 4: two probes and two cut-off creates deleted by id", len(api.deleted))
+	}
+
+	// A create the control plane refused (ResourceExhausted: no room) made
+	// nothing, and nothing is deleted for it.
+	api = newPreflightFake()
+	api.goldenReadyAfter = 0
+	api.sameNode = true
+	api.createFailAfter = 2
+	report, err, _ = runPreflight(t, api, func(o *PreflightOptions) {
+		o.Images = []string{pfImgA}
+		o.Domains = []string{"d0"}
+		o.MaxRounds = 3
+	})
+	if err == nil || report.Complete {
+		t.Fatalf("refused creates: err=%v complete=%v, want a shortfall", err, report.Complete)
+	}
+	if ic := report.Domains[0].Images[0]; ic.Failed != 2 || !strings.Contains(ic.Error, "no worker has room") {
+		t.Errorf("coverage = %+v, want two refused probes", ic)
+	}
+	if len(api.deleted) != 2 {
+		t.Errorf("deletes = %v, want only the two probes that were created", api.deleted)
 	}
 }
 
@@ -454,8 +479,10 @@ func TestPreflightSubsetsAndValidation(t *testing.T) {
 		d0Names[id] = true
 	}
 	for _, id := range api.created {
-		if !strings.HasPrefix(id, "pf-1-") {
-			t.Errorf("d1 probe id = %q, want plan domain index 1 (pf-1-...)", id)
+		// The default run id is pf-<6 random characters>; the plan's domain
+		// index follows it.
+		if !strings.HasPrefix(id, "pf-") || !strings.Contains(id, "-1-") || !strings.HasPrefix(id[len("pf-")+6:], "-1-") {
+			t.Errorf("d1 probe id = %q, want plan domain index 1 (pf-<rand>-1-...)", id)
 		}
 		if d0Names[id] {
 			t.Errorf("d1 probe id %q collides with d0 pass", id)
@@ -593,5 +620,75 @@ func TestPreflightCancellationSkipsUnstartedProbes(t *testing.T) {
 	}
 	if err := schema.ValidateAgainstJSONSchema("preflight_coverage.schema.json", raw2); err != nil {
 		t.Fatalf("pre-cancelled report schema: %v\n%s", err, string(raw2))
+	}
+}
+
+// A probe name another pass or a user holds is not ours: the create fails
+// with AlreadyExists, the probe counts as failed, and nothing deletes the
+// environment behind the name (a cut-off create is deleted by id:
+// TestPreflightStopsWhenARoundFailsEntirely).
+func TestPreflightLeavesACollidingNameAlone(t *testing.T) {
+	api := newPreflightFake()
+	api.goldenReadyAfter = 0
+	taken := probeID("pf-test", 0, 0, 1, 0)
+	api.existing = map[string]bool{taken: true}
+	report, err, _ := runPreflight(t, api, func(o *PreflightOptions) {
+		o.Images = []string{pfImgA}
+		o.Domains = []string{"d0"}
+		o.MaxRounds = 1
+	})
+	if err == nil || !strings.Contains(err.Error(), "short of their nodes") {
+		t.Fatalf("Run error = %v, want a shortfall", err)
+	}
+	ic := report.Domains[0].Images[0]
+	if ic.Probes != 2 || ic.Failed != 1 || !strings.Contains(ic.Error, "already exists") {
+		t.Errorf("coverage = %+v, want one refused probe", ic)
+	}
+	for _, id := range api.deleted {
+		if id == taken {
+			t.Errorf("the environment %s, which is not ours, was deleted", taken)
+		}
+	}
+	if len(api.deleted) != 1 {
+		t.Errorf("deletes = %v, want only our own probe", api.deleted)
+	}
+}
+
+func TestPreflightDefaultRunIDIsUniquePerPass(t *testing.T) {
+	plan := twoDomainPlan()
+	backend := newFakeBackend(t, newPreflightFake())
+	a, err := NewPreflightWarmer(PreflightOptions{Plan: plan, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewPreflightWarmer(PreflightOptions{Plan: plan, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{a.opts.RunID, b.opts.RunID} {
+		if !strings.HasPrefix(id, DefaultPreflightRunIDPrefix+"-") || len(id) != len(DefaultPreflightRunIDPrefix)+7 || !runIDPattern.MatchString(id) {
+			t.Errorf("default run id %q, want pf-<6 characters> matching %s", id, runIDPattern)
+		}
+	}
+	if a.opts.RunID == b.opts.RunID {
+		t.Errorf("two passes got the same default run id %q", a.opts.RunID)
+	}
+	for _, err := range []error{
+		status.Error(codes.AlreadyExists, "exists"), status.Error(codes.InvalidArgument, "bad"),
+		status.Error(codes.FailedPrecondition, "no template"), status.Error(codes.PermissionDenied, "no"),
+		status.Error(codes.ResourceExhausted, "no room"),
+		fmt.Errorf("create x: %w", status.Error(codes.AlreadyExists, "exists")),
+	} {
+		if !createRefused(err) {
+			t.Errorf("createRefused(%v) = false, want true", err)
+		}
+	}
+	for _, err := range []error{
+		status.Error(codes.Unavailable, "down"), status.Error(codes.DeadlineExceeded, "slow"),
+		context.Canceled, errors.New("plain"), nil,
+	} {
+		if createRefused(err) {
+			t.Errorf("createRefused(%v) = true, want false", err)
+		}
 	}
 }

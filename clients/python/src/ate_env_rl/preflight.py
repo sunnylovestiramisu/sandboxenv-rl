@@ -44,14 +44,22 @@ import json
 import logging
 import pathlib
 import re
+import secrets
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import grpc
+
 from .client import DEFAULT_ATESPACE, Client
-from .errors import NotFoundError
+from .errors import (
+    FailedPreconditionError,
+    InvalidArgumentError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from .observability import Observer
 from .types import GoldenSnapshotState, ImageStatus, PlacementDomain
 
@@ -297,7 +305,9 @@ class PreflightWarmer:
         template_name, template_atespace: the base template the derived
             templates come from; the server's defaults when None.
         run_id: the prefix of the probe environment names (at most 20
-            characters, ``[a-z0-9-]``).
+            characters, ``[a-z0-9-]``). Empty gives ``pf-<6 random characters>``,
+            unique per pass, so two passes in one atespace never share a
+            probe name.
         probes_per_node: how many probes a round starts per node of a
             domain; a round holds its probes until all are placed, so the
             scheduler spreads them.
@@ -325,7 +335,7 @@ class PreflightWarmer:
         atespace: str = DEFAULT_ATESPACE,
         template_name: str | None = None,
         template_atespace: str | None = None,
-        run_id: str = "pf",
+        run_id: str = "",
         probes_per_node: int = 2,
         image_concurrency: int = 4,
         max_rounds: int = 3,
@@ -344,6 +354,8 @@ class PreflightWarmer:
         self.atespace = atespace
         self.template_name = template_name
         self.template_atespace = template_atespace
+        if not run_id:
+            run_id = _new_run_id()
         if len(run_id) > _MAX_RUN_ID or not _RUN_ID.match(run_id):
             raise ValueError(
                 f"run_id {run_id!r} must match {_RUN_ID.pattern} and be at most {_MAX_RUN_ID} characters"
@@ -718,6 +730,11 @@ class PreflightWarmer:
             error = f"probe not ready after {self.probe_timeout:g}s"
         except Exception as e:
             error = str(e)
+            if not holder and _create_refused(e):
+                # The server made nothing: the name belongs to another pass or
+                # to a user (AlreadyExists), or the request was bad. Deleting
+                # by id here would take someone else's environment.
+                return node, error
         await self._delete_through_cancel(env_id, holder[0] if holder else None)
         return node, error
 
@@ -789,6 +806,38 @@ async def _await_all(tasks: list[asyncio.Task[Any]]) -> None:
             if all(t.done() for t in tasks):
                 raise
             continue
+
+
+def _new_run_id() -> str:
+    """``pf-`` and six random characters, as ate-env-api's ``WarmImage`` does."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "pf-" + "".join(secrets.choice(alphabet) for _ in range(6))
+
+
+_REFUSED = frozenset(
+    (
+        grpc.StatusCode.ALREADY_EXISTS,
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.FAILED_PRECONDITION,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNAUTHENTICATED,
+        # No room: ate-env-api's create is one CreateActor call, and the
+        # control plane says no before anything exists.
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+    )
+)
+
+
+def _create_refused(e: BaseException) -> bool:
+    """True when a failed create made no environment: the server refused it
+    (the name exists, a bad argument, a missing or conflicting template, no
+    permission, no room). A create that was cut off may still have landed."""
+    if isinstance(e, (InvalidArgumentError, PermissionDeniedError, FailedPreconditionError)):
+        return True
+    # The SDK's RpcError carries the status as an attribute; a raw grpc error
+    # has it as a method.
+    code = e.code() if isinstance(e, grpc.RpcError) else getattr(e, "code", None)
+    return code in _REFUSED
 
 
 class _NoPhase:

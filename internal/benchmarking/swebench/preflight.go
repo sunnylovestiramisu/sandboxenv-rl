@@ -16,8 +16,12 @@ package swebench
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	env "github.com/agent-substrate/env/clients/go"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"log/slog"
 	"os"
 	"sort"
@@ -98,7 +102,9 @@ func NewPreflightWarmer(opts PreflightOptions) (*PreflightWarmer, error) {
 		return nil, errors.New("preflight: a backend is required")
 	}
 	if opts.RunID == "" {
-		opts.RunID = "pf"
+		// A random suffix, as ate-env-api's WarmImage uses: two passes in one
+		// atespace must not share probe names (see createRefused).
+		opts.RunID = newPreflightRunID()
 	}
 	if len(opts.RunID) > maxRunIDLen || !runIDPattern.MatchString(opts.RunID) {
 		return nil, fmt.Errorf("preflight: run id %q must match %s and be at most %d characters", opts.RunID, runIDPattern, maxRunIDLen)
@@ -620,7 +626,14 @@ func (w *PreflightWarmer) coverImage(ctx context.Context, di, ii int, d schema.P
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 			defer cancel()
 			if oc.sb == nil {
-				// A create that failed client-side may exist server-side.
+				// A create the server refused made nothing; one that was cut
+				// off may have landed, so that one is deleted by id. The
+				// distinction matters on AlreadyExists: the name belongs to
+				// another pass or to a user, and deleting it would take their
+				// environment.
+				if createRefused(oc.err) {
+					return
+				}
 				if del, ok := o.Backend.(Backend); ok {
 					_ = del.Delete(rctx, oc.id)
 				}
@@ -672,6 +685,41 @@ func (w *PreflightWarmer) runProbe(ctx context.Context, sb Sandbox) error {
 		}
 		wait = min(wait*2, 5*w.opts.wakeBackoff)
 	}
+}
+
+// DefaultPreflightRunIDPrefix starts the run id of a pass that gives none;
+// newPreflightRunID appends six random characters.
+const DefaultPreflightRunIDPrefix = "pf"
+
+func newPreflightRunID() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 6)
+	rand.Read(b) // never fails since Go 1.24
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return DefaultPreflightRunIDPrefix + "-" + string(b)
+}
+
+// createRefused reports whether a failed create made no environment: the
+// server refused the request (the name exists, a bad argument, a missing or
+// conflicting template, no permission, no room: ate-env-api's
+// CreateEnvironment is one CreateActor call, and ResourceExhausted is the
+// control plane saying no before anything exists, as WarmImage's
+// createMayHaveLanded reads it too). A create that was cut off
+// (Unavailable, DeadlineExceeded, Canceled, Unknown) may still have landed.
+func createRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, env.ErrInvalidArgument) || errors.Is(err, env.ErrPermissionDenied) || errors.Is(err, env.ErrFailedPrecondition) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.AlreadyExists, codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.Unauthenticated, codes.ResourceExhausted:
+		return true
+	}
+	return false
 }
 
 // probeID names a probe environment: short, Substrate-valid, unique per

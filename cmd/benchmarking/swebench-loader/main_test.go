@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -799,8 +800,12 @@ func TestPreflightCmd(t *testing.T) {
 		t.Error("missing -events-dir and -out accepted")
 	}
 	outEvents := filepath.Join(dir, "nested", "pf.jsonl")
-	if runMain([]string{"preflight", "-plan", plan, "-run-id", "pf-out", "-out", outEvents, "-coverage-out", filepath.Join(dir, "cov.json"), "-probes-per-node", "1"}, &stderr, &stderr) != 0 {
+	// No -run-id: the default pf-<6 random characters> reaches the coverage.
+	if runMain([]string{"preflight", "-plan", plan, "-out", outEvents, "-coverage-out", filepath.Join(dir, "cov.json"), "-probes-per-node", "1"}, &stderr, &stderr) != 0 {
 		t.Fatalf("runMain preflight failed:\n%s", stderr.String())
+	}
+	if cov2, err := swebench.ReadPreflightCoverage(filepath.Join(dir, "cov.json")); err != nil || !regexp.MustCompile(`^pf-[a-z0-9]{6}$`).MatchString(cov2.RunID) {
+		t.Errorf("default run id: coverage=%+v err=%v, want pf-<6 characters>", cov2, err)
 	}
 	rawEvents, err := os.ReadFile(outEvents)
 	if err != nil {

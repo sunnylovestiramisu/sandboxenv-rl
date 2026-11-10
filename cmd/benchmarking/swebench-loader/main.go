@@ -519,7 +519,7 @@ func preflightCmd(args []string, stderr io.Writer) (retErr error) {
 		baseTemplate  = fs.String("base-template", "default-template", "Base ActorTemplate the derived templates come from.")
 		connections   = fs.Int("connections", 1, "gRPC connections to ate-env-api.")
 		authTokenFile = fs.String("auth-token-file", "", "File with the ate-env-api bearer token; SUBSTRATE_ENV_AUTH_TOKEN otherwise.")
-		runID         = fs.String("run-id", "pf", "Prefix of the probe environment names (at most 20 characters).")
+		runID         = fs.String("run-id", "", "Prefix of the probe environment names (at most 20 characters; default pf-<6 random characters>, unique per pass).")
 		eventsDir     = fs.String("events-dir", "", "Directory for preflight-events.jsonl and preflight-coverage.json; required unless -out is given.")
 		out           = fs.String("out", "", "Events file to write instead of -events-dir.")
 		coverageOut   = fs.String("coverage-out", "", "Where to write preflight-coverage.json; default <events-dir>/preflight-coverage.json.")

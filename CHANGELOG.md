@@ -318,6 +318,12 @@ user needs to know across them.
     a UTF-8 bytes id is decoded (was `"b'...'"`).
 
 ### Fixed
+- `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` no longer delete an
+  environment whose name a probe collided with: a create the server refused
+  (`AlreadyExists`, a bad argument, a missing template, no permission, no
+  room) made nothing and is left alone; only a create that was cut off is
+  deleted by id. The default run id is `pf-<6 random characters>`, unique per
+  pass, as `WarmImage`'s is, instead of the fixed `pf`.
 
 - swebench-loader: a step the guest kills at its timeout (exit 137 at or
   past the deadline) fails the task and stops the trajectory, as

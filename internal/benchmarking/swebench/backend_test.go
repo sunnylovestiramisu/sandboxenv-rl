@@ -101,8 +101,13 @@ type fakeAPI struct {
 	goldenFail       map[string]string
 	goldenDisabled   bool
 	// createFailAfter makes every CreateEnvironment after that many fail
-	// with ResourceExhausted, as a full pool does.
+	// with createFailCode: ResourceExhausted, as a full pool does, when it
+	// is unset.
 	createFailAfter int
+	createFailCode  codes.Code
+	// existing names environments another pass or a user holds: a create
+	// with one of these ids fails with AlreadyExists and makes nothing.
+	existing map[string]bool
 	// goldenPendingForever names images whose golden never gets ready.
 	goldenPendingForever map[string]bool
 	ensured              []string
@@ -124,7 +129,13 @@ func (f *fakeAPI) CreateEnvironment(_ context.Context, req *ateenvv1alpha.Create
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createFailAfter > 0 && len(f.created) >= f.createFailAfter {
+		if f.createFailCode != codes.OK && f.createFailCode != codes.ResourceExhausted {
+			return nil, status.Error(f.createFailCode, "the control plane cut the create off")
+		}
 		return nil, status.Error(codes.ResourceExhausted, "no worker has room for the actor")
+	}
+	if f.existing[req.GetId()] {
+		return nil, status.Errorf(codes.AlreadyExists, "environment %q already exists", req.GetId())
 	}
 	f.created = append(f.created, req.GetId())
 	f.selectors[req.GetId()] = req.GetWorkerSelector()
