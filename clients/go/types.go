@@ -69,9 +69,10 @@ type ShellResponse struct {
 	Duration time.Duration `json:"duration"`
 
 	// TimedOut reports that the guest killed the process because Timeout
-	// elapsed. It is a heuristic, the Python client's: exit code 137 and a
-	// Duration of at least Timeout. Another SIGKILL that late (the OOM
-	// killer, for one) reads as a timeout too. With a zero Timeout it stays
-	// false, also when the guest's default timeout kills the process.
+	// elapsed. With a zero Timeout it stays false, unless the guest's
+	// default timeout killed the process. For an old guest that does not
+	// report the field, it falls back to a heuristic: exit code 137 and a
+	// Duration of at least Timeout. (Another SIGKILL that late, like the OOM
+	// killer, reads as a timeout too on an old guest).
 	TimedOut bool `json:"timed_out"`
 }

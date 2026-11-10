@@ -194,8 +194,8 @@ Append-only. Each entry: date, who, what, why.
 - 2026-10-28, recorded from #150: the Go client's `Attr*` constants are the Python keys for every
   field the Go client has, including `ate.template.atespace`. Not in Go: `ate_env.run_id` and
   `ate_env.first_command`, which describe the Python fleet's run and acquired sandbox, and
-  `ate_env.timed_out`, which the Go client cannot know because the guest API returns an exit status
-  and no timeout field. Adding it needs a guest API field first.
+  `ate_env.timed_out`, which the Go client could initially not know (before the guest API added the
+  field) because it returned an exit status and no timeout field.
 - 2026-10-28, recorded from #150: the Go client matches the Python client on span kind (CLIENT with
   `rpc.*` and `server.*` only for a single-RPC span on a caller-supplied connection, INTERNAL
   otherwise), empty values (not recorded), `ate_env.rootfs_image` (tag dropped) and
@@ -338,5 +338,7 @@ Append-only. Each entry: date, who, what, why.
   `ate_env_client_suspend_seconds` and `ate_env_client_ready_to_first_command_seconds`
   (`source="direct"`) when `ClientOptions.MetricsRegisterer` is set. Remaining AC-17.2 differences:
   `ate_env.run_id` is Python fleet-only, `Env.shell` vs `Env.Run` (`ate_env.timed_out` and span
-  name), and Go backfilling server-resolved `ate.template.*` on `Create`, `ImageStatus` and
-  `EnsureImageTemplate` (to be reconciled in PR 7's parity vectors).
+  name), Go `Env.Run` exec span records `exit_code` 137 + `timed_out=true` while Python
+  `SandboxHandle.exec` records `timed_out=true` without `exit_code`, and Go backfilling
+  server-resolved `ate.template.*` on `Create`, `ImageStatus` and `EnsureImageTemplate` (to be
+  reconciled in PR 7's parity vectors).

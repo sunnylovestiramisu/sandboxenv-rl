@@ -258,6 +258,7 @@ class ProcessInfo:
     exit_code: int  # valid once EXITED; 128 + signal number if killed by a signal
     started_at: datetime | None
     finished_at: datetime | None
+    timed_out: bool = False
 
     @property
     def running(self) -> bool:
@@ -285,6 +286,7 @@ class ShellResult:
     stdout: str
     stderr: str
     exit_code: int  # 128 + signal number if killed by a signal
+    timed_out: bool = False
 
 
 def _template_from_pb(pb: env_pb2.Template) -> Template:
@@ -338,6 +340,7 @@ def _process_info_from_pb(pb: guest_pb2.Process) -> ProcessInfo:
         exit_code=pb.exit_code,
         started_at=started_at,
         finished_at=finished_at,
+        timed_out=getattr(pb, "timed_out", False),
     )
 
 

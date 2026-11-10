@@ -192,7 +192,7 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 - `internal/benchmarking/swebench/backend.go`: `envSandbox.Run` calls `Run` with `Poll: true`;
   `runPolledProcess` and its test cases move into the client.
 
-### PR 4: `timed_out` from the guest
+### PR 4: `timed_out` from the guest (built)
 
 - `proto/ateenv/v1alpha/guest.proto`: `bool timed_out = 8;` on `Process`, "true when the guest
   killed the process because `StartProcessRequest.timeout` elapsed". `guest/process` sets it from

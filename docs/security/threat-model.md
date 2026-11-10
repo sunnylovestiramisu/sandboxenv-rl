@@ -215,6 +215,9 @@ unknown fields and ignores them. Thus a client from another version or fork of t
 the same `ateenv.v1alpha` names, can get a behavior other than the one it asked for, without an
 error. This is a compatibility risk, not a boundary of this threat model.
 
+Likewise, a new client talking to an old server receives a response where new fields are simply absent
+(e.g., a missing `timed_out` boolean reads as `false`), and must safely fall back to a heuristic.
+
 ## Supply chain and dependencies
 
 | Item | Current state | Gap |

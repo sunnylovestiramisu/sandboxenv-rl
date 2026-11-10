@@ -98,7 +98,7 @@ SIGNAL_IO: Signal
 SIGNAL_SYS: Signal
 
 class Process(_message.Message):
-    __slots__ = ("process_id", "command", "pid", "state", "exit_code", "started_at", "finished_at")
+    __slots__ = ("process_id", "command", "pid", "state", "exit_code", "started_at", "finished_at", "timed_out")
     PROCESS_ID_FIELD_NUMBER: _ClassVar[int]
     COMMAND_FIELD_NUMBER: _ClassVar[int]
     PID_FIELD_NUMBER: _ClassVar[int]
@@ -106,6 +106,7 @@ class Process(_message.Message):
     EXIT_CODE_FIELD_NUMBER: _ClassVar[int]
     STARTED_AT_FIELD_NUMBER: _ClassVar[int]
     FINISHED_AT_FIELD_NUMBER: _ClassVar[int]
+    TIMED_OUT_FIELD_NUMBER: _ClassVar[int]
     process_id: str
     command: _containers.RepeatedScalarFieldContainer[str]
     pid: int
@@ -113,7 +114,8 @@ class Process(_message.Message):
     exit_code: int
     started_at: _timestamp_pb2.Timestamp
     finished_at: _timestamp_pb2.Timestamp
-    def __init__(self, process_id: _Optional[str] = ..., command: _Optional[_Iterable[str]] = ..., pid: _Optional[int] = ..., state: _Optional[_Union[ProcessState, str]] = ..., exit_code: _Optional[int] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    timed_out: bool
+    def __init__(self, process_id: _Optional[str] = ..., command: _Optional[_Iterable[str]] = ..., pid: _Optional[int] = ..., state: _Optional[_Union[ProcessState, str]] = ..., exit_code: _Optional[int] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., timed_out: _Optional[bool] = ...) -> None: ...
 
 class TTY(_message.Message):
     __slots__ = ("rows", "cols")

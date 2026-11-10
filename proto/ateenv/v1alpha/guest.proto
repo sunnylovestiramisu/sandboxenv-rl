@@ -145,6 +145,8 @@ message Process {
   google.protobuf.Timestamp started_at = 6;
   // Timestamp when the process exited. Unset while RUNNING.
   google.protobuf.Timestamp finished_at = 7;
+  // true when the guest killed the process because StartProcessRequest.timeout, or the guest default timeout, elapsed
+  bool timed_out = 8;
 }
 
 // Pseudo-terminal configuration for interactive processes.

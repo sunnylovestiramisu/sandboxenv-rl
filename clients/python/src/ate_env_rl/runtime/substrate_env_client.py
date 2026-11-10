@@ -187,6 +187,7 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
                             stdout=stdout.decode("utf-8", errors="replace"),
                             stderr=stderr.decode("utf-8", errors="replace"),
                             exit_code=exit_info.exit_code,
+                            timed_out=exit_info.timed_out,
                         )
 
                     if hasattr(asyncio, "timeout"):
@@ -222,9 +223,9 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
 
             duration = time.monotonic() - t0
             # 137 = 128 + 9 (SIGKILL sent by guest when guest-side timeout elapsed).
-            # Note: checking exit_code == 137 and duration >= timeout_s is a heuristic;
-            # external kills (like OOM) can also produce exit_code 137.
-            timed_out = shell_res.exit_code == 137 and duration >= timeout_s
+            # Note: A guest that predates the timed_out field does not report it;
+            # the heuristic fallback (137 and duration) catches those timeouts.
+            timed_out = shell_res.timed_out or (shell_res.exit_code == 137 and duration >= timeout_s)
             return ExecResult(
                 exit_code=None if timed_out else shell_res.exit_code,
                 stdout=shell_res.stdout,

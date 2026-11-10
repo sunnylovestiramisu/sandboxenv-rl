@@ -510,6 +510,9 @@ func TestDefaultTimeoutKills(t *testing.T) {
 	if proc.GetExitCode() != 137 {
 		t.Fatalf("expected 137 (128+SIGKILL) from watchdog, got %d", proc.GetExitCode())
 	}
+	if !proc.GetTimedOut() {
+		t.Fatalf("expected timed_out=true from watchdog kill")
+	}
 }
 
 func TestPerProcessTimeout(t *testing.T) {
@@ -521,6 +524,21 @@ func TestPerProcessTimeout(t *testing.T) {
 	proc := wait(t, client, started.GetProcessId())
 	if proc.GetExitCode() != 137 {
 		t.Fatalf("expected 137 (128+SIGKILL) from per-process timeout, got %d", proc.GetExitCode())
+	}
+	if !proc.GetTimedOut() {
+		t.Fatalf("expected timed_out=true from per-process timeout")
+	}
+}
+
+func TestProcessKilledBySignalNotTimedOut(t *testing.T) {
+	client := setupTestServer(t)
+	started := sh(t, client, "kill -9 $$")
+	proc := wait(t, client, started.GetProcessId())
+	if proc.GetExitCode() != 137 {
+		t.Fatalf("expected 137, got %d", proc.GetExitCode())
+	}
+	if proc.GetTimedOut() {
+		t.Fatalf("expected timed_out=false for kill -9")
 	}
 }
 

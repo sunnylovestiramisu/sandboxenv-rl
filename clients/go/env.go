@@ -143,7 +143,8 @@ func (e *Env) Run(ctx context.Context, req ShellRequest) (_ *ShellResponse, err 
 	if err != nil {
 		return nil, err
 	}
-	res.TimedOut = res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
+	heuristic := res.ExitCode == 137 && req.Timeout > 0 && res.Duration >= req.Timeout
+	res.TimedOut = res.TimedOut || heuristic
 	span.SetAttributes(AttrExitCode.Int(res.ExitCode), AttrTimedOut.Bool(res.TimedOut))
 	return res, nil
 }
@@ -202,6 +203,7 @@ func runStreamed(ctx context.Context, proc *Process, stdin []byte, began time.Ti
 		Stderr:   stderrBuf.String(),
 		ExitCode: int(exit.GetExitCode()),
 		Duration: exited.Sub(began),
+		TimedOut: exit.GetTimedOut(),
 	}, nil
 }
 
@@ -267,7 +269,7 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 				// Measured before the output read, which a large
 				// output over a slow link can stretch.
 				d := time.Since(began)
-				res, err := collectOutput(ctx, proc, int(p.GetExitCode()))
+				res, err := collectOutput(ctx, proc, int(p.GetExitCode()), p.GetTimedOut())
 				if err != nil {
 					return nil, err
 				}
@@ -295,7 +297,7 @@ func (e *Env) runPolled(ctx context.Context, proc *Process, stdin []byte, began 
 
 // collectOutput reads an exited process's buffered output in one
 // non-following stream until EOF.
-func collectOutput(ctx context.Context, proc *Process, exitCode int) (*ShellResponse, error) {
+func collectOutput(ctx context.Context, proc *Process, exitCode int, timedOut bool) (*ShellResponse, error) {
 	stream, err := proc.Output(ctx, &ateenvv1alpha.StreamProcessOutputRequest{})
 	if err != nil {
 		return nil, err
@@ -316,9 +318,10 @@ func collectOutput(ctx context.Context, proc *Process, exitCode int) (*ShellResp
 			stderr.Write(out.Stderr)
 		case *ateenvv1alpha.ProcessOutput_Exit:
 			exitCode = int(out.Exit.GetExitCode())
+			timedOut = out.Exit.GetTimedOut()
 		}
 	}
-	return &ShellResponse{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, nil
+	return &ShellResponse{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode, TimedOut: timedOut}, nil
 }
 
 // ReadFile streams the contents of the file at path inside the environment using FileSystemService.

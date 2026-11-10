@@ -213,6 +213,9 @@ func (p *ProcessState) ToProto() *ateenvv1alpha.Process {
 	if !p.FinishedAt.IsZero() {
 		proto.FinishedAt = timestamppb.New(p.FinishedAt)
 	}
+	if p.State == ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED {
+		proto.TimedOut = p.timedOut.Load()
+	}
 	return proto
 }
 

@@ -15,6 +15,7 @@ user needs to know across them.
   the Python README's section order, with compiled examples in
   `clients/go/example_test.go` (`go test` runs `ExampleNewClient`, which needs
   no server).
+- guest: `Process` reports `timed_out=true` when the guest's process-group timeout or default watchdog timeout kills it. The Go and Python SDKs prefer the guest field, falling back to their exit-code 137 heuristic for old guests.
 - Go client: `ClientOptions.MetricsRegisterer` registers the Prometheus
   histograms `ate_env_client_exec_seconds{status}`,
   `ate_env_client_suspend_seconds{status}` and

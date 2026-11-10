@@ -60,6 +60,7 @@ type fakeProcesses struct {
 	outputDelay    time.Duration
 	outputCode     codes.Code
 	exitCode       int32
+	timedOut       bool
 	stdout, stderr string
 
 	nextID     int
@@ -103,6 +104,7 @@ func (f *fakeProcesses) GetProcess(ctx context.Context, req *ateenvv1alpha.GetPr
 	if f.exited[id] {
 		p.State = ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED
 		p.ExitCode = f.exitCode
+		p.TimedOut = f.timedOut
 	}
 	return p, nil
 }
@@ -110,7 +112,7 @@ func (f *fakeProcesses) GetProcess(ctx context.Context, req *ateenvv1alpha.GetPr
 func (f *fakeProcesses) StreamProcessOutput(req *ateenvv1alpha.StreamProcessOutputRequest, stream grpc.ServerStreamingServer[ateenvv1alpha.ProcessOutput]) error {
 	f.mu.Lock()
 	f.outputReqs = append(f.outputReqs, req)
-	stdout, stderr, exited, code, delay := f.stdout, f.stderr, f.exited[req.GetProcessId()], f.exitCode, f.outputDelay
+	stdout, stderr, exited, code, delay, tOut := f.stdout, f.stderr, f.exited[req.GetProcessId()], f.exitCode, f.outputDelay, f.timedOut
 	outputCode := f.outputCode
 	f.mu.Unlock()
 	time.Sleep(delay)
@@ -129,7 +131,7 @@ func (f *fakeProcesses) StreamProcessOutput(req *ateenvv1alpha.StreamProcessOutp
 	}
 	if exited {
 		return stream.Send(&ateenvv1alpha.ProcessOutput{Output: &ateenvv1alpha.ProcessOutput_Exit{Exit: &ateenvv1alpha.Process{
-			ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED, ExitCode: code}}})
+			ProcessId: req.GetProcessId(), State: ateenvv1alpha.ProcessState_PROCESS_STATE_EXITED, ExitCode: code, TimedOut: tOut}}})
 	}
 	return nil
 }
@@ -464,5 +466,17 @@ func TestRunPollCancelKillsGuestProcess(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("process %d after the cancel: kill -0 = %v, want ESRCH", pid, err)
+	}
+}
+
+func TestRunTimedOutGuestField(t *testing.T) {
+	f := &fakeProcesses{pollsUntilExit: 1, exitCode: 137, timedOut: true}
+	e := newFakeProcessEnv(t, f)
+	res, err := e.Run(t.Context(), env.ShellRequest{Command: "sleep 10", Timeout: 0, Poll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut {
+		t.Errorf("expected TimedOut=true from guest field when Timeout=0, got false")
 	}
 }
