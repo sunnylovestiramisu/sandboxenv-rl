@@ -257,6 +257,9 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 
 ### PR 8: README and example
 
+- As built: PR 8 implemented the Go client README and runnable examples in
+  `clients/go/example_test.go`.
+
 - `clients/go/README.md`: install (`go get`), connect, create, shell and `Run` options, processes,
   stdin and signals, PTY, files, suspend and delete, readiness (wake on first call, `StartError`,
   `Retryable`), errors (`errors.Is`, `errors.As`, `status.Code`), connections, tracing and metrics,
