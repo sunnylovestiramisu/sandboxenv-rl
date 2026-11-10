@@ -35,7 +35,7 @@ Conventions:
 | AC-14 | Blast radius: existing tests pass unchanged; telemetry-off overhead under 2%        | all                                | partial: suites green; overhead not measured                                                                                                          |
 | AC-15 | Warm-pool accounting under concurrent acquire, recycle, `warm_pool` and teardown    | #221, #238, #239, #240, #242, #276 | pass: 15.1 to 15.10 (`test_warm_pool_accounting.py`, `verify/*.dfy`)                                                                                  |
 | AC-16 | The span and attribute inventory in `interfaces.md` matches the code, checked in CI | follow-up                          | not met: the table is hand-written; last checked against `c0c41ac`                                                                                    |
-| AC-17 | The Go and Python clients emit the same span names and keys for shared operations   | follow-up                          | partial: mirrored tables in `attrs_test.go`, `executable_test.go`; no shared fixture                                                                  |
+| AC-17 | The Go and Python clients emit the same span names and keys for shared operations   | 7                                  | partial: 17.3, 17.4 on shared vectors (#329); 17.1, 17.2 on per-client tests                                                                          |
 | AC-18 | No command line, secret or file content in any span attribute value                 | follow-up                          | partial: example tests in both clients; no property test                                                                                              |
 | AC-19 | Several fleets in one process share the warm-replica gauge                          | 2                                  | pass: `test_warm_gauge_adds_up_across_observers_and_resets_only_own_share`                                                                            |
 | AC-20 | CI verifies the Dafny models with the documented counts                             | follow-up                          | pass: `Dafny models` job, `hack/verify/dafny.py`                                                                                                      |
@@ -338,10 +338,13 @@ Conventions:
   record the same `rpc.*`, `server.address` and `server.port` keys and values for the same call, and
   the `rpc.*` keys and values are the ones otelgrpc records for that value.
 - 17.4: `executable` (Go) and `executable_attr` (Python) agree on every case of one shared table.
-- Command: one fixture file (for example `testdata/span_parity.json`) read by a Go test and a Python
-  test.
-- Status: partial. `attrs_test.go` and `executable_test.go` mirror the Python tests' tables by hand
-  (#150, #164), so the two can drift apart without a test failing.
+- Command: `go test ./clients/go -run Parity` and
+  `pytest clients/python/tests/test_parity_vectors.py`, which read the same files in
+  `proto/testdata/client-parity/`: `semconv_mode.json` and `rpc_attrs.json` for 17.3,
+  `executable.json` for 17.4.
+- Status: partial. 17.3 and 17.4 pass on the shared vectors (#329): a changed value fails a test in
+  each suite. 17.1 and 17.2 rest on per-client tests (`TestTracingCallerConnSpansMatchPythonClient`,
+  `test_client_rpc_spans_are_client_kind_with_rpc_attributes`) that can drift apart.
 - Properties: P-22.
 
 ## AC-18: No secrets or content in attribute values
@@ -352,8 +355,8 @@ Conventions:
 - 18.2: no span attribute value contains file content, an auth token, or an image tag
   (`image_ref_attr` keeps the repository and digest and drops the tag).
 - Status: partial. Example tests: `test_executable_attr_skips_env_assignments`,
-  `TestExecutableNeverRecordsAssignments`, `TestExecutableMatchesPythonClient`. No property test;
-  the `NAME+=value` case was found in review of #150.
+  `TestExecutableNeverRecordsAssignments`, the `executable.json` vector. No property test; the
+  `NAME+=value` case was found in review of #150.
 - Properties: P-21.
 
 ## AC-19: Several fleets share the warm-replica gauge

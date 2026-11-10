@@ -30,9 +30,11 @@ from ..config import TracerConfig
 from ..env import Env as AteEnv
 from ..errors import (
     CommandStartError,
+    FailedPreconditionError,
     InfrastructureError,
     InvalidArgumentError,
     NotFoundError,
+    PermissionDeniedError,
     RpcError,
     SandboxProtocolError,
     SandboxStartError,
@@ -43,6 +45,45 @@ from ..types import ExecResult, ShellResult
 from .base import RuntimeGuestHook
 
 logger = logging.getLogger("ate_env_rl.runtime.substrate_env_client")
+
+
+def guest_infra_error(e: Exception, env_id: str) -> InfrastructureError:
+    """The InfrastructureError exec_async raises for e, a failed guest call.
+
+    A start failure keeps its own error. NOT_FOUND for the environment or
+    its actor is retryable on a fresh sandbox, as are UNAVAILABLE,
+    DEADLINE_EXCEEDED, INTERNAL and ABORTED; the rest (INVALID_ARGUMENT,
+    PERMISSION_DENIED, FAILED_PRECONDITION, another NOT_FOUND,
+    RESOURCE_EXHAUSTED, ...) is not. The Go client's Retryable gives the same
+    answers (proto/testdata/client-parity/error_mapping.json).
+    """
+    if isinstance(e, SandboxStartError):
+        if e.sandbox_id is None:
+            e.sandbox_id = env_id
+        return e
+    if isinstance(e, InfrastructureError):
+        return e
+    if isinstance(e, (InvalidArgumentError, PermissionDeniedError, FailedPreconditionError)):
+        # A fresh sandbox gets the same answer; ProcessExitedError is a
+        # FailedPreconditionError.
+        return SandboxProtocolError(str(e), sandbox_id=env_id)
+    if isinstance(e, NotFoundError):
+        msg = str(e).lower()
+        if "environment" in msg or "actor" in msg:
+            return SandboxUnavailableError(str(e), sandbox_id=env_id)
+        return CommandStartError(str(e), sandbox_id=env_id)
+    if isinstance(e, RpcError):
+        status_name = f"grpc {e.code.name}" if e.code else "grpc RpcError"
+        if e.code in (
+            grpc.StatusCode.NOT_FOUND,
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.INTERNAL,
+            grpc.StatusCode.ABORTED,
+        ):
+            return SandboxUnavailableError(str(e), sandbox_id=env_id, status=status_name)
+        return SandboxProtocolError(str(e), sandbox_id=env_id, status=status_name)
+    return InfrastructureError(str(e), sandbox_id=env_id)
 
 
 class SubstrateEnvClientRuntime(RuntimeGuestHook):
@@ -238,30 +279,16 @@ class SubstrateEnvClientRuntime(RuntimeGuestHook):
             )
         except SandboxStartError as e:
             raise self._own(e)
-        except InvalidArgumentError as e:
-            raise SandboxProtocolError(str(e), sandbox_id=self.env_id) from e
-        except NotFoundError as e:
-            msg = str(e).lower()
-            if "environment" in msg or "actor" in msg:
-                raise SandboxUnavailableError(str(e), sandbox_id=self.env_id) from e
-            raise CommandStartError(str(e), sandbox_id=self.env_id) from e
-        except RpcError as e:
-            status_name = f"grpc {e.code.name}" if e.code else "grpc RpcError"
-            if e.code in (
-                grpc.StatusCode.NOT_FOUND,
-                grpc.StatusCode.UNAVAILABLE,
-                grpc.StatusCode.DEADLINE_EXCEEDED,
-                grpc.StatusCode.INTERNAL,
-                grpc.StatusCode.ABORTED,
-            ):
-                raise SandboxUnavailableError(
-                    str(e), sandbox_id=self.env_id, status=status_name
-                ) from e
-            raise SandboxProtocolError(str(e), sandbox_id=self.env_id, status=status_name) from e
         except InfrastructureError:
             raise
         except Exception as e:
-            raise InfrastructureError(str(e), sandbox_id=self.env_id) from e
+            raise self._infra_error(e) from e
+
+    def _infra_error(self, e: Exception) -> InfrastructureError:
+        """The InfrastructureError exec_async raises for e (see guest_infra_error)."""
+        if isinstance(e, SandboxStartError):
+            return self._own(e)
+        return guest_infra_error(e, self.env_id)
 
     def exec(
         self,

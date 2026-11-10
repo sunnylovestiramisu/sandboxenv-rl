@@ -692,3 +692,24 @@ func TestTracingStartProcessFirstCommandTimedOutAndFailedFileSpans(t *testing.T)
 		t.Errorf("failed read_file recorded ate_env.file.size: %v", attrs(rfSpans[1]))
 	}
 }
+
+func TestNonEmptyDropsEmptyStrings(t *testing.T) {
+	got := env.NonEmptyForTest([]attribute.KeyValue{
+		attribute.String("a", "b"),
+		attribute.String("c", ""),
+		attribute.Int("d", 1),
+		attribute.String("e", "   "),
+	})
+	if len(got) != 3 {
+		t.Errorf("nonEmpty = %d items (%v), want 3", len(got), got)
+	}
+}
+
+func TestExecutableNeverRecordsAssignments(t *testing.T) {
+	for _, line := range []string{"API_KEY=s3cr3t python x.py", "TOKEN='s3 cr3t' run", "A=s3cr3t", "A=s3cr3t 'unterminated", "X+=s3cr3t cmd"} {
+		got := env.ExecutableForTest(line)
+		if strings.Contains(got, "s3") || strings.Contains(got, "=") {
+			t.Errorf("executable(%q) = %q leaks the assignment", line, got)
+		}
+	}
+}

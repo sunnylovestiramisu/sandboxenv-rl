@@ -1,0 +1,34 @@
+[
+  {
+    "ref": "registry.example/swe/repo-a@sha256:abababababababababababababababababababababababababababababababab",
+    "want": "registry.example/swe/repo-a@sha256:abababababababababababababababababababababababababababababababab"
+  },
+  {
+    "ref": "registry.example/swe/repo-a:v1",
+    "want": "registry.example/swe/repo-a"
+  },
+  {
+    "ref": "registry.example/swe/repo-a:v1@sha256:abababababababababababababababababababababababababababababababab",
+    "want": "registry.example/swe/repo-a@sha256:abababababababababababababababababababababababababababababababab"
+  },
+  {
+    "ref": "host:5000/img",
+    "want": "host:5000/img"
+  },
+  {
+    "ref": "host:5000/img:tag",
+    "want": "host:5000/img"
+  },
+  {
+    "ref": "img",
+    "want": "img"
+  },
+  {
+    "ref": "img:latest",
+    "want": "img"
+  },
+  {
+    "ref": null,
+    "want": null
+  }
+]

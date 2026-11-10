@@ -1,0 +1,122 @@
+[
+  {
+    "line": "echo hi",
+    "want": "echo"
+  },
+  {
+    "line": "API_KEY=s3cr3t python x.py",
+    "want": "python"
+  },
+  {
+    "line": "X+=s3cr3t cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "PATH+=:/opt/bin A=1 make",
+    "want": "make"
+  },
+  {
+    "line": "./a+=b",
+    "want": "a+=b"
+  },
+  {
+    "line": "A=1 B=2 /usr/bin/env python3 -c x",
+    "want": "env"
+  },
+  {
+    "line": "'my prog' arg",
+    "want": "my prog"
+  },
+  {
+    "line": "\"my prog\" arg",
+    "want": "my prog"
+  },
+  {
+    "line": "my\\ prog arg",
+    "want": "my prog"
+  },
+  {
+    "line": "/opt/bin/tool --flag",
+    "want": "tool"
+  },
+  {
+    "line": "'unterminated arg",
+    "want": null
+  },
+  {
+    "line": "say \"unterminated",
+    "want": null
+  },
+  {
+    "line": "trailing\\",
+    "want": null
+  },
+  {
+    "line": "",
+    "want": null
+  },
+  {
+    "line": "   ",
+    "want": null
+  },
+  {
+    "line": "pyth'on' x",
+    "want": "python"
+  },
+  {
+    "line": "a\"b\\\"c\"d e",
+    "want": "ab\"cd"
+  },
+  {
+    "line": "\tls\t-l",
+    "want": "ls"
+  },
+  {
+    "line": "python3 -c 'print(1)'",
+    "want": "python3"
+  },
+  {
+    "line": "ONLY=assignments",
+    "want": null
+  },
+  {
+    "line": "  ./run.sh  ",
+    "want": "run.sh"
+  },
+  {
+    "line": "dir/",
+    "want": null
+  },
+  {
+    "line": "X=\"a b\" cmd y",
+    "want": "cmd"
+  },
+  {
+    "line": "./a=b",
+    "want": "a=b"
+  },
+  {
+    "line": "TOKEN=\"a secret\" ./run.sh --flag",
+    "want": "run.sh"
+  },
+  {
+    "line": "A=1 B=two /usr/bin/env python",
+    "want": "env"
+  },
+  {
+    "line": "TOKEN=\"unterminated python",
+    "want": null
+  },
+  {
+    "argv": ["/usr/bin/python3", "-c", "x"],
+    "want": "python3"
+  },
+  {
+    "argv": ["API_KEY=s3cr3t", "python3", "x.py"],
+    "want": "python3"
+  },
+  {
+    "argv": [],
+    "want": null
+  }
+]

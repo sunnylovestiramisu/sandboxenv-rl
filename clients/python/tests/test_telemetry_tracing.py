@@ -406,15 +406,6 @@ def test_carrier_never_carries_baggage(spans):
     assert "baggage" not in keys
 
 
-def test_attribute_helpers_drop_tags_and_arguments():
-    assert tracing.image_ref_attr("repo/img:1.2") == "repo/img"
-    assert tracing.image_ref_attr(f"repo/img:1.2@{DIGEST}") == f"repo/img@{DIGEST}"
-    assert tracing.image_ref_attr("host:5000/img") == "host:5000/img"
-    assert tracing.image_ref_attr(None) is None
-    assert tracing.executable_attr("pytest -k secret /x") == "pytest"
-    assert tracing.executable_attr(["/usr/bin/python3", "-c", "x"]) == "python3"
-
-
 @pytest.mark.parametrize(
     "command, want",
     [
@@ -821,72 +812,6 @@ async def test_client_rpc_spans_are_client_kind_with_rpc_attributes(spans, monke
         assert attrs["server.port"] == port, op
 
 
-def test_rpc_attrs_use_otelgrpc_keys(monkeypatch):
-    monkeypatch.setattr(tracing, "_RPC_SEMCONV_MODE", tracing._SEMCONV_NEW)
-    attrs = tracing.rpc_attrs("ateenv.v1alpha.EnvironmentService", "GetEnvironment", "127.0.0.1:7777")
-    assert attrs == {
-        "rpc.system.name": "grpc",
-        "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
-        "server.address": "127.0.0.1",
-        "server.port": 7777,
-    }
-
-
-@pytest.mark.parametrize(
-    ("value", "mode"),
-    [
-        (None, "new"),
-        ("", "new"),
-        ("http", "new"),
-        ("rpc", "new"),
-        ("rpc/old", "old"),
-        ("rpc/dup", "dup"),
-        (" rpc/dup ", "dup"),
-        ("http, rpc/old", "old"),
-        ("http,rpc/dup", "dup"),
-        # The first rpc/* item decides, as in otelgrpc's parseSemconvMode.
-        ("rpc/old,rpc/dup", "old"),
-        ("rpc/dup,rpc/old", "dup"),
-        ("RPC/OLD", "new"),
-    ],
-)
-def test_rpc_semconv_mode_parses_like_otelgrpc(value, mode):
-    assert tracing._rpc_semconv_mode(value) == mode
-
-
-@pytest.mark.parametrize(
-    ("mode", "want"),
-    [
-        (
-            "new",
-            {"rpc.system.name": "grpc", "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment"},
-        ),
-        (
-            "old",
-            {
-                "rpc.system": "grpc",
-                "rpc.service": "ateenv.v1alpha.EnvironmentService",
-                "rpc.method": "GetEnvironment",
-            },
-        ),
-        (
-            # Both sets; rpc.method is the full name, the value otelgrpc keeps.
-            "dup",
-            {
-                "rpc.system": "grpc",
-                "rpc.service": "ateenv.v1alpha.EnvironmentService",
-                "rpc.system.name": "grpc",
-                "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
-            },
-        ),
-    ],
-)
-def test_rpc_attrs_follow_the_semconv_mode(monkeypatch, mode, want):
-    monkeypatch.setattr(tracing, "_RPC_SEMCONV_MODE", mode)
-    attrs = tracing.rpc_attrs("ateenv.v1alpha.EnvironmentService", "GetEnvironment", "127.0.0.1:7777")
-    assert attrs == {**want, "server.address": "127.0.0.1", "server.port": 7777}
-
-
 def test_rpc_semconv_mode_is_read_from_the_environment_at_import():
     code = (
         "from ate_env_rl.telemetry import tracing; "
@@ -901,13 +826,6 @@ def test_rpc_semconv_mode_is_read_from_the_environment_at_import():
         env={**env, "OTEL_SEMCONV_STABILITY_OPT_IN": "rpc/old"},
     )
     assert out.stdout.strip() == "['rpc.method', 'rpc.service', 'rpc.system']"
-
-
-def test_rpc_attrs_parse_targets():
-    assert tracing.rpc_attrs("s", "M", "[::1]:7777")["server.address"] == "::1"
-    assert tracing.rpc_attrs("s", "M", "unix:///tmp/sock")["server.address"] == "unix:///tmp/sock"
-    attrs = tracing.rpc_attrs("s", "M", None)
-    assert "server.address" not in attrs and "server.port" not in attrs
 
 
 async def test_cancelled_exec_async_marks_span_as_error(spans):

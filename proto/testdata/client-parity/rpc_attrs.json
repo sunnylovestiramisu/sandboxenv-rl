@@ -1,0 +1,302 @@
+[
+  {
+    "mode": "",
+    "target": "127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "",
+    "target": "[::1]:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "::1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "[::1]:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "::1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "[::1]:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "::1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "",
+    "target": "localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "",
+    "target": "unix:///tmp/sock",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "unix:///tmp/sock"
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "unix:///tmp/sock",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "unix:///tmp/sock"
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "unix:///tmp/sock",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "unix:///tmp/sock"
+    }
+  },
+  {
+    "mode": "",
+    "target": "api.example",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "api.example"
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "api.example",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "api.example"
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "api.example",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "api.example"
+    }
+  },
+  {
+    "mode": "",
+    "target": "",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment"
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment"
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment"
+    }
+  },
+  {
+    "mode": "",
+    "target": "dns:///127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "dns:///127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "dns:///127.0.0.1:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "127.0.0.1",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "",
+    "target": "passthrough:///localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/old",
+    "target": "passthrough:///localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.method": "GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  },
+  {
+    "mode": "rpc/dup",
+    "target": "passthrough:///localhost:7777",
+    "service": "ateenv.v1alpha.EnvironmentService",
+    "method": "GetEnvironment",
+    "want": {
+      "rpc.system": "grpc",
+      "rpc.service": "ateenv.v1alpha.EnvironmentService",
+      "rpc.system.name": "grpc",
+      "rpc.method": "ateenv.v1alpha.EnvironmentService/GetEnvironment",
+      "server.address": "localhost",
+      "server.port": 7777
+    }
+  }
+]

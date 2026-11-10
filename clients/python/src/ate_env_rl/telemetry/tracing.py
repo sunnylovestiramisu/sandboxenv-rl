@@ -348,6 +348,10 @@ def rpc_attrs(service: str, method: str, target: str | None) -> dict[str, Any]:
     else:
         attrs = {"rpc.system.name": "grpc", "rpc.method": full_method}
     if target:
+        if target.startswith("dns:///"):
+            target = target[7:]
+        elif target.startswith("passthrough:///"):
+            target = target[15:]
         host, sep, port = target.rpartition(":")
         if sep and port.isdigit() and host:
             attrs["server.address"] = host.strip("[]")

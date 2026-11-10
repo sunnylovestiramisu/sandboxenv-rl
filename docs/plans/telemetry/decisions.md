@@ -348,3 +348,11 @@ Append-only. Each entry: date, who, what, why.
   `exec` span records `ate_env.exit_code` 137 with `ate_env.timed_out=true`, while Python's records
   `ate_env.timed_out=true` without `ate_env.exit_code` (`ExecResult.exit_code` is None for a
   timeout); to be reconciled in PR 7's parity vectors.
+- 2026-11-10, #329 (Go client parity PR 7): the shared vectors in `proto/testdata/client-parity`
+  cover 17.3 (`semconv_mode.json`, `rpc_attrs.json`) and 17.4 (`executable.json`), plus image refs,
+  the error mapping with `retryable`, the metric families and RPC coverage. PR 7 adds no vector for
+  the differences the 2026-11-10 PR 6 entry left "to be reconciled in PR 7's parity vectors":
+  `ate_env.run_id` (Python fleet-only), `Env.shell` vs `Env.Run` (span name and `ate_env.timed_out`)
+  and Go's backfill of server-resolved `ate.template.*` stay recorded differences, as does the #330
+  entry's `exec` span difference (Go records `ate_env.exit_code` 137 on a timeout, Python none), and
+  17.1 and 17.2 stay with per-client tests.

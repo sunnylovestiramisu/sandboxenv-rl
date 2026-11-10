@@ -1,0 +1,38 @@
+{
+  "CreateEnvironment": {
+    "go": "Create",
+    "python": "create"
+  },
+  "GetEnvironment": {
+    "go": "Get",
+    "python": "get"
+  },
+  "SuspendEnvironment": {
+    "go": "Suspend",
+    "python": "suspend"
+  },
+  "DeleteEnvironment": {
+    "go": "Delete",
+    "python": "delete"
+  },
+  "GetServerInfo": {
+    "go": "ServerInfo",
+    "python": "server_info"
+  },
+  "GetImageStatus": {
+    "go": "ImageStatus",
+    "python": "image_status"
+  },
+  "EnsureImageTemplate": {
+    "go": "EnsureImageTemplate",
+    "python": "image_status(ensure=True)"
+  },
+  "ListPlacementDomains": {
+    "go": "ListPlacementDomains",
+    "python": "list_placement_domains"
+  },
+  "WarmImage": {
+    "go": "WarmImage",
+    "python": "warm_image"
+  }
+}
