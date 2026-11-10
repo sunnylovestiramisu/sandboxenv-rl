@@ -1,24 +1,40 @@
-# ate-env-rl: Go Client
+# Go client: package `env` (`github.com/agent-substrate/env/clients/go`)
 
 The Go client library for the Agent Substrate Environment API provides a programmatic interface to
 lifecycle and guest operations.
 
 ## Install
 
+The module path is a separate decision (README D8 of the Go client parity plan). Until it is made,
+`github.com/agent-substrate/env` on the public proxy resolves to the previous repository, so point
+the module at this repository with a `replace` directive, then resolve it (Go 1.27 or later):
+
 ```bash
-go get github.com/agent-substrate/env/clients/go
+go mod edit -replace github.com/agent-substrate/env=github.com/ai-on-gke/sandboxenv-rl@main
+go mod tidy
 ```
 
-The module path is a separate decision. Until the decision is final,
-`go get github.com/agent-substrate/env` without a `replace` directive resolves to the previous
-repository on the public proxy.
+`go mod tidy` pins `@main` to a pseudo-version. To build against a local clone instead, use
+`go mod edit -replace github.com/agent-substrate/env=/path/to/sandboxenv-rl`.
 
 ## Connect
 
-A single `Client` multiplexes concurrent operations over one channel. Programs create one client,
-share it, and close it on shutdown. You provide `Endpoint` in `ClientOptions`. Other fields include
-`AuthToken`, `GRPCConn`, `Connections`, `DialOptions`, `TracerProvider`, `TraceServiceName`, and
-`MetricsRegisterer`.
+The snippets below use these two imports:
+
+```go
+import (
+	envclient "github.com/agent-substrate/env/clients/go"
+	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+)
+```
+
+A single `Client` multiplexes concurrent operations. Programs create one client, share it, and close
+it on shutdown. You provide `Endpoint` in `ClientOptions`. Other fields include `AuthToken`,
+`GRPCConn`, `Connections`, `DialOptions`, `TracerProvider`, `TraceServiceName`, and
+`MetricsRegisterer`. `Connections` dials that many connections to `Endpoint` and hands them out
+round robin; a Kubernetes Service balances per connection, so use at least as many as `ate-env-api`
+has replicas when many environments are in flight. `DialOptions` are added to every connection the
+client dials.
 
 ```go
 client, err := envclient.NewClient(envclient.ClientOptions{
@@ -66,14 +82,16 @@ resp, err := env.Shell(ctx, "ls -l")
 if err != nil {
 	panic(err)
 }
-fmt.Println(string(resp.Stdout))
+fmt.Println(resp.Stdout)
 ```
 
 ## Run background processes and stream output
 
 You can start a background process with `StartProcess`. `Env.Process` and `Env.FindProcess` retrieve
-an existing process. The `Process` handle exposes `Wait`, `Info`, `Kill`, `Signal`, `PTY`, `Resize`,
-`Output`, and `Stdin`.
+an existing process. The `Process` handle exposes `Wait`, `Info`, `Kill`, `Signal`, `Resize`,
+`Output`, and `Stdin`. For a PTY, set `Tty` in the `StartProcessRequest` (an
+`&ateenvv1alpha.TTY{Rows: 24, Cols: 80}` gives the initial size), then call `Resize` when the
+terminal changes size.
 
 ```go
 proc, err := env.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
@@ -100,8 +118,12 @@ w, err := proc.Stdin(ctx)
 if err != nil {
 	panic(err)
 }
-w.Write([]byte("hello"))
-w.Close()
+if _, err := w.Write([]byte("hello")); err != nil {
+	panic(err)
+}
+if err := w.Close(); err != nil {
+	panic(err)
+}
 ```
 
 ## Read and write files
@@ -149,8 +171,12 @@ if err != nil {
 ## Handle errors
 
 The environment wakes on the first guest call. A failed wake produces a `*StartError`, which
-`errors.As` unpacks. The `Retryable` function checks if a fresh environment can succeed. The client
-uses `errors.Is` with sentinels and wraps gRPC statuses accessible via `status.Code`.
+`errors.As` unpacks. The `Retryable` function checks if a fresh environment can succeed.
+
+Other errors wrap one of five sentinels, which `errors.Is` matches: `ErrNotFound`,
+`ErrProcessExited`, `ErrInvalidArgument`, `ErrPermissionDenied`, and `ErrFailedPrecondition`. The
+gRPC status stays in the chain, so `status.Code(err)` (`google.golang.org/grpc/status`) still
+reports the code.
 
 ```go
 _, err := env.Shell(ctx, "ls")
@@ -160,14 +186,56 @@ if errors.As(err, &startErr) {
 } else if envclient.Retryable(err) {
 	fmt.Println("Retryable error")
 }
+
+_, err = client.Get(ctx, envclient.DefaultAtespace, "missing")
+if errors.Is(err, envclient.ErrNotFound) {
+	fmt.Println("no such environment:", status.Code(err)) // codes.NotFound
+}
 ```
 
 ## Observability
 
 The `ClientOptions` struct accepts `TracerProvider`, `TraceServiceName`, and `MetricsRegisterer`.
-The client emits spans and updates three Prometheus histograms when you configure these fields.
+With them the client emits spans and records the Prometheus histograms
+`ate_env_client_exec_seconds`, `ate_env_client_suspend_seconds`, and
+`ate_env_client_ready_to_first_command_seconds`. `NewTracerProvider` is the OTLP default; the caller
+owns it and calls `Shutdown` to flush.
+
+```go
+tp, err := envclient.NewTracerProvider(ctx, "my-trainer")
+if err != nil {
+	panic(err)
+}
+defer tp.Shutdown(ctx)
+
+client, err := envclient.NewClient(envclient.ClientOptions{
+	Endpoint:          "localhost:7777",
+	TracerProvider:    tp,
+	MetricsRegisterer: prometheus.DefaultRegisterer,
+})
+```
+
+See [docs/observability.md](../../docs/observability.md) for the collector setup and the other
+components.
 
 ## Develop against a local guest daemon (no cluster)
 
-The repository provides a local guest daemon at `examples/guest-daemon`. It serves guest operations
-without a cluster.
+The repository provides a local guest daemon at `examples/guest-daemon`. It serves the process and
+filesystem services without a cluster:
+
+```bash
+go run ./examples/guest-daemon --listen 127.0.0.1:8090 --workspace "$(mktemp -d)"
+```
+
+```go
+client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "127.0.0.1:8090"})
+if err != nil {
+	panic(err)
+}
+defer client.Close()
+env := client.Env(envclient.DefaultAtespace, "anything") // the daemon ignores the routing metadata
+resp, err := env.Shell(ctx, "uname -a")
+```
+
+Lifecycle calls (`Create`, `Get`, `Suspend`, `Delete`, ...) fail in this mode; only `ate-env-api`
+implements them.

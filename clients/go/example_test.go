@@ -22,8 +22,12 @@ import (
 
 	envclient "github.com/agent-substrate/env/clients/go"
 	ateenvv1alpha "github.com/agent-substrate/env/proto/ateenv/v1alpha"
+	"google.golang.org/grpc/status"
 )
 
+// ExampleNewClient runs under go test: NewClient does not dial until the
+// first call, so it needs no server. The other examples need a reachable
+// ate-env-api and are compiled only.
 func ExampleNewClient() {
 	client, err := envclient.NewClient(envclient.ClientOptions{
 		Endpoint: "localhost:7777",
@@ -33,11 +37,15 @@ func ExampleNewClient() {
 	}
 	defer client.Close()
 	fmt.Println(client != nil)
+	// Output: true
 }
 
 func ExampleClient_Create() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
 
 	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
@@ -49,7 +57,10 @@ func ExampleClient_Create() {
 
 func ExampleClient_ImageStatus() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
 
 	status, err := client.ImageStatus(ctx, &ateenvv1alpha.GetImageStatusRequest{RootfsImage: "ubuntu:22.04"})
@@ -61,22 +72,34 @@ func ExampleClient_ImageStatus() {
 
 func ExampleEnv_Shell() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
 	resp, err := env.Shell(ctx, "ls -l")
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(string(resp.Stdout))
+	fmt.Println(resp.Stdout)
 }
 
 func ExampleEnv_Run() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
 	resp, err := env.Run(ctx, envclient.ShellRequest{
 		Command: "ls -l",
@@ -90,9 +113,15 @@ func ExampleEnv_Run() {
 
 func ExampleEnv_StartProcess() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
 	proc, err := env.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"sleep", "60"},
@@ -108,57 +137,110 @@ func ExampleEnv_StartProcess() {
 	fmt.Println(p.GetExitCode())
 }
 
+func ExampleProcess_Resize() {
+	ctx := context.Background()
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
+
+	// Tty runs the process on a PTY of the given initial size.
+	proc, err := env.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
+		Command: []string{"bash"},
+		Stdin:   true,
+		Tty:     &ateenvv1alpha.TTY{Rows: 24, Cols: 80},
+	})
+	if err != nil {
+		panic(err)
+	}
+	if err := proc.Resize(ctx, 40, 120); err != nil {
+		panic(err)
+	}
+}
+
 func ExampleProcess_Stdin() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
-	proc, _ := env.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
+	proc, err := env.StartProcess(ctx, &ateenvv1alpha.StartProcessRequest{
 		Command: []string{"cat"},
 		Stdin:   true,
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	w, err := proc.Stdin(ctx)
 	if err != nil {
 		panic(err)
 	}
-	w.Write([]byte("hello"))
-	w.Close()
+	if _, err := w.Write([]byte("hello")); err != nil {
+		panic(err)
+	}
+	if err := w.Close(); err != nil {
+		panic(err)
+	}
 }
 
 func ExampleEnv_ReadFile() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
 	rc, err := env.ReadFile(ctx, "/etc/os-release")
 	if err != nil {
 		panic(err)
 	}
 	defer rc.Close()
-	data, _ := io.ReadAll(rc)
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		panic(err)
+	}
 	fmt.Println(string(data))
 }
 
 func ExampleClient_Suspend() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
 
-	err := client.Suspend(ctx, envclient.DefaultAtespace, "dev1")
-	if err != nil {
+	if err := client.Suspend(ctx, envclient.DefaultAtespace, "dev1"); err != nil {
 		panic(err)
 	}
 }
 
 func ExampleClient_WarmImage() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
 
-	_, err := client.WarmImage(ctx, &ateenvv1alpha.WarmImageRequest{
+	_, err = client.WarmImage(ctx, &ateenvv1alpha.WarmImageRequest{
 		RootfsImage: "ubuntu:22.04",
 	}, func(probe *ateenvv1alpha.WarmProbe) {
 		fmt.Println(probe.GetNode())
@@ -170,15 +252,36 @@ func ExampleClient_WarmImage() {
 
 func ExampleStartError() {
 	ctx := context.Background()
-	client, _ := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
 	defer client.Close()
-	env, _ := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	env, err := client.Create(ctx, &ateenvv1alpha.CreateEnvironmentRequest{Id: "dev1"})
+	if err != nil {
+		panic(err)
+	}
 
-	_, err := env.Shell(ctx, "ls")
+	_, err = env.Shell(ctx, "ls")
 	var startErr *envclient.StartError
 	if errors.As(err, &startErr) {
 		fmt.Println("Start failed:", startErr.Reason)
 	} else if envclient.Retryable(err) {
 		fmt.Println("Retryable error")
+	}
+}
+
+func ExampleClient_Get() {
+	ctx := context.Background()
+	client, err := envclient.NewClient(envclient.ClientOptions{Endpoint: "localhost:7777"})
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+
+	_, err = client.Get(ctx, envclient.DefaultAtespace, "missing")
+	if errors.Is(err, envclient.ErrNotFound) {
+		// The gRPC status stays in the chain: status.Code(err) is codes.NotFound.
+		fmt.Println("no such environment:", status.Code(err))
 	}
 }

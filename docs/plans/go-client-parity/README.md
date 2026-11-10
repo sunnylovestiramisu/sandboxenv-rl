@@ -257,8 +257,11 @@ keeps the heuristic and PR 6 records `ate_env.timed_out` from it.
 
 ### PR 8: README and example
 
-- As built: PR 8 implemented the Go client README and runnable examples in
-  `clients/go/example_test.go`.
+- As built: PR 8 added `clients/go/README.md` and compiled examples in `clients/go/example_test.go`,
+  including a PTY (`StartProcessRequest.Tty` and `Process.Resize`) and an
+  `errors.Is(err, ErrNotFound)` example. Only `ExampleNewClient` has an `// Output:` line and runs
+  under `go test`; the others need a reachable `ate-env-api`. The install section uses a `replace`
+  directive until the module path (D8) is decided.
 
 - `clients/go/README.md`: install (`go get`), connect, create, shell and `Run` options, processes,
   stdin and signals, PTY, files, suspend and delete, readiness (wake on first call, `StartError`,
