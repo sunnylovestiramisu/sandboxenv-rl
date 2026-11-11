@@ -69,6 +69,10 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
         self.deny_list_workers = False
         self.warm_same_node = False
         self.warm_requests: list[env_pb2.WarmImageRequest] = []
+        # Environment ids whose delete fails and leaves them in place, and
+        # ids whose delete answers NOT_FOUND (gone already).
+        self.delete_fail: set[str] = set()
+        self.delete_not_found: set[str] = set()
         # Probe ids the next WarmImage reports undeleted, and the seconds it
         # reports waited for probe slots.
         self.warm_undeleted: list[str] = []
@@ -151,6 +155,12 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
 
     async def DeleteEnvironment(self, request, context):
         await self._lookup(request, context)
+        if request.id in self.delete_fail:
+            # As a CRASHED actor's delete fails today: the environment stays.
+            await context.abort(grpc.StatusCode.INTERNAL, f"DeleteVolumes prerequisite not met for {request.id}")
+        if request.id in self.delete_not_found:
+            self.environments.pop((request.atespace or "ate-env", request.id), None)
+            await context.abort(grpc.StatusCode.NOT_FOUND, f'environment "{request.id}" not found')
         del self.environments[(request.atespace or "ate-env", request.id)]
         return env_pb2.DeleteEnvironmentResponse()
 

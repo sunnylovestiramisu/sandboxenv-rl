@@ -692,3 +692,51 @@ func TestPreflightDefaultRunIDIsUniquePerPass(t *testing.T) {
 		}
 	}
 }
+
+// A probe whose delete fails is listed under the image's undeleted_probes,
+// the coverage still says what was covered, and the pass fails naming it.
+func TestPreflightReportsUndeletedProbes(t *testing.T) {
+	api := newPreflightFake()
+	api.goldenReadyAfter = 0
+	stuck := probeID("pf-test", 0, 0, 1, 1)
+	api.deleteFail = map[string]bool{stuck: true}
+	report, err, _ := runPreflight(t, api, func(o *PreflightOptions) {
+		o.Images = []string{pfImgA}
+		o.Domains = []string{"d0"}
+		// A short delete budget: the stuck probe's Internal is retried a
+		// few times within it, not for the two minutes of the default.
+		o.Backend.(*EnvBackend).deletes = deleteLimits{budget: 20 * time.Millisecond, minWait: time.Millisecond, maxWait: 2 * time.Millisecond}
+	})
+	if err == nil || !strings.Contains(err.Error(), "1 probes left undeleted") || !strings.Contains(err.Error(), stuck) {
+		t.Fatalf("Run error = %v, want the undeleted probe named", err)
+	}
+	if api.deleteCalls < 3 {
+		t.Errorf("delete calls = %d, want the other probe's one and the stuck probe's retries", api.deleteCalls)
+	}
+	ic := report.Domains[0].Images[0]
+	if !ic.Complete || !reflect.DeepEqual(ic.UndeletedProbes, []string{stuck}) {
+		t.Errorf("coverage = %+v, want complete with %s undeleted", ic, stuck)
+	}
+	if !report.Complete {
+		t.Error("report.Complete = false; the coverage held, the leftover is reported separately")
+	}
+	if got := UndeletedProbes(report); !reflect.DeepEqual(got, []string{stuck}) {
+		t.Errorf("UndeletedProbes = %v", got)
+	}
+}
+
+// A probe whose delete answers NotFound is gone already: it is not listed as
+// undeleted and the pass is clean.
+func TestPreflightTreatsNotFoundOnDeleteAsGone(t *testing.T) {
+	api := newPreflightFake()
+	api.goldenReadyAfter = 0
+	gone := probeID("pf-test", 0, 0, 1, 1)
+	api.deleteNotFound = map[string]bool{gone: true}
+	report, err, _ := runPreflight(t, api, func(o *PreflightOptions) { o.Images = []string{pfImgA}; o.Domains = []string{"d0"} })
+	if err != nil || !report.Complete {
+		t.Fatalf("Run: err=%v complete=%v, want a clean pass", err, report.Complete)
+	}
+	if got := UndeletedProbes(report); len(got) != 0 {
+		t.Errorf("undeleted = %v, want none for a NotFound delete", got)
+	}
+}

@@ -24,7 +24,7 @@ first boot of an image on a node is a restore, not a pull::
     warmer = PreflightWarmer(client, plan, run_id="pf-7")
     coverage = await warmer.run()
     coverage.write("preflight-coverage.json")
-    if not coverage.complete:
+    if not coverage.clean:
         print(coverage.shortfall())
 
 It ensures each image's derived template, which starts the golden bake, then
@@ -191,6 +191,11 @@ class ImageCoverage:
     rounds: int = 0
     complete: bool = False
     error: str = ""
+    # Probe environments whose delete failed; they hold a slot until swept.
+    undeleted_probes: list[str] = field(default_factory=list)
+    # Time the image's rounds waited for probe slots held by other passes,
+    # when the warmer reports it (ate-env-api's WarmImage does).
+    waited_ms: float = 0.0
 
 
 @dataclass
@@ -229,7 +234,22 @@ class PreflightCoverage:
         short = sum(1 for d in self.domains for ic in d.images if not ic.complete)
         if short:
             parts.append(f"{short} (image, domain) pairs short of their nodes")
+        undeleted = self.undeleted_probes
+        if undeleted:
+            parts.append(f"{len(undeleted)} probes left undeleted (first: {undeleted[0]})")
         return "; ".join(parts) or ("complete" if self.complete else "interrupted")
+
+    @property
+    def undeleted_probes(self) -> list[str]:
+        """Every probe the pass could not delete, sorted; sweep them."""
+        return sorted(p for d in self.domains for ic in d.images for p in ic.undeleted_probes)
+
+    @property
+    def clean(self) -> bool:
+        """``complete`` and no probe left behind: the one flag to gate a run
+        on. ``complete`` alone says the nodes are warm; a leftover probe
+        holds a slot until swept (``undeleted_probes``)."""
+        return self.complete and not self.undeleted_probes
 
     def to_dict(self) -> dict[str, Any]:
         """The report as JSON data, in the Go loader's schema."""
@@ -247,7 +267,10 @@ class PreflightCoverage:
                 "name": d.name,
                 "nodes": d.nodes,
                 "nodes_seen": list(d.nodes_seen),
-                "images": [_drop_empty(asdict(ic), ("error",)) for ic in d.images],
+                "images": [
+                    _drop_empty(asdict(ic), ("error", "undeleted_probes", "waited_ms"))
+                    for ic in d.images
+                ],
                 "complete": d.complete,
             }
             for d in self.domains
@@ -259,7 +282,7 @@ class PreflightCoverage:
         """Write the report as indented JSON and return its path."""
         p = pathlib.Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+        p.write_text(json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n", encoding="utf-8")
         return p
 
 
@@ -410,6 +433,8 @@ class PreflightWarmer:
         self._goldens: dict[str, _Golden] = {}
         self._changed = asyncio.Event()
         self._progress = 0.0
+        # The domains a cancelled run left part-way, by name (see run()).
+        self._partial: dict[str, DomainCoverage] = {}
         # The last run's report, also after a cancel (see run()).
         self.coverage: PreflightCoverage | None = None
 
@@ -428,10 +453,15 @@ class PreflightWarmer:
     async def run(self) -> PreflightCoverage:
         """Run the pass and return the coverage report.
 
-        The report is returned whether or not the pass completed; check
-        ``complete`` and ``shortfall()``. A cancelled run stops its golden
+        The report is returned whether or not the pass completed, and a
+        probe the pass could not delete does not raise either: check
+        ``clean`` (``complete`` and no ``undeleted_probes``) and
+        ``shortfall()``. A cancelled run stops its golden
         poller, deletes the probes in flight, and re-raises; what it covered
-        until then stays in ``coverage``, with the goldens it was still
+        until then stays in ``coverage``: the domains that finished, the
+        domains cut part-way with the images they covered and the ones in
+        flight marked ``cancelled``, the probes a cancelled round could not
+        delete under ``undeleted_probes``, and the goldens it was still
         waiting for recorded as ``pending`` with the error ``cancelled``.
         """
         now = time.monotonic()
@@ -441,6 +471,7 @@ class PreflightWarmer:
         self._goldens = {img: _Golden(img, now) for img in self._images}
         self._changed = asyncio.Event()
         self._progress = now
+        self._partial = {}
         self.coverage = coverage
         domain_tasks: list[asyncio.Task[DomainCoverage]] = []
         try:
@@ -466,12 +497,13 @@ class PreflightWarmer:
         finally:
             coverage.goldens = [self._goldens[img].record for img in self._images]
             coverage.finished_at = datetime.now(timezone.utc)
-            # What a run that ended early covered: the domains that finished.
-            coverage.domains = [
-                t.result()
-                for t in domain_tasks
-                if t.done() and not t.cancelled() and t.exception() is None
-            ]
+            # What a run that ended early covered: the domains that finished,
+            # and the ones a cancel cut part-way, in plan order.
+            by_name = dict(self._partial)
+            for t in domain_tasks:
+                if t.done() and not t.cancelled() and t.exception() is None:
+                    by_name[t.result().name] = t.result()
+            coverage.domains = [by_name[d.name] for d in self._domains if d.name in by_name]
         domains: list[DomainCoverage] = []
         for r in results:
             if isinstance(r, BaseException):
@@ -614,7 +646,11 @@ class PreflightWarmer:
 
         async def cover(k: int, ii: int, image: str) -> None:
             async with sem:
-                covs[k] = await self._cover_image(d, ii, image)
+                # The coverage object is registered before the rounds, so a
+                # cancel leaves what the image covered until then in place.
+                ic = ImageCoverage(image=image, wanted=d.nodes)
+                covs[k] = ic
+                await self._cover_image(d, ii, image, ic)
 
         try:
             while len(started) < len(items):
@@ -639,13 +675,24 @@ class PreflightWarmer:
         except asyncio.CancelledError:
             # The images still running finish their probes' deletes before
             # this re-raises; a task that was already cancelled through the
-            # gather above is not cancelled again.
+            # gather above is not cancelled again. What the domain covered
+            # until then is kept for the report.
             for t in tasks:
                 if not t.done():
                     t.cancel()
             await _await_all(tasks)
+            self._partial[d.name] = self._domain_coverage(d, items, covs, cancelled=True)
             raise
+        return self._domain_coverage(d, items, covs, cancelled=False)
 
+    def _domain_coverage(
+        self,
+        d: PlacementDomain,
+        items: list[tuple[int, str]],
+        covs: dict[int, ImageCoverage],
+        *,
+        cancelled: bool,
+    ) -> DomainCoverage:
         dc = DomainCoverage(name=d.name, nodes=d.nodes)
         seen: set[str] = set()
         for k, (_ii, image) in enumerate(items):
@@ -654,6 +701,8 @@ class PreflightWarmer:
                 dc.complete = False
                 dc.images.append(ImageCoverage(image=image, wanted=d.nodes, error="not started"))
                 continue
+            if cancelled and not ic.complete and not ic.error:
+                ic.error = "cancelled"
             seen.update(ic.nodes)
             if not ic.complete:
                 dc.complete = False
@@ -668,53 +717,66 @@ class PreflightWarmer:
             )
         return dc
 
-    async def _cover_image(self, d: PlacementDomain, ii: int, image: str) -> ImageCoverage:
+    async def _cover_image(
+        self, d: PlacementDomain, ii: int, image: str, ic: ImageCoverage
+    ) -> None:
         """Rounds of probes for one image in one domain until every node of
-        the domain has run it or the rounds run out."""
-        ic = ImageCoverage(image=image, wanted=d.nodes)
+        the domain has run it or the rounds run out, filling ``ic`` as it
+        goes, so a cancel leaves the nodes covered and the probes a round
+        could not delete in it."""
         nodes: set[str] = set()
         width = d.nodes * self.probes_per_node
         di = self._domains.index(d)
-        for rnd in range(1, self.max_rounds + 1):
-            if len(nodes) >= d.nodes:
-                break
-            ic.rounds = rnd
-            # Create and wait for every probe of the round before deleting any,
-            # so they occupy distinct slots while the scheduler places the rest.
-            outcomes = await asyncio.gather(
-                *(
-                    self._probe(f"{self.run_id}-{di}-{ii}-{rnd}-{k}", image, d)
-                    for k in range(width)
-                ),
-                return_exceptions=True,
-            )
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException):
-                    # _probe reports its own errors; this is a cancel or a
-                    # bug, and the round cannot be scored.
-                    raise outcome
-                node, err = outcome
-                ic.probes += 1
-                if err:
-                    ic.failed += 1
-                    ic.error = err
-                else:
-                    nodes.add(node)
-            if ic.failed == ic.probes:
-                # Nothing of this round came up: the image, the domain or the
-                # cluster is the problem, and more rounds would not change it.
-                logger.warning(
-                    "preflight: every probe of %s in %s failed: %s", image, d.name, ic.error
+        try:
+            for rnd in range(1, self.max_rounds + 1):
+                if len(nodes) >= d.nodes:
+                    break
+                ic.rounds = rnd
+                # Create and wait for every probe of the round before deleting
+                # any, so they occupy distinct slots while the scheduler places
+                # the rest. A probe whose delete fails lands in
+                # ic.undeleted_probes, also when the round is cancelled.
+                outcomes = await asyncio.gather(
+                    *(
+                        self._probe(
+                            f"{self.run_id}-{di}-{ii}-{rnd}-{k}", image, d, ic.undeleted_probes
+                        )
+                        for k in range(width)
+                    ),
+                    return_exceptions=True,
                 )
-                break
-        ic.nodes = sorted(nodes)
-        ic.complete = len(ic.nodes) >= d.nodes
-        return ic
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException):
+                        # _probe reports its own errors; this is a cancel or
+                        # a bug, and the round cannot be scored.
+                        raise outcome
+                    node, err = outcome
+                    ic.probes += 1
+                    if err:
+                        ic.failed += 1
+                        ic.error = err
+                    else:
+                        nodes.add(node)
+                if ic.failed == ic.probes:
+                    # Nothing of this round came up: the image, the domain or
+                    # the cluster is the problem, and more rounds would not
+                    # change it.
+                    logger.warning(
+                        "preflight: every probe of %s in %s failed: %s", image, d.name, ic.error
+                    )
+                    break
+        finally:
+            ic.nodes = sorted(nodes)
+            ic.complete = len(ic.nodes) >= d.nodes
+            ic.undeleted_probes.sort()
 
-    async def _probe(self, env_id: str, image: str, d: PlacementDomain) -> tuple[str, str]:
+    async def _probe(
+        self, env_id: str, image: str, d: PlacementDomain, stuck: list[str]
+    ) -> tuple[str, str]:
         """One probe: create in the domain, run the first command, read the
         node, delete; ``probe_timeout`` bounds the three steps together.
-        Returns (node, error)."""
+        Returns (node, error); a probe whose delete failed and is still there
+        is appended to ``stuck``, also when the probe was cancelled."""
         holder: list[Any] = []  # the handle once created, for the delete
         node = ""
         error = ""
@@ -724,7 +786,7 @@ class PreflightWarmer:
                     self._probe_steps(env_id, image, d, holder), self.probe_timeout
                 )
         except asyncio.CancelledError:
-            await self._delete_through_cancel(env_id, holder[0] if holder else None)
+            await self._delete_through_cancel(env_id, holder[0] if holder else None, stuck)
             raise
         except asyncio.TimeoutError:
             error = f"probe not ready after {self.probe_timeout:g}s"
@@ -735,7 +797,7 @@ class PreflightWarmer:
                 # to a user (AlreadyExists), or the request was bad. Deleting
                 # by id here would take someone else's environment.
                 return node, error
-        await self._delete_through_cancel(env_id, holder[0] if holder else None)
+        await self._delete_through_cancel(env_id, holder[0] if holder else None, stuck)
         return node, error
 
     async def _probe_steps(
@@ -760,15 +822,17 @@ class PreflightWarmer:
             raise RuntimeError("the environment reports no node")
         return info.node
 
-    async def _delete_through_cancel(self, env_id: str, env: Any) -> None:
+    async def _delete_through_cancel(self, env_id: str, env: Any, stuck: list[str]) -> bool:
         """Delete the probe and wait for it even if this task is cancelled
         again meanwhile, so a cancel mid-round strands nothing; the delete's
-        own timeout bounds the wait."""
-        delete = asyncio.ensure_future(self._delete(env_id, env))
+        own timeout bounds the wait. True when the probe is gone. A probe
+        whose delete failed is appended to ``stuck`` by the delete itself,
+        so a cancel that lands as the delete ends (re-raised here, with no
+        return value) does not lose it."""
+        delete = asyncio.ensure_future(self._delete(env_id, env, stuck))
         while True:
             try:
-                await asyncio.shield(delete)
-                return
+                return await asyncio.shield(delete)
             except asyncio.CancelledError:
                 if delete.done():
                     raise
@@ -776,7 +840,9 @@ class PreflightWarmer:
                 # caller once the probe is gone.
                 continue
 
-    async def _delete(self, env_id: str, env: Any) -> None:
+    async def _delete(self, env_id: str, env: Any, stuck: list[str]) -> bool:
+        """Delete the probe; True when it is gone (deleted, or never there).
+        A probe the delete left in place is appended to ``stuck``."""
         try:
             # A create that failed client-side may exist server-side, so the
             # delete goes by id when there is no handle.
@@ -784,10 +850,13 @@ class PreflightWarmer:
                 env.delete() if env is not None else self.client.delete(env_id, atespace=self.atespace),
                 _DELETE_TIMEOUT,
             )
+            return True
         except NotFoundError:
-            pass
+            return True
         except Exception as e:
             logger.warning("preflight: delete of %s failed: %s", env_id, e)
+            stuck.append(env_id)
+            return False
 
     def _phase(self, name: str) -> Any:
         if self.observer is None:

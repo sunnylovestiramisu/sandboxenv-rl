@@ -677,6 +677,9 @@ func printPreflightSummary(w io.Writer, r *schema.PreflightCoverage, path string
 			}
 		}
 	}
+	if undeleted := swebench.UndeletedProbes(r); len(undeleted) > 0 {
+		fmt.Fprintf(w, "  undeleted probes (%d), sweep them with ate-env delete: %s\n", len(undeleted), strings.Join(undeleted, ", "))
+	}
 	for _, g := range r.Goldens {
 		if !swebench.GoldenSettled(g) {
 			fmt.Fprintf(w, "  golden %s: %s %s\n", g.Image, g.State, g.Error)

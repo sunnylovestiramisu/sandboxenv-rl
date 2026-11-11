@@ -108,6 +108,11 @@ type fakeAPI struct {
 	// existing names environments another pass or a user holds: a create
 	// with one of these ids fails with AlreadyExists and makes nothing.
 	existing map[string]bool
+	// deleteFail names environments whose delete fails with Internal and
+	// leaves them in place, as a CRASHED actor's does today. deleteNotFound
+	// names environments whose delete answers NotFound: gone already.
+	deleteFail     map[string]bool
+	deleteNotFound map[string]bool
 	// goldenPendingForever names images whose golden never gets ready.
 	goldenPendingForever map[string]bool
 	ensured              []string
@@ -237,6 +242,14 @@ func (f *fakeAPI) DeleteEnvironment(_ context.Context, req *ateenvv1alpha.Delete
 	if f.deleteRateLimited > 0 {
 		f.deleteRateLimited--
 		return nil, status.Error(codes.ResourceExhausted, "deleting snapshot: googleapi: Error 429: rateLimitExceeded")
+	}
+	if f.deleteFail[req.GetId()] {
+		return nil, status.Errorf(codes.Internal, "DeleteVolumes prerequisite not met for %s", req.GetId())
+	}
+	if f.deleteNotFound[req.GetId()] {
+		delete(f.nodes, req.GetId())
+		f.inflight[f.selectors[req.GetId()]["ate-env/domain"]]--
+		return nil, status.Errorf(codes.NotFound, "environment %q not found", req.GetId())
 	}
 	f.deleted = append(f.deleted, req.GetId())
 	f.inflight[f.selectors[req.GetId()]["ate-env/domain"]]--

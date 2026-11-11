@@ -164,8 +164,10 @@ func NewPreflightWarmer(opts PreflightOptions) (*PreflightWarmer, error) {
 
 // Run executes the pre-flight and returns the coverage report. The error is
 // non-nil when the pass is incomplete (a golden not ready, a pair short of
-// its nodes) or the context ended; the report is returned either way, so
-// the caller can write it.
+// its nodes), when the context ended, or when the pass is complete but left
+// probes it could not delete (the report's undeleted_probes; Complete stays
+// true then, and the error names them). The report is returned either way,
+// so the caller can write it.
 func (w *PreflightWarmer) Run(ctx context.Context) (*schema.PreflightCoverage, error) {
 	o := w.opts
 	started := o.now()
@@ -192,6 +194,7 @@ func (w *PreflightWarmer) Run(ctx context.Context) (*schema.PreflightCoverage, e
 	report.Goldens, report.Domains = goldens.records(images), coverage
 	report.FinishedAt = o.now()
 	report.Complete = goldens.allOK() && coverageOK && ctx.Err() == nil
+	undeleted := UndeletedProbes(report)
 
 	if o.Recorder != nil {
 		_ = o.Recorder.Flush()
@@ -202,7 +205,24 @@ func (w *PreflightWarmer) Run(ctx context.Context) (*schema.PreflightCoverage, e
 	if !report.Complete {
 		return report, fmt.Errorf("pre-flight incomplete: %s", w.shortfall(report))
 	}
+	if len(undeleted) > 0 {
+		// The coverage holds; the leftovers hold slots until swept, so the
+		// pass still fails and names them.
+		return report, fmt.Errorf("pre-flight complete, %d probes left undeleted (first: %s); sweep them with ate-env delete", len(undeleted), undeleted[0])
+	}
 	return report, nil
+}
+
+// UndeletedProbes lists every probe the pass could not delete, sorted.
+func UndeletedProbes(r *schema.PreflightCoverage) []string {
+	var out []string
+	for _, d := range r.Domains {
+		for _, ic := range d.Images {
+			out = append(out, ic.UndeletedProbes...)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // images is the pass's images in plan order: those of Images, or all, that
@@ -618,6 +638,7 @@ func (w *PreflightWarmer) coverImage(ctx context.Context, di, ii int, d schema.P
 		// Delete the round's probes together, each within the cleanup budget,
 		// whatever happened to ctx: a wide domain would otherwise wait on one
 		// delete after another.
+		undeleted := make([]string, width)
 		forEach(context.Background(), width, width, func(k int) {
 			oc := outcomes[k]
 			if oc.id == "" {
@@ -635,14 +656,26 @@ func (w *PreflightWarmer) coverImage(ctx context.Context, di, ii int, d schema.P
 					return
 				}
 				if del, ok := o.Backend.(Backend); ok {
-					_ = del.Delete(rctx, oc.id)
+					if err := del.Delete(rctx, oc.id); err != nil && !errors.Is(err, env.ErrNotFound) && status.Code(err) != codes.NotFound {
+						o.Logger.Warn("preflight: delete of a cut-off create failed", slog.String("env", oc.id), slog.Any("err", err))
+						undeleted[k] = oc.id
+					}
 				}
 				return
 			}
-			if err := oc.sb.Delete(rctx); err != nil {
+			if err := oc.sb.Delete(rctx); err != nil && !errors.Is(err, env.ErrNotFound) && status.Code(err) != codes.NotFound {
+				// NotFound is gone already (a first attempt the delete
+				// budget passes through unchanged); anything else leaves
+				// the probe in place.
 				o.Logger.Warn("preflight: delete failed", slog.String("env", oc.id), slog.Any("err", err))
+				undeleted[k] = oc.id
 			}
 		})
+		for _, id := range undeleted {
+			if id != "" {
+				ic.UndeletedProbes = append(ic.UndeletedProbes, id)
+			}
+		}
 		if started > 0 && roundFailed == started {
 			// Nothing of this round came up: the image, the domain or the
 			// cluster is the problem, and more rounds would not change it.
@@ -652,6 +685,7 @@ func (w *PreflightWarmer) coverImage(ctx context.Context, di, ii int, d schema.P
 	}
 	ic.Nodes = sortedKeys(nodes)
 	ic.Complete = len(ic.Nodes) >= d.Nodes
+	sort.Strings(ic.UndeletedProbes)
 	if o.Recorder != nil {
 		_ = o.Recorder.Flush()
 	}
@@ -770,6 +804,9 @@ func preflightShortfall(r *schema.PreflightCoverage) string {
 	}
 	if short > 0 {
 		parts = append(parts, fmt.Sprintf("%d (image, domain) pairs short of their nodes", short))
+	}
+	if undeleted := UndeletedProbes(r); len(undeleted) > 0 {
+		parts = append(parts, fmt.Sprintf("%d probes left undeleted (first: %s; listed per image under undeleted_probes)", len(undeleted), undeleted[0]))
 	}
 	if len(parts) == 0 {
 		parts = append(parts, "interrupted")

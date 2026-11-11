@@ -334,8 +334,10 @@ staying the source of truth so a run does not depend on a collector.
    node; next to the run's `events/` directory, not in it, so the run report
    does not count them) and `preflight-coverage.json` (`schema_version: v1`):
    per domain the nodes seen and per image the nodes covered, probes, rounds
-   and failures. It exits non-zero when a golden is not ready or a pair is
-   short of its nodes, and says which. `-golden-timeout` (default 30 min)
+   and failures. It exits non-zero when a golden is not ready, a pair is
+   short of its nodes or a probe could not be deleted, and says which; the
+   probes left behind are listed per image under `undeleted_probes` and hold
+   a node slot each until swept with `ate-env delete`. `-golden-timeout` (default 30 min)
    gives up on the goldens still baking once none became ready for that
    long. The probes are deleted: the planner keeps each node's assigned
    images under atelet's GC low watermark, so the layers stay until the run.

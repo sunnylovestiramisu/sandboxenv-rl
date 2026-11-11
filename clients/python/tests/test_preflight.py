@@ -358,6 +358,28 @@ def test_default_run_id_is_unique_per_pass(fake_stack):
         PreflightWarmer(client, PLAN, run_id="Not Valid")
 
 
+async def test_undeleted_probes_are_reported(fake_stack, tmp_path):
+    client, fakes = fake_stack
+    fakes.environments.domain_nodes = dict(NODES)
+    _set_golden(fakes, IMG_A, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    stuck = "pf-test-0-0-1-1"
+    fakes.environments.delete_fail = {stuck}
+    coverage = await _warmer(client, images=[IMG_A], domains=["d0"]).run()
+    ic = coverage.domains[0].images[0]
+    assert ic.complete and ic.undeleted_probes == [stuck]
+    assert coverage.complete and not coverage.clean  # the coverage held; clean says a probe is left
+    assert coverage.undeleted_probes == [stuck]
+    assert "1 probes left undeleted" in coverage.shortfall()
+    assert ("ate-env", stuck) in fakes.environments.environments
+    # The module's example gates on clean, the flag that sees this probe.
+    import ate_env_rl.preflight as preflight_module
+
+    assert "if not coverage.clean:" in (preflight_module.__doc__ or "")
+    assert "if not coverage.complete:" not in (preflight_module.__doc__ or "")
+    data = json.loads(coverage.write(tmp_path / "c.json").read_text())
+    assert data["domains"][0]["images"][0]["undeleted_probes"] == [stuck]
+    assert "waited_ms" not in data["domains"][0]["images"][0]
+
 async def test_a_cut_off_create_is_deleted_by_id(fake_stack):
     client, fakes = fake_stack
     fakes.environments.domain_nodes = dict(NODES)
@@ -405,3 +427,92 @@ def test_create_refused_classifies_the_errors():
     ]
     assert all(_create_refused(e) for e in refused)
     assert not any(_create_refused(e) for e in cut_off)
+
+
+async def test_cancelled_run_retains_undeleted_probes_and_partial_coverage(fake_stack):
+    client, fakes = fake_stack
+    fakes.environments.domain_nodes = dict(NODES)
+    _set_golden(fakes, IMG_A, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    _set_golden(fakes, IMG_B, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    # Mid-round: a's first round is held at the node read and one of its
+    # probes cannot be deleted; the cancel keeps that probe in the report.
+    stuck = "pf-test-0-0-1-0"
+    fakes.environments.delete_fail = {stuck}
+    created = asyncio.Event()
+    hold = asyncio.Event()
+    original_get = client.get
+
+    async def get(env_id, **kw):
+        created.set()
+        await hold.wait()
+        return await original_get(env_id, **kw)
+
+    client.get = get  # type: ignore[method-assign]
+    warmer = _warmer(client, images=[IMG_A], domains=["d0"], probe_timeout=30.0)
+    run = asyncio.create_task(warmer.run())
+    await asyncio.wait_for(created.wait(), 5)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    cov = warmer.coverage
+    assert cov is not None and cov.undeleted_probes == [stuck] and not cov.clean
+    assert [d.name for d in cov.domains] == ["d0"]
+    ic = cov.domains[0].images[0]
+    assert ic.image == IMG_A and ic.rounds == 1 and not ic.complete and ic.error == "cancelled"
+    assert ic.undeleted_probes == [stuck]
+    assert set(fakes.environments.environments) == {("ate-env", stuck)}, "the other probe was deleted"
+
+    # A cancel on the same event-loop turn as a failed delete: the delete's
+    # wrapper re-raises the cancel without a return value, and the probe
+    # must still be listed.
+    listed: list[str] = []
+    waiter: list[asyncio.Task] = []
+
+    class _Env:
+        async def delete(self):
+            waiter[0].cancel()
+            raise RuntimeError("delete refused")
+
+    waiter.append(asyncio.create_task(warmer._delete_through_cancel("pf-test-x", _Env(), listed)))
+    with pytest.raises(asyncio.CancelledError):
+        await waiter[0]
+    assert listed == ["pf-test-x"]
+
+    # Second image: a completes, then the cancel lands in b's first round;
+    # a's complete coverage stays next to b's cut one.
+    client.get = original_get  # type: ignore[method-assign]
+    fakes.environments.environments.clear()
+    fakes.environments.delete_fail = set()
+    created.clear()
+    hold = asyncio.Event()
+
+    async def get_b(env_id, **kw):
+        # pf-test-<domain>-<image>-<round>-<slot>: image index 1 is b.
+        if env_id.split("-")[3] == "1":
+            created.set()
+            await hold.wait()
+        return await original_get(env_id, **kw)
+
+    client.get = get_b  # type: ignore[method-assign]
+    warmer = _warmer(client, domains=["d0"], probe_timeout=30.0)
+    run = asyncio.create_task(warmer.run())
+    await asyncio.wait_for(created.wait(), 5)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    cov = warmer.coverage
+    assert cov is not None and [d.name for d in cov.domains] == ["d0"]
+    by_image = {ic.image: ic for ic in cov.domains[0].images}
+    assert by_image[IMG_A].complete and by_image[IMG_A].nodes == NODES["d0"]
+    assert not by_image[IMG_B].complete and by_image[IMG_B].error == "cancelled"
+    assert fakes.environments.environments == {}
+
+
+async def test_not_found_on_delete_is_gone(fake_stack):
+    client, fakes = fake_stack
+    fakes.environments.domain_nodes = dict(NODES)
+    _set_golden(fakes, IMG_A, env_pb2.GOLDEN_SNAPSHOT_STATE_READY)
+    fakes.environments.delete_not_found = {"pf-test-0-0-1-1"}
+    coverage = await _warmer(client, images=[IMG_A], domains=["d0"]).run()
+    assert coverage.complete and coverage.clean and coverage.undeleted_probes == []
+    assert fakes.environments.environments == {}

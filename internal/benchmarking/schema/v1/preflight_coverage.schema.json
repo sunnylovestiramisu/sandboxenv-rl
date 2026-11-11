@@ -53,7 +53,9 @@
         "failed": { "type": "integer", "minimum": 0 },
         "rounds": { "type": "integer", "minimum": 0 },
         "complete": { "type": "boolean" },
-        "error": { "type": "string" }
+        "error": { "type": "string" },
+        "undeleted_probes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "waited_ms": { "type": "number", "minimum": 0 }
       }
     }
   }

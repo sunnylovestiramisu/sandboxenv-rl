@@ -17,13 +17,17 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
 // PreflightCoverage is preflight-coverage.json: what a pre-flight did for an
 // image placement plan and whether every node of every domain now holds the
 // images assigned to it. The pre-flight exits non-zero when complete is
-// false; the report says which (image, domain) pairs are short and why.
+// false, and also when complete is true but an image lists undeleted_probes
+// (probes whose delete failed: the nodes are warm, and each probe holds a
+// slot until swept). The report says which (image, domain) pairs are short
+// and why.
 type PreflightCoverage struct {
 	SchemaVersion string    `json:"schema_version"`
 	RunID         string    `json:"run_id"`
@@ -78,6 +82,14 @@ type ImageCoverage struct {
 	Complete bool `json:"complete"`
 	// Error is the last probe error when the image could not be covered.
 	Error string `json:"error,omitempty"`
+	// UndeletedProbes lists the probe environments whose delete failed; they
+	// hold a slot until someone sweeps them. Absent when none.
+	UndeletedProbes []string `json:"undeleted_probes,omitempty"`
+	// WaitedMS is how long the image's rounds waited for probe slots held by
+	// other passes. Only ate-env-api's WarmImage reports a wait, so the
+	// field is reserved for the warmers that call it (plan row 16); the
+	// probe-level warmers leave it absent.
+	WaitedMS float64 `json:"waited_ms,omitempty"`
 }
 
 // Validate checks PreflightCoverage invariants.
@@ -142,6 +154,14 @@ func (c PreflightCoverage) Validate() error {
 				if n == "" {
 					return fmt.Errorf("preflight_coverage domains[%d] (%s) images[%d] (%s): an empty node", i, d.Name, j, img.Image)
 				}
+			}
+			for _, id := range img.UndeletedProbes {
+				if id == "" {
+					return fmt.Errorf("preflight_coverage domains[%d] (%s) images[%d] (%s): an empty undeleted probe id", i, d.Name, j, img.Image)
+				}
+			}
+			if img.WaitedMS < 0 || math.IsNaN(img.WaitedMS) || math.IsInf(img.WaitedMS, 0) {
+				return fmt.Errorf("preflight_coverage domains[%d] (%s) images[%d] (%s): waited_ms must be a finite number >= 0", i, d.Name, j, img.Image)
 			}
 			if !img.Complete {
 				allImages = false

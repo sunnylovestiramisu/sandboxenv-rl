@@ -109,6 +109,34 @@ func TestFixturesValidateAndRoundTrip(t *testing.T) {
 		roundTripJSON(t, "preflight_coverage.schema.json", v)
 	})
 
+	t.Run("preflight_coverage validate bounds", func(t *testing.T) {
+		load := func() PreflightCoverage {
+			v, err := DecodeJSONStrict[PreflightCoverage](bytes.NewReader(mustRead(t, "testdata/preflight_coverage.json")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+		good := load()
+		good.Domains[0].Images[0].UndeletedProbes = []string{"pf-x-0-0-1-0"}
+		good.Domains[0].Images[0].WaitedMS = 5
+		if err := good.Validate(); err != nil {
+			t.Errorf("undeleted_probes and waited_ms: %v", err)
+		}
+		bad := load()
+		bad.Domains[0].Images[0].UndeletedProbes = []string{""}
+		if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "empty undeleted probe id") {
+			t.Errorf("empty undeleted probe id: err = %v", err)
+		}
+		for _, w := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+			v := load()
+			v.Domains[0].Images[0].WaitedMS = w
+			if err := v.Validate(); err == nil || !strings.Contains(err.Error(), "waited_ms must be a finite number >= 0") {
+				t.Errorf("waited_ms %v: err = %v", w, err)
+			}
+		}
+	})
+
 	t.Run("image_placement.json", func(t *testing.T) {
 		raw := mustRead(t, "testdata/image_placement.json")
 		if err := ValidateAgainstJSONSchema("image_placement.schema.json", raw); err != nil {

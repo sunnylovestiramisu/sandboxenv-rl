@@ -355,6 +355,15 @@ user needs to know across them.
     a UTF-8 bytes id is decoded (was `"b'...'"`).
 
 ### Fixed
+- `preflight-coverage.json` (schema v1) gains two optional fields per image,
+  `undeleted_probes` and `waited_ms`, the ones `WarmImage`'s coverage already
+  carries. `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` list
+  the probes whose delete failed there instead of only logging them, so an
+  operator has the list to sweep. The loader's pass exits non-zero naming
+  them even when the coverage is complete; the Python `run()` returns
+  normally with `complete` still `True`, and `PreflightCoverage.clean`
+  (`complete` and no `undeleted_probes`) is the flag to gate a run on;
+  `shortfall()` names the leftovers in both.
 - `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` no longer delete an
   environment whose name a probe collided with: a create the server refused
   (`AlreadyExists`, a bad argument, a missing template, no permission, no

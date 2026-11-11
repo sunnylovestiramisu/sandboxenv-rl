@@ -576,7 +576,8 @@ async def main():
     warmer = PreflightWarmer(client, plan, run_id="pf-7", probes_per_node=2)
     coverage = await warmer.run()
     coverage.write("preflight-coverage.json")
-    print(coverage.shortfall())      # "complete", or what is missing
+    if not coverage.clean:           # complete, and no probe left behind
+        print(coverage.shortfall())  # what is missing, or the probes to sweep
     await client.close()
 
 asyncio.run(main())
@@ -596,7 +597,12 @@ is recorded as `none` and warmed by cold boots.
 
 `PreflightCoverage` is the result: per image the golden's state, per domain
 the nodes seen and per image the nodes covered, probes, rounds and failures;
-`complete` says whether the run can expect warm first boots everywhere.
+`complete` says whether the run can expect warm first boots everywhere. A
+probe whose delete failed is listed under its image's `undeleted_probes` (and
+in `coverage.undeleted_probes`, which `shortfall()` names): it holds a node
+slot until swept with `ate-env delete`. `run()` returns normally then and
+`complete` stays `True`; gate on `coverage.clean`, which is `complete` with
+no probe left behind.
 `write()` produces the same `preflight-coverage.json` (`schema_version: v1`) as
 the Go loader's pre-flight writes, so the two reports read alike. An
 `Observer` passed in records the phases `ensure_template`, `preflight_golden`
