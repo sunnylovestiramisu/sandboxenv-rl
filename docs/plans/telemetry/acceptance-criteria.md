@@ -356,9 +356,10 @@ Conventions:
   (`image_ref_attr` keeps the repository and digest and drops the tag).
 - Status: pass. Example tests: `test_executable_attr_skips_env_assignments` and the
   `executable.json` vector. Property tests in both clients (`TestExecutableNeverRecordsAssignments`,
-  `test_executable_never_records_assignments_prop`) draw assignment values with spaces inside
-  `$(...)`, `${...}`, backticks and `$'...'` (#341), which an expansion-unaware split leaked; an
-  assignment whose value holds `$` or a backtick records nothing.
+  `test_executable_never_records_assignments_prop`) draw assignment values and redirection prefixes
+  with spaces inside `$(...)`, `${...}`, backticks and `$'...'` (#341), which an expansion-unaware
+  split leaked; an assignment or redirection target whose value holds `$` or a backtick records
+  nothing.
 - Properties: P-21.
 
 ## AC-19: Several fleets share the warm-replica gauge

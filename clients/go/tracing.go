@@ -369,11 +369,11 @@ func isRedirectionOp(op string) bool {
 // Only the first simple command counts: a control operator (";", "&",
 // "|", "&&", "||", ";;", ")") before the command word gives "", so
 // "cmd1 && A=s cmd2" gives "cmd1" and "; A=s cmd" gives "". It also gives
-// "" when an assignment's value holds "$" or a backtick (an expansion such
-// as "$(echo my secret)" can span words, and its rest would read as the
-// command), when the command word holds "=", "$" or a backtick, and when
-// the line cannot be split (an unterminated quote, a trailing backslash).
-// "" records no attribute.
+// "" when an assignment's value or a redirection target holds "$" or a
+// backtick (an expansion such as "$(echo my secret)" can span words, and
+// its rest would read as the command), when the command word holds "=",
+// "$" or a backtick, and when the line cannot be split (an unterminated
+// quote, a trailing backslash). "" records no attribute.
 func executable(commandLine string) string {
 	words, ok := shellWords(commandLine)
 	if !ok {
@@ -395,6 +395,9 @@ func executableWordsFromShell(words []string) string {
 			return ""
 		default:
 			if isRedirectionOp(w) {
+				if i+1 < len(words) && strings.ContainsAny(words[i+1], "$`") {
+					return ""
+				}
 				inCommand = true
 				i++ // skip target
 				continue

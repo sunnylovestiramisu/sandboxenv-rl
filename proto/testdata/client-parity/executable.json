@@ -258,5 +258,21 @@
   {
     "line": "²>out cmd",
     "want": "²"
+  },
+  {
+    "line": "<<<\"$(echo \"my secret\")\" cmd",
+    "want": null
+  },
+  {
+    "line": ">${B:-my secret} cmd",
+    "want": null
+  },
+  {
+    "line": "2>`echo hunter2 x` cmd",
+    "want": null
+  },
+  {
+    "line": "<<<$'a\\' secret' cmd don\\'t",
+    "want": null
   }
 ]

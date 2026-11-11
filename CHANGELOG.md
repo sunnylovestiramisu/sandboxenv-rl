@@ -27,9 +27,10 @@ user needs to know across them.
   splits shell operators (`;`, `&`, `|`, `&&`, `||`, redirections) and skips
   comments, so an assignment after an operator or in a comment is never
   recorded. It holds the first command of a compound line (`cmd1 && A=s cmd2`
-  gives `cmd1`) and records nothing when an assignment's value holds `$` or a
-  backtick (`A="$(echo my secret)" cmd`). Two cases that recorded a name now
-  record nothing: an argv list whose first item is an assignment
+  gives `cmd1`) and records nothing when an assignment's value or a redirection
+  target holds `$` or a backtick (`A="$(echo my secret)" cmd`,
+  `<<<"$(echo my secret)" cmd`). Two cases that recorded a name now record
+  nothing: an argv list whose first item is an assignment
   (`["API_KEY=s3cr3t", "python3", "x.py"]` gave `python3`), and a first word
   that holds `=`, `$` or a backtick (`./a=b` gave `a=b`).
 

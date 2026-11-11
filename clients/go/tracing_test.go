@@ -712,7 +712,7 @@ func TestNonEmptyDropsEmptyStrings(t *testing.T) {
 
 func TestExecutableNeverRecordsAssignments(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "}
+		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${B:-my %s} "}
 		names := []string{"API_KEY", "TOKEN", "A", "X+"}
 		cmds := []string{"", " python x.py", " 'unterminated", " cmd"}
 		// Values whose expansion holds a space, so the secret lands in a
@@ -720,11 +720,16 @@ func TestExecutableNeverRecordsAssignments(t *testing.T) {
 		// draws the same shapes).
 		values := []string{"%s", `"$(echo "my %s")"`, "${B:-my %s}", "`echo %s x`", `$'a\' %s'`, `"my %s"`}
 
-		prefix := rapid.SampledFrom(prefixes).Draw(t, "prefix")
+		prefixPattern := rapid.SampledFrom(prefixes).Draw(t, "prefix")
 		name := rapid.SampledFrom(names).Draw(t, "name")
 		secret := rapid.StringMatching(`^[a-zA-Z0-9_]{6,20}$`).Draw(t, "secret")
 		value := fmt.Sprintf(rapid.SampledFrom(values).Draw(t, "value"), secret)
 		cmd := rapid.SampledFrom(cmds).Draw(t, "cmd")
+
+		prefix := prefixPattern
+		if strings.Contains(prefixPattern, "%s") {
+			prefix = fmt.Sprintf(prefixPattern, secret)
+		}
 
 		line := prefix + name + "=" + value + cmd
 		got := env.ExecutableForTest(line)

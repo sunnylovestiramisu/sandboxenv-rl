@@ -1021,14 +1021,15 @@ _ASSIGNMENT_VALUES = ["{}", '"$(echo "my {}")"', "${{B:-my {}}}", "`echo {} x`",
 
 @settings(max_examples=300)
 @given(
-    prefix=st.sampled_from(["", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "]),
+    prefix=st.sampled_from(["", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${{B:-my {}}} "]),
     name=st.sampled_from(["API_KEY", "TOKEN", "A", "X+"]),
     secret=st.text(alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", min_size=6, max_size=20),
     value=st.sampled_from(_ASSIGNMENT_VALUES),
     cmd=st.sampled_from(["", " python x.py", " 'unterminated", " cmd"]),
 )
 def test_executable_never_records_assignments_prop(prefix, name, secret, value, cmd):
-    line = f"{prefix}{name}={value.format(secret)}{cmd}"
+    prefix_str = prefix.format(secret) if "{}" in prefix else prefix
+    line = f"{prefix_str}{name}={value.format(secret)}{cmd}"
     got = tracing.executable_attr(line)
     if got is not None:
         assert secret not in got

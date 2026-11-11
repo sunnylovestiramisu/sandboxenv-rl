@@ -531,10 +531,10 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
     x.py`` gives ``python``), redirections with their targets, and opening
     ``(``, ``{`` and newlines are skipped. A control operator before the
     command word (``; A=s cmd``) gives None, and ``cmd1 && A=s cmd2`` gives
-    ``cmd1``. None also when an assignment's value holds ``$`` or a backtick
-    (an expansion such as ``"$(echo my secret)"`` can span words), when the
-    command word holds ``=``, ``$`` or a backtick, or when the line cannot be
-    split. An argv list is not parsed: its first item is the command word,
+    ``cmd1``. None also when an assignment's value or a redirection target holds
+    ``$`` or a backtick (an expansion such as ``"$(echo my secret)"`` can span
+    words), when the command word holds ``=``, ``$`` or a backtick, or when the
+    line cannot be split. An argv list is not parsed: its first item is the command word,
     so a leading assignment item gives None. The Go client's ``executable``
     and ``executableWords`` give the same answers
     (proto/testdata/client-parity/executable.json).
@@ -561,6 +561,8 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
             i += 1
             continue
         if _is_redirection_op(w):
+            if i + 1 < len(words) and ('$' in words[i + 1] or '`' in words[i + 1]):
+                return None
             in_command = True
             i += 2
             continue
