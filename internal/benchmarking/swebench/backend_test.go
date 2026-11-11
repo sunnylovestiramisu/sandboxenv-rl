@@ -115,7 +115,13 @@ type fakeAPI struct {
 	deleteNotFound map[string]bool
 	// goldenPendingForever names images whose golden never gets ready.
 	goldenPendingForever map[string]bool
-	ensured              []string
+	// statusUnavailableFirst is how many GetImageStatus calls per image
+	// answer Unavailable before one answers; templateGone names images
+	// whose status reports no template (golden none) after the first
+	// status call, as a template deleted during a bake does.
+	statusUnavailableFirst map[string]int
+	templateGone           map[string]bool
+	ensured                []string
 	// images is the rootfs image per environment.
 	images map[string]string
 	// inflight and maxInflight count the environments alive per domain.
@@ -213,7 +219,15 @@ func (f *fakeAPI) GetImageStatus(_ context.Context, req *ateenvv1alpha.GetImageS
 	if !strings.Contains(req.GetRootfsImage(), "@sha256:") {
 		return nil, status.Error(codes.InvalidArgument, "image is not pinned by digest")
 	}
-	return f.imageStatusLocked(req.GetRootfsImage()), nil
+	if f.statusUnavailableFirst[req.GetRootfsImage()] > 0 {
+		f.statusUnavailableFirst[req.GetRootfsImage()]--
+		return nil, status.Error(codes.Unavailable, "api server restarting")
+	}
+	st := f.imageStatusLocked(req.GetRootfsImage())
+	if f.templateGone[req.GetRootfsImage()] && f.statusCalls[req.GetRootfsImage()] > 1 {
+		st = &ateenvv1alpha.ImageStatus{Template: st.GetTemplate(), TemplateExists: false, Golden: ateenvv1alpha.GoldenSnapshotState_GOLDEN_SNAPSHOT_STATE_NONE}
+	}
+	return st, nil
 }
 
 func (f *fakeAPI) EnsureImageTemplate(_ context.Context, req *ateenvv1alpha.EnsureImageTemplateRequest) (*ateenvv1alpha.ImageStatus, error) {

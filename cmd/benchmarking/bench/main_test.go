@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -92,6 +93,49 @@ func startFakeAPIAndControl(t *testing.T) (apiAddr, ctrlAddr string) {
 	t.Cleanup(grpcSrv.Stop)
 
 	return lis.Addr().String(), cAddr
+}
+
+// -images counts distinct images, not task rows: tasks that share an image
+// do not use up the count, and a count of zero or less is refused.
+func TestBenchPrewarmCountsDistinctImages(t *testing.T) {
+	dir := t.TempDir()
+	row := func(id, digest string) string {
+		return `{"instance_id":"` + id + `","image":"us-docker.pkg.dev/proj/swe/` + digest[:4] + `@sha256:` + strings.Repeat(digest[:4], 16) + `","patch":"diff","eval_script":"pytest","fail_to_pass":["t1"],"log_parser":"parse_log_pytest"}` + "\n"
+	}
+	dsPath := filepath.Join(dir, "dataset.jsonl")
+	if err := os.WriteFile(dsPath, []byte(row("t1", "aaaa")+row("t2", "aaaa")+row("t3", "bbbb")+row("t4", "cccc")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apiAddr, _ := startFakeAPIAndControl(t)
+	var out, errBuf bytes.Buffer
+	if code := execute([]string{"prewarm", "-endpoint", apiAddr, "-atespace", "ate-env", "-dataset", dsPath, "-images", "2", "-golden-wait=false"}, &out, &errBuf); code != 0 {
+		t.Fatalf("prewarm failed (code=%d): %s", code, errBuf.String())
+	}
+	if n := strings.Count(out.String(), "prewarmed image"); n != 2 || !strings.Contains(out.String(), "/aaaa@") || !strings.Contains(out.String(), "/bbbb@") {
+		t.Errorf("-images 2 on rows [a, a, b, c] prewarmed %d images, want a and b:\n%s", n, out.String())
+	}
+
+	// A count above the number of rows prewarms each distinct image; the
+	// count does not size an allocation.
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"prewarm", "-endpoint", apiAddr, "-atespace", "ate-env", "-dataset", dsPath, "-images", strconv.Itoa(math.MaxInt), "-golden-wait=false"}, &out, &errBuf); code != 0 {
+		t.Fatalf("-images MaxInt failed (code=%d): %s", code, errBuf.String())
+	}
+	if n := strings.Count(out.String(), "prewarmed image"); n != 3 || !strings.Contains(out.String(), "/aaaa@") || !strings.Contains(out.String(), "/bbbb@") || !strings.Contains(out.String(), "/cccc@") {
+		t.Errorf("-images MaxInt on rows [a, a, b, c] prewarmed %d images, want a, b and c:\n%s", n, out.String())
+	}
+
+	for _, n := range []string{"0", "-1"} {
+		out.Reset()
+		errBuf.Reset()
+		if code := execute([]string{"prewarm", "-endpoint", apiAddr, "-atespace", "ate-env", "-dataset", dsPath, "-images", n, "-golden-wait=false"}, &out, &errBuf); code == 0 || !strings.Contains(out.String()+errBuf.String(), "-images must be greater than 0") {
+			t.Errorf("-images %s: code=%d out=%q err=%q, want a refusal", n, code, out.String(), errBuf.String())
+		}
+		if strings.Contains(out.String(), "prewarmed image") {
+			t.Errorf("-images %s prewarmed images:\n%s", n, out.String())
+		}
+	}
 }
 
 func TestBenchComposableSubcommandsEndToEnd(t *testing.T) {
@@ -171,11 +215,16 @@ jobs:
 	apiAddr, ctrlAddr := startFakeAPIAndControl(t)
 	out.Reset()
 	errBuf.Reset()
-	if code := execute([]string{"prewarm", "-endpoint", apiAddr, "-atespace", "ate-env", "-dataset", dsPath, "-images", "1", "-dest", artDir}, &out, &errBuf); code != 0 {
+	// Templates only: fakecontrol never bakes a golden, so a golden wait would
+	// run to -timeout.
+	if code := execute([]string{"prewarm", "-endpoint", apiAddr, "-atespace", "ate-env", "-dataset", dsPath, "-images", "1", "-dest", artDir, "-golden-wait=false"}, &out, &errBuf); code != 0 {
 		t.Fatalf("prewarm failed (code=%d): %s", code, errBuf.String())
 	}
 	if _, err := os.Stat(filepath.Join(artDir, "events", "prewarm.jsonl")); err != nil {
 		t.Fatalf("missing events/prewarm.jsonl: %v", err)
+	}
+	if !strings.Contains(out.String(), "prewarmed image") || !strings.Contains(out.String(), "golden pending") {
+		t.Fatalf("prewarm output:\n%s", out.String())
 	}
 
 	// 6. Test `bench measure` (both valid with 0-value metric and failed-scrape rejection).

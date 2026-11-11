@@ -344,11 +344,15 @@ command:
   Kustomize/JSON6902 patches applied) into `$ARTIFACT_DIR/manifests/` without
   applying them.
 - `bench prewarm`: prewarms configured initial images/templates across jobs—on
-  Substrate, ensuring derived `ActorTemplate`s and golden snapshots are baked
-  and cached across nodes (and recording the baseline node cache sample
-  `cache_before.json`); on Agent Sandbox, warming `SandboxWarmPool`s—recording
-  total prepare wall time, per-template/pool readiness time, and per-object
-  readiness times as `$ARTIFACT_DIR/events/prewarm.jsonl`.
+  Substrate, ensuring the derived `ActorTemplate`s exist and waiting for their
+  golden snapshots to settle (`-golden-wait`), without creating an environment;
+  the layers reach a node only when an environment boots there, which is the
+  pre-flight's job per placement domain (`swebench-loader preflight`,
+  `ate_env_rl.PreflightWarmer`, `ate-env warm-image`)—and recording the
+  baseline node cache sample `cache_before.json`; on Agent Sandbox, warming
+  `SandboxWarmPool`s—recording total prepare wall time, per-template/pool
+  readiness time, and per-object readiness times as
+  `$ARTIFACT_DIR/events/prewarm.jsonl`.
 - `bench measure [--overlay FEATURE.yaml]`: harvests Prometheus metrics,
   before/after node image-cache samples (`cache_before.json`,
   `cache_after.json`), `atelet` restore timing records

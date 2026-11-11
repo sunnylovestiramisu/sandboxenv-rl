@@ -6,6 +6,22 @@ user needs to know across them.
 
 ## Unreleased
 
+### Changed
+- `bench prewarm` ensures each image's derived template through
+  `EnsureImageTemplate`, which starts its golden snapshot bake, and waits for
+  the goldens to settle (`-golden-wait`, default on; `-golden-poll`) instead
+  of creating and deleting one environment per image. `events/prewarm.jsonl`
+  keeps one `prewarm` event per image, now with the template, the golden
+  state and its tag as labels; a failed golden fails the image. The time
+  and `dur_ms` of an event are those of its own image, up to the moment the
+  image settled. `-images` counts distinct images, not task rows, and a
+  count of zero or less is refused. The `-timeout` default is `30m`, up from
+  `5m`, because it now bounds each ensure and each golden wait; a command
+  that cannot reach the endpoint fails after 30 minutes unless `-timeout`
+  is set lower. The layers
+  of an image reach a node only when an environment boots there: that is the
+  pre-flight's job (`swebench-loader preflight`), not the prewarm's.
+
 ### Added
 - `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to
   the dataset (under the plan's own file name, so the run's `placement` label

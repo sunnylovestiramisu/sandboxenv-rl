@@ -199,21 +199,23 @@ func prewarmCmd(args []string, stdout, stderr io.Writer) error {
 	images := fs.Int("images", 1, "Number of distinct images to prewarm.")
 	destDir := fs.String("dest", "", "Artifact directory ($ARTIFACT_DIR); writes events/prewarm.jsonl when set.")
 	outPath := fs.String("out", "", "Optional explicit path for prewarm JSONL events.")
-	timeout := fs.Duration("timeout", 5*time.Minute, "Prewarm timeout.")
+	timeout := fs.Duration("timeout", 30*time.Minute, "Bound on the whole step: every template is ensured and, with -golden-wait, every golden awaited within it. A bake takes about two minutes and an ateapi replica bakes five at a time, so -images 50 on two replicas needs about ten minutes.")
+	waitGolden := fs.Bool("golden-wait", true, "Wait for each image's golden snapshot to settle (ready, failed, or none when the base template disables goldens); false ensures the templates only.")
+	goldenPoll := fs.Duration("golden-poll", 10*time.Second, "How often to poll a baking golden.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dataset == "" {
 		return fmt.Errorf("-dataset is required")
 	}
+	if *images <= 0 {
+		return fmt.Errorf("-images must be greater than 0, got %d", *images)
+	}
 	all, err := swebench.LoadDataset(*dataset)
 	if err != nil {
 		return err
 	}
-	selected, err := swebench.Select(all, nil, nil, *images)
-	if err != nil {
-		return err
-	}
+	refs := distinctImages(all, *images)
 	backend, err := swebench.NewEnvBackend(*endpoint, *atespace, *baseTemplate, 1, *token)
 	if err != nil {
 		return err
@@ -241,32 +243,20 @@ func prewarmCmd(args []string, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	for i, in := range selected {
-		start := time.Now()
-		id := fmt.Sprintf("prewarm-%d-%d", start.Unix()%10000, i)
-		sb, cerr := backend.Create(ctx, id, in.Image)
-		dur := time.Since(start)
-		if rec != nil {
-			ev := swebench.Event{
-				Time:     time.Now().UTC(),
-				Task:     i,
-				Instance: in.InstanceID,
-				Image:    in.Image,
-				Env:      id,
-				Event:    swebench.EventPrewarm,
-				DurMS:    float64(dur.Milliseconds()),
-				OK:       cerr == nil,
-			}
-			if cerr != nil {
-				ev.Err = cerr.Error()
-			}
-			rec.Record(ev)
+	results, perr := swebench.PrewarmTemplates(ctx, backend, refs, swebench.PrewarmOptions{
+		WaitGolden: *waitGolden,
+		GoldenPoll: *goldenPoll,
+		Recorder:   rec,
+	})
+	for _, r := range results {
+		if r.Err != nil {
+			fmt.Fprintf(stdout, "prewarm %s: %v\n", r.Image, r.Err)
+			continue
 		}
-		if cerr != nil {
-			return cerr
-		}
-		_ = sb.Delete(ctx)
-		fmt.Fprintf(stdout, "prewarmed image %s\n", in.Image)
+		fmt.Fprintf(stdout, "prewarmed image %s: template %s, golden %s%s\n", r.Image, r.Template, r.Golden, map[bool]string{true: " " + r.Tag, false: ""}[r.Tag != "" && r.Golden == swebench.GoldenReady])
+	}
+	if perr != nil {
+		return perr
 	}
 	if rec != nil {
 		if err := rec.Err(); err != nil {
@@ -274,6 +264,28 @@ func prewarmCmd(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// distinctImages returns the first n distinct images of the dataset, in
+// dataset order. Tasks share images, so n counts images, not task rows. The
+// result holds at most len(all) images, so n never sizes the allocation by
+// itself.
+func distinctImages(all []swebench.Instance, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	refs := make([]string, 0, min(n, len(all)))
+	seen := map[string]bool{}
+	for _, in := range all {
+		if len(refs) == n {
+			break
+		}
+		if !seen[in.Image] {
+			seen[in.Image] = true
+			refs = append(refs, in.Image)
+		}
+	}
+	return refs
 }
 
 var lifecycleKubeRunner measure.KubeCommandRunner

@@ -41,7 +41,7 @@ subcommand communicates through a single artifact directory (`-dest "$ARTIFACT_D
 | `bench run` | Runs a declarative `scenario.yaml` in process (resolve -> prewarm -> execute -> measure -> reap -> report) against the local scenario client: no sandbox is created and no cluster is called |
 | `bench resolve` | Resolve a `scenario.yaml` and dataset into a deterministic `schedule.json` |
 | `bench render` | Render Kubernetes Job manifests from a `scenario.yaml` |
-| `bench prewarm` | Prewarm templates or standing sandbox pools prior to the timed run window |
+| `bench prewarm` | Prewarm templates prior to the timed run window: ensure each image's derived `ActorTemplate`, which starts its golden snapshot bake, and wait for the goldens (`-golden-wait`, default on); no environment is created, and the nodes' layer caches are the pre-flight's job (`swebench-loader preflight`) |
 | `bench spinup` | Scale `WorkerPool` (`0 -> N` `ateworker` pods), wait for `ate-env-api` + all worker pods `Ready`, and record `workerpool_spinup_wall_ms` and `worker_pod_*_ms` into `measurements.json` and `events/substrate_lifecycle.jsonl` |
 | `bench spindown` | Scale `WorkerPool` (`N -> 0` `ateworker` pods), wait for all worker pods to terminate, and record `workerpool_spindown_wall_ms` and `worker_pod_terminate_ms` into `measurements.json` and `events/substrate_lifecycle.jsonl` |
 | `bench measure` | Collect K8s (`-k8s`), Substrate (`-ate-endpoint`), Prometheus (`-prom-url`), node cache (`-sample-node-cache`), and restore timings (`-restore-log`) into `measurements.json` and `system_description.json` |
