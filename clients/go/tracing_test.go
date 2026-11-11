@@ -715,13 +715,18 @@ func TestExecutableNeverRecordsAssignments(t *testing.T) {
 		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "}
 		names := []string{"API_KEY", "TOKEN", "A", "X+"}
 		cmds := []string{"", " python x.py", " 'unterminated", " cmd"}
+		// Values whose expansion holds a space, so the secret lands in a
+		// later word than the assignment's own (test_telemetry_tracing.py
+		// draws the same shapes).
+		values := []string{"%s", `"$(echo "my %s")"`, "${B:-my %s}", "`echo %s x`", `$'a\' %s'`, `"my %s"`}
 
 		prefix := rapid.SampledFrom(prefixes).Draw(t, "prefix")
 		name := rapid.SampledFrom(names).Draw(t, "name")
 		secret := rapid.StringMatching(`^[a-zA-Z0-9_]{6,20}$`).Draw(t, "secret")
+		value := fmt.Sprintf(rapid.SampledFrom(values).Draw(t, "value"), secret)
 		cmd := rapid.SampledFrom(cmds).Draw(t, "cmd")
 
-		line := prefix + name + "=" + secret + cmd
+		line := prefix + name + "=" + value + cmd
 		got := env.ExecutableForTest(line)
 		if strings.Contains(got, secret) || strings.Contains(got, "=") {
 			t.Fatalf("executable(%q) = %q leaks the assignment", line, got)

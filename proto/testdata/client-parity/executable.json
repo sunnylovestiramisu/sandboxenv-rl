@@ -194,5 +194,69 @@
   {
     "line": "&>log python",
     "want": "python"
+  },
+  {
+    "line": "PASS=\"$(echo \"my secret\")\" cmd",
+    "want": null
+  },
+  {
+    "line": "A=${B:-my secret} cmd",
+    "want": null
+  },
+  {
+    "line": "A=`echo hunter2 x` cmd",
+    "want": null
+  },
+  {
+    "line": "A=$'a\\' secret' cmd don\\'t",
+    "want": null
+  },
+  {
+    "line": "&>>f cmd",
+    "want": "cmd"
+  },
+  {
+    "line": ">|f cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "<>f cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "<&- cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "3>&- cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "cat <<EOF\nA=s\nEOF",
+    "want": "cat"
+  },
+  {
+    "line": "cmd # A=s",
+    "want": "cmd"
+  },
+  {
+    "line": "echo a#b",
+    "want": "echo"
+  },
+  {
+    "line": "1>&2A=s",
+    "want": null
+  },
+  {
+    "line": "2''>out cmd",
+    "want": "cmd"
+  },
+  {
+    "line": "٣>out cmd",
+    "want": "٣"
+  },
+  {
+    "line": "²>out cmd",
+    "want": "²"
   }
 ]

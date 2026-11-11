@@ -23,9 +23,15 @@ user needs to know across them.
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
 ### Fixed
-- Clients: The executable attribute (`ate_env.command.executable`) splits shell
-  operators (like `;` and `&`) and skips comments, so it never records an environment
-  variable assignment when the command follows a shell operator or comment.
+- Go and Python clients: the executable attribute (`ate_env.command.executable`)
+  splits shell operators (`;`, `&`, `|`, `&&`, `||`, redirections) and skips
+  comments, so an assignment after an operator or in a comment is never
+  recorded. It holds the first command of a compound line (`cmd1 && A=s cmd2`
+  gives `cmd1`) and records nothing when an assignment's value holds `$` or a
+  backtick (`A="$(echo my secret)" cmd`). Two cases that recorded a name now
+  record nothing: an argv list whose first item is an assignment
+  (`["API_KEY=s3cr3t", "python3", "x.py"]` gave `python3`), and a first word
+  that holds `=`, `$` or a backtick (`./a=b` gave `a=b`).
 
 ### Added
 - `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to

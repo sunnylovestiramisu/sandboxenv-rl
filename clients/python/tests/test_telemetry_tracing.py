@@ -1,4 +1,3 @@
-
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +16,6 @@
 
 Tests that need OpenTelemetry skip cleanly in a venv without the tracing extra.
 """
-
 
 from __future__ import annotations
 
@@ -421,10 +419,10 @@ def test_carrier_never_carries_baggage(spans):
         ('TOKEN="unterminated python', None),
         ("", None),
         ([], None),
-        ("./a=b", None),  # a path, not an assignment
+        ("./a=b", None),  # not an assignment, but a command word with "=" records nothing
         ("X+=s3cr3t cmd", "cmd"),  # bash appends with NAME+=value
         ("PATH+=:/opt/bin A=1 make", "make"),
-        ("./a+=b", None),  # a path, not an assignment
+        ("./a+=b", None),  # likewise
     ],
 )
 def test_executable_attr_skips_env_assignments(command, want):
@@ -1015,15 +1013,22 @@ async def test_placement_spans_carry_the_template_and_follow_the_rpc(spans):
     for span in (plain, named, warm):
         assert span.status.status_code.name != "ERROR"
 
+# Values whose expansion holds a space, so the secret lands in a later word
+# than the assignment's own (TestExecutableNeverRecordsAssignments draws the
+# same shapes).
+_ASSIGNMENT_VALUES = ["{}", '"$(echo "my {}")"', "${{B:-my {}}}", "`echo {} x`", "$'a\\' {}'", '"my {}"']
+
+
 @settings(max_examples=300)
 @given(
-    prefix=st.sampled_from(["", " ", "\\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "]),
+    prefix=st.sampled_from(["", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input "]),
     name=st.sampled_from(["API_KEY", "TOKEN", "A", "X+"]),
     secret=st.text(alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", min_size=6, max_size=20),
+    value=st.sampled_from(_ASSIGNMENT_VALUES),
     cmd=st.sampled_from(["", " python x.py", " 'unterminated", " cmd"]),
 )
-def test_executable_never_records_assignments_prop(prefix, name, secret, cmd):
-    line = f"{prefix}{name}={secret}{cmd}"
+def test_executable_never_records_assignments_prop(prefix, name, secret, value, cmd):
+    line = f"{prefix}{name}={value.format(secret)}{cmd}"
     got = tracing.executable_attr(line)
     if got is not None:
         assert secret not in got

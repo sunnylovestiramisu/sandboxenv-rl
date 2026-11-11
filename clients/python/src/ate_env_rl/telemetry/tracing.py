@@ -398,11 +398,17 @@ _OPS = frozenset(["\n", "(", ")", ";", ";;", "&", "&&", "|", "||",
        "<", ">", ">>", "<<", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|", "<<-"])
 _REDIR_BASES = frozenset(["<", ">", ">>", "<<", "<<<", ">&", "<&", "<>", ">|", "<<-"])
 
+def _is_ascii_digit(c: str) -> bool:
+    # An fd number is ASCII digits, as in the Go client; str.isdigit also
+    # takes "²" or "٣".
+    return "0" <= c <= "9"
+
+
 def _is_op_prefix(op: str) -> bool:
     digits = ""
     base = op
     for i, c in enumerate(op):
-        if not c.isdigit():
+        if not _is_ascii_digit(c):
             digits = op[:i]
             base = op[i:]
             break
@@ -419,8 +425,7 @@ def _is_op_prefix(op: str) -> bool:
 def _is_redirection_op(op: str) -> bool:
     base = op
     for i, c in enumerate(op):
-        if not c.isdigit():
-            op[:i]
+        if not _is_ascii_digit(c):
             base = op[i:]
             break
     else:
@@ -481,8 +486,9 @@ def _tokenize_sh(s: str) -> list[str] | None:
                 in_word = False
             i += 1
         elif c in '\n();&|<>':
-            if c in '<>' and cur and all(x.isdigit() for x in cur):
-                op_str = ''.join(cur) + c
+            cur_s = ''.join(cur)
+            if c in '<>' and cur_s and all(_is_ascii_digit(x) for x in cur_s):
+                op_str = cur_s + c
                 cur.clear()
                 in_word = False
             else:
@@ -518,9 +524,20 @@ def _tokenize_sh(s: str) -> list[str] | None:
 def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
     """The executable name of a command (never its arguments), for span attributes.
 
-    Leading ``NAME=value`` words are skipped so environment assignments such as
-    ``API_KEY=s3cr3t python x.py`` never reach the trace backend. A string
-    command that cannot be split like a shell would split it yields None.
+    A string is split like a POSIX shell splits it (quotes, backslashes,
+    comments, operators), and the result is the base name of the first
+    command word of its first simple command. Before that word, leading
+    ``NAME=value`` and ``NAME+=value`` assignments (``API_KEY=s3cr3t python
+    x.py`` gives ``python``), redirections with their targets, and opening
+    ``(``, ``{`` and newlines are skipped. A control operator before the
+    command word (``; A=s cmd``) gives None, and ``cmd1 && A=s cmd2`` gives
+    ``cmd1``. None also when an assignment's value holds ``$`` or a backtick
+    (an expansion such as ``"$(echo my secret)"`` can span words), when the
+    command word holds ``=``, ``$`` or a backtick, or when the line cannot be
+    split. An argv list is not parsed: its first item is the command word,
+    so a leading assignment item gives None. The Go client's ``executable``
+    and ``executableWords`` give the same answers
+    (proto/testdata/client-parity/executable.json).
     """
     if isinstance(command, (list, tuple)):
         if not command:
@@ -550,6 +567,10 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
         if w in (';', '&', '|', '&&', '||', ';;', ')'):
             return None
         if _ENV_ASSIGNMENT.match(w):
+            # An expansion in the value can span words, so the next word may
+            # be the value's rest, not the command.
+            if '$' in w or '`' in w:
+                return None
             in_command = True
             i += 1
             continue

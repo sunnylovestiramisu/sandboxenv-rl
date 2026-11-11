@@ -305,13 +305,9 @@ func endSpan(span trace.Span, err error) {
 // pattern as the Python client's _ENV_ASSIGNMENT.
 var envAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
 
-// executable returns the executable name of a shell command line, as the
-// Python client's executable_attr does: the base name of its first word
-// after any leading NAME=value assignments, which can carry secrets. The
-// line is split like a POSIX shell splits it (quotes and backslashes), so
-// "'my prog' arg" gives "my prog". A line that cannot be split (an
-// unterminated quote, a trailing backslash) gives "", which records no
-// attribute. The rest of the line is never recorded.
+// ops are the shell control and redirection operators the tokenizer splits
+// out of a word, longest match first; redirBases are the redirection ones,
+// which may follow an fd number ("2>", "3>&").
 var (
 	ops = []string{"\n", "(", ")", ";", ";;", "&", "&&", "|", "||",
 		"<", ">", ">>", "<<", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|", "<<-"}
@@ -358,6 +354,26 @@ func isRedirectionOp(op string) bool {
 	return op == "&>" || op == "&>>"
 }
 
+// executable returns the executable name of a shell command line, as the
+// Python client's executable_attr does: the base name of the first command
+// word of the line's first simple command, never an argument. The line is
+// split like a POSIX shell splits it (quotes, backslashes, comments), so
+// "'my prog' arg" gives "my prog" and "cmd # A=s" gives "cmd". Before the
+// command word it skips:
+//   - leading NAME=value and NAME+=value assignments, which can carry
+//     secrets;
+//   - redirections and their targets ("2>/dev/null", ">|f", "3>&-",
+//     "<<<input"), with an optional ASCII fd number;
+//   - opening "(", "{" and newlines.
+//
+// Only the first simple command counts: a control operator (";", "&",
+// "|", "&&", "||", ";;", ")") before the command word gives "", so
+// "cmd1 && A=s cmd2" gives "cmd1" and "; A=s cmd" gives "". It also gives
+// "" when an assignment's value holds "$" or a backtick (an expansion such
+// as "$(echo my secret)" can span words, and its rest would read as the
+// command), when the command word holds "=", "$" or a backtick, and when
+// the line cannot be split (an unterminated quote, a trailing backslash).
+// "" records no attribute.
 func executable(commandLine string) string {
 	words, ok := shellWords(commandLine)
 	if !ok {
@@ -384,6 +400,11 @@ func executableWordsFromShell(words []string) string {
 				continue
 			}
 			if envAssignment.MatchString(w) {
+				// An expansion in the value can span words, so the next
+				// word may be the value's rest, not the command.
+				if strings.ContainsAny(w, "$`") {
+					return ""
+				}
 				inCommand = true
 				continue
 			}
