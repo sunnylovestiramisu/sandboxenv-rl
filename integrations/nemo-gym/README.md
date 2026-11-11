@@ -254,7 +254,9 @@ Rules the provider keeps:
   between turns when using `endpoint()`.
 - A sandbox shared with another process (`serialize_handle()` here, `connect()` there) is skipped
   by automatic idle parking in both processes, for the same reason: the other process's calls do
-  not pass through this provider's in-flight tracking. `pause()` still parks it.
+  not pass through this provider's in-flight tracking. `serialize_handle()` waits for a park
+  under way before it returns the descriptor, so the borrower never finds the sandbox
+  mid-transition. `pause()` still parks it.
 
 ### Sharing a sandbox with another process
 

@@ -376,6 +376,13 @@ user needs to know across them.
   password, and a uid under `su` return code 125 with
   `error_type="user_switch_unavailable"`, which Gym's transfer helpers answer
   by running as the default user.
+- `integrations/nemo-gym`: `serialize_handle` waits for an idle park that is
+  under way, and an idle park that finds the sandbox shared once it holds the
+  parking lock does nothing. Before, a descriptor could name a sandbox the
+  owner was still parking, and the borrower's first command failed with
+  `error_type="sandbox"`.
+- `integrations/nemo-gym`: concurrent `exec(user=...)` calls on a new sandbox
+  share one user probe. Before, each ran its own.
 - ate-env-api: `WarmImage` deletes a probe whose create the control plane
   commits after the probe's delete (a create attempt cut off by its deadline,
   a cancel or `Unavailable` while the control plane queues, even when a later

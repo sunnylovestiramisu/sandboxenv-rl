@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import logging
 import os
@@ -37,8 +38,10 @@ import grpc
 import pytest
 from ate_env_rl import Client, EnvironmentStatus, NotFoundError, SuspendMode
 
+from nemo_gym_substrate import _compat
 from nemo_gym_substrate import provider as provider_mod
 from nemo_gym_substrate._compat import (
+    NEMO_GYM_AVAILABLE,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -260,6 +263,21 @@ def test_exec_as_the_image_user_runs_unwrapped_and_probes_once():
                 assert result.return_code == 0 and result.error_type is None
             assert _commands(fake).count(provider_mod._USER_PROBE) == 1
             assert _commands(fake)[-1] == "id"
+
+    run(t())
+
+
+def test_concurrent_execs_as_a_user_share_one_probe():
+    async def t():
+        async with stack() as (provider, fake):
+            fake.image_user(provider_mod._USER_PROBE, "app", 1000, sudo="passwordless")
+            handle = await provider.create(SandboxSpec())
+            # Three first execs at once: one probe, and each command wrapped
+            # with what it found.
+            results = await asyncio.gather(*(provider.exec(handle, "id", user="root") for _ in range(3)))
+            assert [(r.return_code, r.error_type) for r in results] == [(0, None)] * 3
+            assert _commands(fake).count(provider_mod._USER_PROBE) == 1
+            assert _commands(fake).count("sudo -n -u root sh -c id") == 3
 
     run(t())
 
@@ -745,6 +763,16 @@ def test_create_rejects_invalid_ports():
                 ((True,), TypeError, "integers"),  # bool is an int subclass
                 (("6000",), TypeError, "integers"),
             ]
+            if NEMO_GYM_AVAILABLE:
+                # nemo-gym's own SandboxSpec checks the range and the type
+                # first, and turns a numeric string into an int; the provider
+                # still refuses the guest's port.
+                cases = [
+                    ((0,), ValueError, "between 1 and 65535"),
+                    ((70000,), ValueError, "between 1 and 65535"),
+                    ((80,), ValueError, "guest"),
+                    ((True,), ValueError, "Invalid sandbox TCP port"),
+                ]
             for ports, error, why in cases:
                 before = len(fake.envs)
                 with pytest.raises(error, match=why):
@@ -1324,3 +1352,155 @@ def test_a_shared_sandbox_is_not_parked_when_idle():
                 await borrower.aclose()
 
     run(t())
+
+
+def test_serialize_handle_waits_out_a_park_under_way():
+    async def t():
+        config = {"suspend_policy": "pause_after_exec", "idle_before_suspend_s": 0.05}
+        async with stack(config) as (provider, fake):
+            # Three state reads at 0.25 s each keep the sandbox SUSPENDING for
+            # a while once the idle park reaches the API, which it does before
+            # the sandbox is shared.
+            fake.suspend_settle_polls = 3
+            handle = await provider.create(SandboxSpec())
+            await _eventually(lambda: _env_status(fake, handle.sandbox_id) == EnvironmentStatus.SUSPENDING)
+            assert _parks(fake, handle.sandbox_id) == [LOCAL]
+            descriptor = await provider.serialize_handle(handle)
+            # The descriptor comes out once the park settled: the borrower's
+            # first call wakes a parked sandbox instead of failing on one
+            # mid-transition, as a guest call on a SUSPENDING sandbox does in
+            # the fake and on the router.
+            assert _env_status(fake, handle.sandbox_id) == EnvironmentStatus.PAUSED
+            borrower = _borrower(provider, PAUSE)
+            try:
+                rebuilt = await borrower.connect(descriptor)
+                result = await borrower.exec(rebuilt, "echo hi")
+                assert (result.return_code, result.error_type) == (0, None)
+                await provider.exec(handle, "echo hi")
+                await asyncio.sleep(0.1)
+                # No park since the sandbox was shared, from either process.
+                assert _parks(fake, handle.sandbox_id) == [LOCAL]
+            finally:
+                await borrower.aclose()
+
+    run(t())
+
+
+def test_an_idle_park_gives_up_on_a_sandbox_shared_while_it_waited_for_the_lock():
+    async def t():
+        config = {"suspend_policy": "pause_after_exec", "idle_before_suspend_s": 0.05}
+        async with stack(config) as (provider, fake):
+            handle = await provider.create(SandboxSpec())
+            state = provider._parking_state(handle)
+            # Hold the parking lock across the idle wait, as a pause() under
+            # way does: the idle park passes its wait and queues on the lock,
+            # past the point where serialize_handle can drop it.
+            async with state.lock:
+                await asyncio.sleep(0.1)
+                assert state.parking == 1 and fake.suspends == []
+                sharing = asyncio.create_task(provider.serialize_handle(handle))
+                await asyncio.sleep(0.02)
+                assert not sharing.done()
+            descriptor = await sharing
+            await asyncio.sleep(0.1)
+            # The park got the lock first, found the sandbox shared and did nothing.
+            assert fake.suspends == []
+            assert _env_status(fake, handle.sandbox_id) == EnvironmentStatus.RUNNING
+            assert descriptor["sandbox_id"] == handle.sandbox_id
+
+    run(t())
+
+
+# -- capabilities against the installed nemo-gym -------------------------------
+
+# The optional capabilities of nemo_gym.sandbox.providers.base this provider
+# implements (docs/plans/nemo-gym/README.md section 2), and the ones it does
+# not (section 3). A capability is a Protocol in that module other than the
+# provider protocol itself and the PTY session. One nemo-gym adds is in
+# neither set, thus the check fails until the plan records a decision for it;
+# one nemo-gym drops or renames among _IMPLEMENTED fails it too. A name
+# nemo-gym drops among _NOT_IMPLEMENTED stays there without a signal: v0.7.0
+# lacks four of these names, thus the check cannot require that each exists.
+_IMPLEMENTED = {"ConnectableProvider", "SupportsSandboxEndpoint", "SupportsSandboxPauseResume"}
+_NOT_IMPLEMENTED = {
+    "SupportsSandboxBackgroundServices",
+    "SupportsSandboxIndependentUploads",
+    "SupportsSandboxNetwork",
+    "SupportsSandboxPortForwarding",
+    "SupportsSandboxPty",
+    "SupportsSandboxPtyAttach",
+    "SupportsSandboxPullPolicy",
+    "SupportsSandboxRuntimeRequirements",
+    "SupportsSandboxServiceOptions",
+    "SupportsSandboxSharedStorage",
+    "SupportsSandboxSidecars",
+}
+_NOT_CAPABILITIES = {"SandboxProvider", "SandboxPtySession"}
+
+_needs_nemo_gym = pytest.mark.skipif(importlib.util.find_spec("nemo_gym") is None, reason="needs nemo-gym installed")
+
+
+def _check_capabilities_match_the_plan() -> None:
+    from typing import is_protocol  # Python >= 3.13, nemo-gym's floor
+
+    from nemo_gym.sandbox.providers import base
+    from nemo_gym.sandbox.providers.registry import get_provider_class
+
+    # _compat.py falls back to its mirrors when a name it imports is gone from
+    # nemo-gym; the rest of the suite then passes against the mirrors.
+    # SandboxEndpoint has a fallback of its own that leaves NEMO_GYM_AVAILABLE
+    # true, thus each name _compat.py exports is compared with nemo-gym's.
+    assert NEMO_GYM_AVAILABLE, "nemo-gym is installed but _compat.py fell back to its mirrors"
+    for name in _compat.__all__:
+        if name != "NEMO_GYM_AVAILABLE":
+            assert getattr(_compat, name) is getattr(base, name, None), f"_compat.{name} is a mirror, not nemo-gym's"
+    provider = SubstrateSandboxProvider({"connection": {"api_url": "127.0.0.1:1"}})
+    names = {n for n, obj in vars(base).items() if isinstance(obj, type) and is_protocol(obj)} - _NOT_CAPABILITIES
+    assert names - _IMPLEMENTED - _NOT_IMPLEMENTED == set(), "a new nemo-gym capability: decide it in the plan"
+    implemented = {n for n in names if isinstance(provider, getattr(base, n))}
+    assert implemented == _IMPLEMENTED, "the implemented capabilities differ from the plan"
+    # The entry point resolves to this provider, not to a built-in of the same name.
+    assert get_provider_class("substrate") is SubstrateSandboxProvider
+
+
+@_needs_nemo_gym
+def test_capabilities_match_the_plan():
+    _check_capabilities_match_the_plan()
+
+
+@_needs_nemo_gym
+def test_capability_check_fails_on_a_mirror_fallback(monkeypatch):
+    from dataclasses import dataclass, field
+
+    @dataclass(frozen=True)
+    class SandboxEndpoint:  # the mirror _compat.py builds when nemo-gym lacks the name
+        endpoint: str
+        headers: dict[str, str] = field(default_factory=dict)
+
+    monkeypatch.setattr(_compat, "SandboxEndpoint", SandboxEndpoint)
+    with pytest.raises(AssertionError, match="SandboxEndpoint is a mirror"):
+        _check_capabilities_match_the_plan()
+
+
+@_needs_nemo_gym
+def test_capability_check_fails_on_an_undecided_protocol(monkeypatch):
+    from typing import Protocol, runtime_checkable
+
+    from nemo_gym.sandbox.providers import base
+
+    @runtime_checkable
+    class DummyProvider(Protocol):  # a capability without the Supports prefix
+        async def dummy(self) -> None: ...
+
+    monkeypatch.setattr(base, "DummyProvider", DummyProvider, raising=False)
+    with pytest.raises(AssertionError, match="decide it in the plan"):
+        _check_capabilities_match_the_plan()
+
+
+@_needs_nemo_gym
+def test_capability_check_fails_on_a_dropped_implemented_capability(monkeypatch):
+    from nemo_gym.sandbox.providers import base
+
+    monkeypatch.delattr(base, "ConnectableProvider")
+    with pytest.raises(AssertionError, match="implemented capabilities differ"):
+        _check_capabilities_match_the_plan()

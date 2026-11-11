@@ -478,8 +478,10 @@ class SubstrateSandboxProvider:
         self._park_mode: SuspendMode | None = _POLICY_MODES.get(self._create.suspend_policy)
         self._local_refused = False
         # The user switch per sandbox id, probed on the first exec that names a
-        # user and dropped on close.
+        # user and dropped on close; the lock per sandbox id makes concurrent
+        # first execs share that one probe.
         self._user_switch: dict[str, _UserSwitch] = {}
+        self._user_probe_lock: dict[str, asyncio.Lock] = {}
         # The channel is opened lazily so constructing a provider never dials.
         self._client: Client | None = client
         self._owns_client = client is None
@@ -649,21 +651,27 @@ class SubstrateSandboxProvider:
         return result
 
     async def _user_switch_for(self, handle: SandboxHandle) -> _UserSwitch | SandboxExecResult:
-        """The sandbox's user switch, probed once; a probe the sandbox could not
-        run is returned as its failure result and not cached. The cached switch
-        holds for the sandbox's life: a setup command that installs or unlocks
-        sudo later does not change it."""
+        """The sandbox's user switch, probed once; execs that arrive while the
+        probe runs wait for it. A probe the sandbox could not run is returned as
+        its failure result and not cached. The cached switch holds for the
+        sandbox's life: a setup command that installs or unlocks sudo later
+        does not change it."""
         switch = self._user_switch.get(handle.sandbox_id)
         if switch is not None:
             return switch
-        probe = await self._run(
-            handle, ["sh", "-c", _USER_PROBE], cwd="", env={},
-            guest_timeout=_PROBE_TIMEOUT_S, timeout_s=_PROBE_TIMEOUT_S, what="user probe",
-        )
-        if probe.error_type:
-            return probe
-        switch = self._user_switch[handle.sandbox_id] = _parse_user_probe(probe.stdout)
-        return switch
+        lock = self._user_probe_lock.setdefault(handle.sandbox_id, asyncio.Lock())
+        async with lock:
+            switch = self._user_switch.get(handle.sandbox_id)
+            if switch is not None:
+                return switch  # the exec that held the lock probed
+            probe = await self._run(
+                handle, ["sh", "-c", _USER_PROBE], cwd="", env={},
+                guest_timeout=_PROBE_TIMEOUT_S, timeout_s=_PROBE_TIMEOUT_S, what="user probe",
+            )
+            if probe.error_type:
+                return probe
+            switch = self._user_switch[handle.sandbox_id] = _parse_user_probe(probe.stdout)
+            return switch
 
     @staticmethod
     def _sandbox_failure(handle: SandboxHandle, exc: EnvError) -> str:
@@ -813,10 +821,15 @@ class SubstrateSandboxProvider:
 
         From here on this process does not park the sandbox when it is idle,
         because the borrower's calls do not pass through this provider; an
-        explicit ``pause()`` still parks it."""
+        explicit ``pause()`` still parks it. A park already under way finishes
+        first, thus the descriptor never names a sandbox mid-transition, which
+        the borrower could not wake."""
         state = self._parking_state(handle)
         state.shared = True
         self._cancel_pending_park(state)
+        # A park past its idle wait holds the lock until the sandbox settles.
+        async with state.lock:
+            pass
         raw = handle.raw or {}
         return {
             "sandbox_id": handle.sandbox_id,
@@ -930,6 +943,7 @@ class SubstrateSandboxProvider:
     async def close(self, handle: SandboxHandle) -> None:
         atespace = self._atespace_of(handle.raw or {})
         self._user_switch.pop(handle.sandbox_id, None)
+        self._user_probe_lock.pop(handle.sandbox_id, None)
         state = self._parking.pop(handle.sandbox_id, None)
         if state is None:
             await self._best_effort_delete(handle.sandbox_id, atespace)
@@ -1108,7 +1122,8 @@ class SubstrateSandboxProvider:
         state.parking += 1
         try:
             async with state.lock:
-                if state.inflight or state.parked or self._park_mode is None:
+                # shared: serialize_handle ran while this park waited for the lock.
+                if state.inflight or state.parked or state.shared or self._park_mode is None:
                     return
                 status = await self._park(handle, self._park_mode)
                 state.parked = status in _PARKED
