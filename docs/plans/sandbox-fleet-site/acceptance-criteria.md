@@ -1,7 +1,8 @@
 # Acceptance criteria: sandbox fleet site
 
-Status: draft, 2026-10-30. Each criterion has a command and an expected result. Evidence goes into
-`evidence/` in this directory, one file per acceptance pass, with the commit of each component.
+Status: accepted (#223); last checked 2026-11-09 against `f10c68c`. Each criterion has a command and
+an expected result. Evidence goes into `evidence/` in this directory, one file per acceptance pass,
+with the commit of each component.
 
 | ID    | Title                                    | Phase |
 | ----- | ---------------------------------------- | ----- |
@@ -17,6 +18,8 @@ Status: draft, 2026-10-30. Each criterion has a command and an expected result. 
 | FS-10 | Schema and secrets                       | 3     |
 | FS-11 | Run artifacts resolve by run id          | 6     |
 | FS-12 | Documentation                            | 8     |
+| FS-13 | Plan drift check against main            | each  |
+| FS-14 | Reporter against the Kind Substrate      | 3     |
 
 ## FS-1: Inventory freshness
 
@@ -102,11 +105,24 @@ Status: draft, 2026-10-30. Each criterion has a command and an expected result. 
 
 ## FS-11: Runs
 
-- Command: run the GRPO example with `REPORT_DIR` on the bucket path and tracing on; open
-  `/runs/<run_id>`.
-- Expected: the run report table, the HTML report link, the span file and the Cloud Trace link all
-  resolve; the waterfall renders from the span file.
-- Pass rule: holds.
+- Command: three steps for the trainer source, because `examples/grpo/grpo_substrate_train.py` alone
+  writes only the RunReport pair, `<strategy>_<n>tasks_<stamp>.txt` and `.json` (`RunReport.write`),
+  and no span file. (1) Run the example with `REPORT_DIR=/tmp/fs11`, `ENABLE_TRACING=1` and
+  `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector whose traces pipeline has the `file` exporter of
+  `tests/telemetry/otel-collector.yaml`, then copy its `/data/spans.jsonl` next to the reports, as
+  the telemetry plan's acceptance pass does (the Python client exports over OTLP only and writes no
+  local span file). (2)
+  `python benchmarking/telemetry_report/build_report.py --report /tmp/fs11 --spans /tmp/fs11/spans.jsonl --title "$RUN_ID" --out /tmp/fs11`,
+  which adds `run.json` and `report.html`. (3)
+  `gcloud storage cp /tmp/fs11/* "gs://$BUCKET/v1/runs/$RUN_ID/"`, where `RUN_ID` is the example's
+  run id. For the benchmark source, `bench upload` one validated bundle into a bucket named in
+  `FLEET_BENCH_BUCKETS`. Open `/runs/$RUN_ID` and `/runs/<bundle folder>`.
+- Expected: the run report table, the HTML report link and the span file resolve; the Cloud Trace
+  link opens the trace id of the `ate_env_fleet.run` span, which the site reads from `spans.jsonl`
+  (neither the RunReport nor the example records a trace id); the waterfall renders from the span
+  file; the bundle page shows `run_window.json`, `report.json` and `system_description.json` and
+  marks a `_traced` folder as traced.
+- Pass rule: holds for both sources.
 
 ## FS-12: Documentation
 
@@ -114,3 +130,29 @@ Status: draft, 2026-10-30. Each criterion has a command and an expected result. 
   bucket layout, the freshness budget and the tenancy rule; `CHANGELOG.md` lists the reporter, the
   manifests and the site.
 - Pass rule: present and checked against the code in the final pull request.
+
+## FS-13: Plan drift check
+
+- Command: the seven steps of the README's "Drift check" section against the `main` the pull request
+  targets.
+- Expected: each step holds, or the plan is updated in the same pull request; the audit section of
+  `research.md` records the commit and the date.
+- Pass rule: the last-checked lines of the six files that carry one, `README.md`,
+  `execution-plan.md`, `acceptance-criteria.md`, `interfaces.md`, `prd.md` and `quickstart.md`, name
+  one commit, and that commit is the pull request's merge-base with `main` or the `main` head
+  recorded in `research.md` on the audit date. A merge to `main` after the audit does not fail the
+  check; it is the cue to run it again.
+
+## FS-14: Reporter against the Kind Substrate
+
+- Command: in `hack/ci/e2e.py`, after the manifests are applied, run
+  `ate-env-reporter -out-dir /tmp/snap -project kind -cluster "$KIND_CLUSTER_NAME" -interval 5s -snapshot-interval 5s`
+  for three ticks against the Kind `ateapi` with the reporter's member merged into the global
+  `viewer` binding. Kind has no GKE metadata server, so `-project` and `-cluster` are explicit
+  (`DecodeSnapshot` rejects a snapshot without them); `-out-dir` stands in for `-bucket`; the 5 s
+  snapshot interval keeps one timestamped file per tick.
+- Expected: `/tmp/snap/v1/inventory/kind/$KIND_CLUSTER_NAME/latest.json` and three files under
+  `/tmp/snap/v1/snapshots/kind/$KIND_CLUSTER_NAME/` decode with `DecodeSnapshot`; the actor and
+  worker counts equal `kubectl ate get actor -A` and `kubectl ate get worker`; `generated_at`
+  advances from one snapshot file to the next.
+- Pass rule: holds in the `E2E Kind and Smoke Test` job.

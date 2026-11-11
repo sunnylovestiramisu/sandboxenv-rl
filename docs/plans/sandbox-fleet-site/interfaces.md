@@ -1,7 +1,11 @@
 # Interface contracts: sandbox fleet site
 
-Status: draft, 2026-10-30. Names below are proposals until the first pull request lands; the lead
-confirms them and records changes in [decisions.md](./decisions.md).
+Status: accepted (#223); last checked 2026-11-09 against `f10c68c`. The snapshot schema in the next
+section is code since pull request 1 (#226, `internal/inventory`): its object kinds, field names and
+rules are fixed, and a change to them is a schema change. The names in the other sections (bucket
+layout, reporter flags and identity, event stream and tables, collector pipelines, site routes and
+environment variables, named queries, Terraform) are proposals until their pull request lands; the
+lead confirms them and records changes in [decisions.md](./decisions.md).
 
 ## Bucket layout
 
@@ -10,7 +14,8 @@ gs://<bucket>/v1/inventory/<project>/<cluster>/latest.json          rewritten ev
 gs://<bucket>/v1/snapshots/<project>/<cluster>/<ts>.json            hourly, lifecycle 30 days (its own prefix, so no rule can touch latest.json)
 gs://<bucket>/v1/events/<dt=YYYY-MM-DD>/...                          Cloud Storage subscription output, lifecycle 400 days
 gs://<bucket>/v1/traces/<year>/<month>/<day>/...                     google_cloud_storage exporter output, gzip
-gs://<bucket>/v1/runs/<run_id>/                                      RunReport .txt and .json, report.html, spans.jsonl
+gs://<bucket>/v1/runs/<run_id>/                                      RunReport .txt and .json, spans.jsonl, run.json and report.html (FS-11 lists the three steps)
+gs://<bench bucket>/<YYYY-MM-DD>_<model-family>-<size>_<dataset>_<nickname>[_traced]/   benchmark bundles from bench upload (#270)
 ```
 
 The site discovers clusters by listing `v1/inventory/*/*/latest.json`. There is no shared index
@@ -146,6 +151,16 @@ object, so no two writers touch one object.
 }
 ```
 
+Additions planned for pull request 2, additive to v1, with the Go `Worker` and `Actor` structs in
+`internal/inventory/inventory.go`, `internal/inventory/v1/snapshot.schema.json` and the golden
+fixture updated together (the schema sets `additionalProperties: false` on `$defs/Worker` and
+`$defs/Actor`, `inventory_test.go` validates the golden against it, and `DecodeSnapshot` calls
+`dec.DisallowUnknownFields()` before the schema validation, thus a new field fails that test until
+the schema changes, and a snapshot that carries it fails to decode until the struct has the field):
+`workers[].labels`, the labels `ListWorkers` returns, because a placement domain is the distinct
+label set of a pool's workers, as `ListPlacementDomains` computes it; and
+`actors[].worker_selector`, the per-environment selector from #207.
+
 Rules: timestamps RFC 3339 UTC; `state` is the `ateapi.ActorState` value lowercased, the same
 vocabulary as the event stream; `worker` and `name` of workers are opaque control-plane names, never
 parsed; labels pass through except keys under `ate.`; no key named `token`, `password` or
@@ -153,30 +168,40 @@ parsed; labels pass through except keys under `ate.`; no key named `token`, `pas
 
 ## Reporter, `cmd/ate-env-reporter`
 
-| Flag                                                        | Default                                 | Meaning                                                                                            |
-| ----------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `-bucket`                                                   | required                                | destination bucket                                                                                 |
-| `-project`, `-cluster`, `-location`                         | from the GKE metadata server when empty | snapshot identity                                                                                  |
-| `-interval`                                                 | `5s`                                    | poll and write interval; backs off to 60 s on consecutive errors                                   |
-| `-snapshot-interval`                                        | `1h`                                    | how often `latest.json` is also kept under `snapshots/`                                            |
-| `-ateapi-endpoint`, `-ateapi-token-file`, `-ateapi-ca-file` | as `ate-env-api`                        | Substrate control plane                                                                            |
-| `-health-listen-addr`                                       | `:9091`                                 | `/healthz` and `/readyz`                                                                           |
-| `-enable-tracing`, `-metrics-listen-addr`                   | off                                     | the same telemetry flags as `ate-env-api`; metric `ate_env_reporter_poll_duration_seconds{status}` |
+| Flag                                                        | Default                                 | Meaning                                                                                                                                                                       |
+| ----------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-bucket`                                                   | required unless `-out-dir` is set       | destination bucket                                                                                                                                                            |
+| `-project`, `-cluster`, `-location`                         | from the GKE metadata server when empty | snapshot identity; off GKE, `-project` and `-cluster` are required (`DecodeSnapshot` rejects a snapshot without them) and `-location` stays empty                             |
+| `-interval`                                                 | `5s`                                    | poll and write interval; backs off to 60 s on consecutive errors                                                                                                              |
+| `-snapshot-interval`                                        | `1h`                                    | how often `latest.json` is also kept under `snapshots/`                                                                                                                       |
+| `-out-dir`                                                  | empty                                   | write the bucket layout (`v1/inventory/`, `v1/snapshots/`) under a local directory instead of a bucket, which makes `-bucket` optional (unit tests, the Kind end-to-end case) |
+| `-ateapi-endpoint`, `-ateapi-token-file`, `-ateapi-ca-file` | as `ate-env-api`                        | Substrate control plane                                                                                                                                                       |
+| `-health-listen-addr`                                       | `:9091`                                 | `/healthz` and `/readyz`                                                                                                                                                      |
+| `-enable-tracing`, `-metrics-listen-addr`                   | off                                     | the same telemetry flags as `ate-env-api`; metric `ate_env_reporter_poll_duration_seconds{status}`                                                                            |
 
 Identity: Kubernetes ServiceAccount `ate-env-reporter` in namespace `ate-env-reporter` labeled
 `ate.dev/api-access=true`; projected token with audience `api.ate-system.svc`; Workload Identity to
 `ate-env-reporter@<project>.iam.gserviceaccount.com` with `roles/storage.objectUser` on the bucket,
 restricted by an IAM condition to `v1/inventory/<project>/<cluster>/` and
 `v1/snapshots/<project>/<cluster>/` (an overwrite needs `storage.objects.delete` next to `create`);
-global AccessPolicy binding `viewer` to
-`user:system:serviceaccount:ate-env-reporter:ate-env-reporter`; ClusterRole with `get`, `list`,
-`watch` on `workerpools.ate.dev`, `sandboxconfigs.ate.dev`, `deployments.apps`, `services`, `pods`.
+the principal `user:system:serviceaccount:ate-env-reporter:ate-env-reporter` merged into the global
+AccessPolicy's `viewer` binding (one object for the whole control plane: `ate-env manifest reporter`
+prints the binding and the operator merges it with `kubectl ate get access-policy --global -o yaml`
+and `kubectl ate update access-policy --global -f <file>`, as the README describes for
+`ate-env-api`'s `ListPlacementDomains`); ClusterRole with `get`, `list`, `watch` on
+`workerpools.ate.dev`, `sandboxconfigs.ate.dev`, `deployments.apps`, `services`, `pods`.
 
 Behavior: one `ListActors` across atespaces and one `ListWorkers` per tick, paged at 1000;
 `ListAtespaces`, `ListActorTemplates` and `ListTags` every tenth tick or on a template-name miss;
 Kubernetes objects from informers. Each tick rewrites `latest.json` with one atomic object write,
 even when nothing but `generated_at` changed, so the object generation and the JSON `generated_at`
 move together and the site revalidates by generation. The reporter never calls `ate-env-api`.
+
+Tests: unit tests against `internal/internaltest/fakecontrol`, which pull request 2 extends with
+`ListAtespaces`, `ListActorTemplates` and `ListTags` (it has `AddWorker`, `ListWorkers`,
+`ListActors` and `GetAtespace` today); one end-to-end case in `hack/ci/e2e.py` runs the reporter
+with `-out-dir`, `-project` and `-cluster` against the Kind Substrate and accepts the output with
+`DecodeSnapshot` (FS-14).
 
 ## Event stream
 
@@ -226,18 +251,23 @@ bucket and `roles/pubsub.publisher` on the topic.
 Go, standard library HTTP, server-rendered HTML with inline SVG and small inline scripts, no
 external assets, the same zero-dependency style as the explorer plan and `build_report.py`.
 
-| Route                                                    | Returns                                                  |
-| -------------------------------------------------------- | -------------------------------------------------------- |
-| `GET /`                                                  | Fleet page                                               |
-| `GET /clusters/{project}/{cluster}`                      | Cluster page                                             |
-| `GET /actors/{uid}`                                      | Actor page                                               |
-| `GET /runs`, `GET /runs/{run_id}`                        | Runs                                                     |
-| `GET /live`                                              | last 200 transitions                                     |
-| `GET /api/v1/clusters`                                   | the index built from `latest.json` objects               |
-| `GET /api/v1/clusters/{project}/{cluster}`               | that snapshot                                            |
-| `GET /api/v1/actors/{uid}/events?since=`                 | rows from `actor_events`                                 |
-| `GET /api/v1/metrics/{name}?cluster=&namespace=&window=` | a named PromQL query from an allow-list, never free-form |
-| `GET /healthz`                                           | 200                                                      |
+Runs page sources: `v1/runs/` in the inventory bucket for trainer run reports, and the benchmark
+buckets in `FLEET_BENCH_BUCKETS` (comma-separated), where a run is a folder whose name passes
+`bench`'s `ValidateGCSFolderName` and whose `run_window.json`, `report.json` and
+`system_description.json` the page reads.
+
+| Route                                                    | Returns                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `GET /`                                                  | Fleet page                                                                                 |
+| `GET /clusters/{project}/{cluster}`                      | Cluster page                                                                               |
+| `GET /actors/{uid}`                                      | Actor page                                                                                 |
+| `GET /runs`, `GET /runs/{id}`                            | the run index; one run, where `{id}` is a trainer `run_id` or a bundle folder name (FS-11) |
+| `GET /live`                                              | last 200 transitions                                                                       |
+| `GET /api/v1/clusters`                                   | the index built from `latest.json` objects                                                 |
+| `GET /api/v1/clusters/{project}/{cluster}`               | that snapshot                                                                              |
+| `GET /api/v1/actors/{uid}/events?since=`                 | rows from `actor_events`                                                                   |
+| `GET /api/v1/metrics/{name}?cluster=&namespace=&window=` | a named PromQL query from an allow-list, never free-form                                   |
+| `GET /healthz`                                           | 200                                                                                        |
 
 Auth: IAP in front; the service verifies `x-goog-iap-jwt-assertion` against the IAP audience on
 every request and reads the user email from it. Service account roles: `roles/storage.objectViewer`

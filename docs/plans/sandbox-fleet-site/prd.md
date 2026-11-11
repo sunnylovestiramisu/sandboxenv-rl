@@ -1,6 +1,7 @@
 # PRD: sandbox fleet site
 
-Status: draft, 2026-10-30. Design: [README.md](./README.md). Evidence: [research.md](./research.md).
+Status: accepted (#223); last checked 2026-11-09 against `f10c68c`. Design:
+[README.md](./README.md). Evidence: [research.md](./research.md).
 
 ## Problem
 
@@ -31,7 +32,8 @@ Read-only. One Cloud Run service behind IAP. Pages in the first release:
    allocation per worker, actors with filters by atespace, template, state and node.
 3. Actor: identity, current state, transition history with timestamps and operations, crash record,
    usage samples when present, links to the trace of each transition.
-4. Runs: run reports from the bucket, the HTML report, the span file, the Cloud Trace link.
+4. Runs: trainer run reports from the bucket, the benchmark bundles `bench upload` writes (#270) by
+   folder name, the HTML report, the span file, the Cloud Trace link.
 5. Live: the most recent transitions across the fleet.
 
 Behind the pages, a JSON API with the same data, so scripts and the benchmark tools can read it.

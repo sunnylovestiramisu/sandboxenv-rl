@@ -1,10 +1,10 @@
 # Quickstart: deploy the fleet site
 
-Status: plan-stage runbook, 2026-11-04. The Terraform in pull request 6 of the
-[execution plan](./execution-plan.md) replaces the `gcloud` commands below with one `apply` per
-project; `docs/fleet-site.md` then becomes the user-facing guide. Until then this is the order of
-operations and the exact resources, with the open parameters as variables. Steps marked "after PR n"
-need a component that pull request n adds.
+Status: plan-stage runbook, written 2026-11-04; last checked 2026-11-09 against `f10c68c`. The
+Terraform in pull request 6 of the [execution plan](./execution-plan.md) replaces the `gcloud`
+commands below with one `apply` per project; `docs/fleet-site.md` then becomes the user-facing
+guide. Until then this is the order of operations and the exact resources, with the open parameters
+as variables. Steps marked "after PR n" need a component that pull request n adds.
 
 ```bash
 export CENTRAL_PROJECT=...      # hosts the bucket, the topic, BigQuery and Cloud Run
@@ -14,6 +14,7 @@ export IAP_GROUP=group:...      # who may open the site
 export CLUSTER_PROJECT=...      # repeat the per-cluster section for each cluster project
 export CLUSTER=...              # GKE cluster name, also the reporter's cluster label
 export CLUSTER_LOCATION=...     # the cluster's region or zone
+export BENCH_BUCKET=...         # optional: the bucket, or comma-separated buckets, bench upload writes bundles to
 ```
 
 ## 1. Central project, once
@@ -106,6 +107,10 @@ for sa in ate-fleet-site ate-env-reporter ate-env-collector; do
 done
 P="$CENTRAL_PROJECT.iam.gserviceaccount.com"
 gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member "serviceAccount:ate-fleet-site@$P"    --role roles/storage.objectViewer
+IFS=, read -ra BENCH_BUCKETS <<<"${BENCH_BUCKET:-}"   # one grant per bucket; FLEET_BENCH_BUCKETS is comma-separated
+for b in "${BENCH_BUCKETS[@]}"; do
+  [ -n "$b" ] && gcloud storage buckets add-iam-policy-binding "gs://$b" --member "serviceAccount:ate-fleet-site@$P" --role roles/storage.objectViewer
+done
 gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member "serviceAccount:ate-env-collector@$P" --role roles/storage.objectCreator
 gcloud projects add-iam-policy-binding "$CENTRAL_PROJECT" --member "serviceAccount:ate-fleet-site@$P" --role roles/monitoring.viewer
 gcloud projects add-iam-policy-binding "$CENTRAL_PROJECT" --member "serviceAccount:ate-fleet-site@$P" --role roles/bigquery.jobUser
@@ -169,9 +174,12 @@ In the cluster, after the components exist:
   `ate-env manifest --metrics-port 9090 --pod-monitoring` renders for each `ate-env` namespace.
 - PR 2:
   `ate-env manifest reporter --bucket "$BUCKET" --project "$CLUSTER_PROJECT" --cluster "$CLUSTER" | kubectl apply -f -`,
-  then the Substrate `viewer` AccessPolicy for
-  `user:system:serviceaccount:ate-env-reporter:ate-env-reporter`, global so `ListActors` across
-  atespaces is allowed. Verify the role on one atespace first (phase 0 of the execution plan).
+  then merge `user:system:serviceaccount:ate-env-reporter:ate-env-reporter` into the global
+  AccessPolicy's `viewer` binding with `kubectl ate get access-policy --global -o yaml` and
+  `kubectl ate update access-policy --global -f <file>` (both commands refuse to run without `-a` or
+  `--global`), the way the README does it for `ate-env-api`'s `ListPlacementDomains`
+  (`ate-env manifest access-policy --global` prints that binding). The global policy is one object;
+  never create a second one.
 - Check:
   `gcloud storage cat "gs://$BUCKET/v1/inventory/$CLUSTER_PROJECT/$CLUSTER/latest.json" | head`
   shows `generated_at` within one interval of now, and
@@ -190,13 +198,19 @@ gcloud services identity create --service iap.googleapis.com --project "$CENTRAL
 gcloud run deploy ate-fleet-site --project "$CENTRAL_PROJECT" --region "$REGION" \
   --image "$REGION-docker.pkg.dev/$CENTRAL_PROJECT/ate-env/ate-env-fleet-site:latest" \
   --service-account "ate-fleet-site@$P" --no-allow-unauthenticated --iap --min-instances 1 \
-  --set-env-vars "FLEET_BUCKET=$BUCKET,FLEET_EVENTS_TABLE=$CENTRAL_PROJECT.fleet.actor_events,FLEET_METRICS_PROJECT=$CENTRAL_PROJECT"
+  --set-env-vars "^;^FLEET_BUCKET=$BUCKET;FLEET_EVENTS_TABLE=$CENTRAL_PROJECT.fleet.actor_events;FLEET_METRICS_PROJECT=$CENTRAL_PROJECT;FLEET_BENCH_BUCKETS=${BENCH_BUCKET:-}"
 NUMBER=$(gcloud projects describe "$CENTRAL_PROJECT" --format 'value(projectNumber)')
 gcloud run services add-iam-policy-binding ate-fleet-site --project "$CENTRAL_PROJECT" --region "$REGION" \
   --member "serviceAccount:service-$NUMBER@gcp-sa-iap.iam.gserviceaccount.com" --role roles/run.invoker
 gcloud iap web add-iam-policy-binding --project "$CENTRAL_PROJECT" --region "$REGION" \
   --resource-type cloud-run --service ate-fleet-site --member "$IAP_GROUP" --role roles/iap.httpsResourceAccessor
 ```
+
+The `^;^` prefix makes `;` the pair separator of `--set-env-vars`, whose default is `,`;
+`FLEET_BENCH_BUCKETS` is itself comma-separated ([interfaces.md](./interfaces.md)), so a
+`BENCH_BUCKET` with more than one bucket would otherwise split into bogus pairs. Section 1 grants
+the site account `roles/storage.objectViewer` on each bucket of that list; pull request 6 checks
+both ends with a two-bucket `BENCH_BUCKET`.
 
 IAP on Cloud Run authenticates users of the organization with a Google-managed OAuth client; a
 project without an organization needs the console once. The environment variable names are the

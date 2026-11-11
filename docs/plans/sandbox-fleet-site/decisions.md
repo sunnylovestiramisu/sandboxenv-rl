@@ -75,3 +75,23 @@ Append-only. Each entry: date, who, what, why.
   through `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` set on that Deployment, pointing at the self-managed
   collector. The managed collector does not export logs to Pub/Sub, and the shared `ate-otel-config`
   cannot carry a differing per-signal endpoint without breaking atelet's relay.
+- 2026-11-09, orchestrator: audit of `main` at `f10c68c` (research.md, "Audit of main"). The plan's
+  assumptions hold; the status lines now carry a last-checked commit, the README has a drift-check
+  procedure, and FS-13 records each run of it, following the convention the other plans under
+  `docs/plans/` adopted.
+- 2026-11-09, orchestrator: phase 0's question about the Substrate `viewer` role is answered by
+  #235: `ate-env manifest access-policy --global` already grants `ate-env-api` the global `viewer`
+  binding for `ListPlacementDomains`, and the README states the merge rule. The reporter's principal
+  joins that binding; it never creates a second global policy.
+- 2026-11-09, orchestrator: the Runs page indexes the benchmark bundles `bench upload` writes
+  (#270), by their validated folder name, next to the trainers' `REPORT_DIR` output. The site reads
+  them from the buckets in `FLEET_BENCH_BUCKETS` with a viewer role only.
+- 2026-11-09, orchestrator: schema v1 gains `workers[].labels` and `actors[].worker_selector` in
+  pull request 2, additive, with the Go `Worker` and `Actor` structs in
+  `internal/inventory/inventory.go`, `internal/inventory/v1/snapshot.schema.json` and the golden
+  fixture updated together, because `DecodeSnapshot` disallows unknown fields before it validates
+  against the schema. Placement domains are derived from worker labels as `ListPlacementDomains`
+  derives them, so the site needs no new RPC.
+- 2026-11-09, orchestrator: the reporter's acceptance runs in two places: unit tests against
+  `fakecontrol`, which pull request 2 extends with the three list calls it lacks, and one case in
+  the Kind end-to-end job against the real `ateapi` with `-out-dir` (FS-14).

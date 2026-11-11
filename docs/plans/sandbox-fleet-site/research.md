@@ -56,11 +56,15 @@ Substrate:
   (`api/infra/k8s/ate/v1/workerpool_types.go`); atecontroller emits Kubernetes Events on WorkerPool
   conditions; informers deliver changes in under a second.
 
-`ate-env-api` cannot serve a fleet inventory: `ateenv.v1alpha` has only `CreateEnvironment`,
-`GetEnvironment`, `SuspendEnvironment`, `DeleteEnvironment` and `GetServerInfo`, and its
-`ate_env_api_environments` gauge covers only the atespaces that deployment has created environments
-in (`apiservice.Server.atespaces`, at most `maxAtespaces`), cached for `DefaultEnvironmentsCacheTTL`
-(60 s, flag `-metrics-environments-ttl`).
+`ate-env-api` cannot serve a fleet inventory. When this was first written `ateenv.v1alpha` had only
+`CreateEnvironment`, `GetEnvironment`, `SuspendEnvironment`, `DeleteEnvironment` and
+`GetServerInfo`; by 2026-11-09 it also has `GetImageStatus`, `EnsureImageTemplate`,
+`ListPlacementDomains` and `WarmImage` (#209, #235), and `Environment` carries `node` and
+`worker_selector` (#207). None of them enumerates environments: `ListPlacementDomains` reads
+Substrate's workers. The gauge is unchanged: `ate-env-api`'s `ate_env_api_environments` gauge covers
+only the atespaces that deployment has created environments in (`apiservice.Server.atespaces`, at
+most `maxAtespaces`), cached for `DefaultEnvironmentsCacheTTL` (60 s, flag
+`-metrics-environments-ttl`).
 
 ### Metrics
 
@@ -143,6 +147,54 @@ needs only that Substrate's components and the ate-env collector export to the s
 | Pub/Sub BigQuery subscription                        | streaming, seconds; no code                                                                      |
 | Pub/Sub Cloud Storage subscription                   | batched files, window of at least one minute                                                     |
 | Managed Prometheus                                   | 5 s scrape floor; the troubleshooting guide recommends `offset` for the newest window            |
+
+## Audit of main, 2026-11-09
+
+Checked against `ai-on-gke/sandboxenv-rl` at `f10c68c` and the Substrate `go.mod` requires,
+`274605f1f2a8` (Substrate `main` was at `94e0a26a`). What moved since the first read, and what it
+changes in the plan:
+
+- `ate-env-api` gained `GetImageStatus`, `EnsureImageTemplate`, `ListPlacementDomains` and
+  `WarmImage`, and `Environment` gained `node` and `worker_selector` (#207, #209, #235). Still no
+  call enumerates environments, so the reporter stays. The snapshot schema gains two additive fields
+  in pull request 2: `workers[].labels`, because placement domains are the distinct label sets of a
+  pool's workers, which is how `ListPlacementDomains` computes them, and `actors[].worker_selector`.
+- The global `viewer` role is in production use: `ate-env manifest access-policy --global` renders
+  the binding `ate-env-api` needs for `ListPlacementDomains`, and the README states the merge rule
+  (one global policy object; add a member, never a second object). Phase 0's "verify the role on a
+  test atespace" is answered; the reporter's member joins the same binding.
+- Substrate at `274605f1`: `ListActors` across atespaces, the 1000-item page, the three actor event
+  names and the `viewer`, `editor`, `owner` roles are unchanged since `28520c0d`. The two API
+  changes in the range, denying streaming RPCs without an authorization rule (#3262) and removing
+  `MintActorCertificate` from `ateapi.proto` (#3427), do not touch the calls the reporter makes.
+- Kind end-to-end CI exists (#122, #214, #215, #254): the CI target in `hack/ci/targets.py` installs
+  Substrate with `ate-setup --kind`, and `hack/ci/e2e.py` applies the atespace, the access policy,
+  the token Secret, the WorkerPool and `ate-env-api`, and runs the Python end-to-end tests. The
+  reporter gets one case there against the real `ateapi`, writing to a directory instead of a bucket
+  (FS-14).
+- `internal/internaltest/fakecontrol` now has workers (`AddWorker`, `ListWorkers`, `GetWorker`) and
+  `ListActors`, `GetAtespace`, `AddTemplate`, `GetActorTemplate`, `SetState`. It lacks
+  `ListAtespaces`, `ListActorTemplates` and `ListTags`; pull request 2 adds them.
+- Benchmark bundles go to GCS (#270): `bench validate` and `bench upload` write one folder per run,
+  `<YYYY-MM-DD>_<model-family>-<size>_<dataset>_<nickname>[_traced]`, checked by
+  `ValidateGCSFolderName`, with the six files `bundle.go` requires: `system_description.json`,
+  `measurements.json`, `run_window.json`, `report.md`, `report.json`, and `events.jsonl` or
+  `events/*.jsonl`. The Runs page indexes those folders next to the trainers' `REPORT_DIR` output.
+- Metric families are unchanged: the six `ate_env_api_*` families and
+  `ate_env_guest_process_duration_seconds` in `docs/metrics.md`, the `ate_env_fleet_*` and
+  `ate_env_client_*` series in the Python client, and, on the Substrate side,
+  `ate.workerpool.workers` (an UpDownCounter) and `ate.actor.crashes` (a counter) in
+  `docs/metrics/registry/metrics.yaml` at `274605f1`, which Cloud Monitoring names
+  `ate_workerpool_workers` and `ate_actor_crashes_total`. The named queries stand; step 4 of the
+  drift check reads the two registries separately.
+- The Python package is `ate-env-rl`, import `ate_env_rl` (#232); the plan already uses that name.
+- `docs/plans/` has a convention now: unique criterion prefixes per plan (`AC-`, `AE-`, `PP-`,
+  `NG-`, `WF-`, `FS-`), a "last checked" line, and a drift-check procedure (the NeMo Gym plan's
+  section 4). This plan adopts the last-checked line and the drift check in the README; the
+  telemetry plan's "properties" are not adopted here yet.
+- Not affecting the plan: `ate-env-api` round-robins its control-plane calls across `ate-api-server`
+  pods (#236); environments that cannot start fail fast with a reason (#222), which the Actor page
+  can show later from the event stream.
 
 ## Sources
 
