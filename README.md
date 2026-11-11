@@ -47,8 +47,9 @@ storage (`gs://`) to skip a cold boot.
   [Harbor](./integrations/harbor/README.md) with no changes to those frameworks.
 - **Benchmarking and placement** ([benchmarking/swebench](./benchmarking/swebench/README.md),
   [bench harness](./cmd/benchmarking/bench/README.md)): `swebench-loader` runs SWE-bench Verified
-  images in `eval` and `steps` modes, `plan-placement` maps task images to placement domains under
-  node cache budgets, and the `bench` harness measures lifecycle phases.
+  images in `eval`, `steps`, and `open-loop` modes, `render-plan` renders trajectory mixes,
+  `plan-placement` maps task images to placement domains under node cache budgets, `preflight`
+  fills node caches for a placement plan, and the `bench` harness measures lifecycle phases.
 
 ## Architecture
 
@@ -107,8 +108,9 @@ Request-path zoom:
 | [`integrations/`](./integrations/README.md) | Framework integrations: Harbor, NeMo Gym, OpenHands, uni-agent. |
 | [`examples/`](./examples/README.md) | Runnable examples, from a Go MCP client to multi-node agentic GRPO recipes. Not supported. |
 | [`benchmarking/`](./benchmarking/README.md) | The SWE-bench loader scripts, the `bench` scenarios, the telemetry report tool and the benchmarking skills. |
-| [`internal/`](./internal) | The packages the binaries are built from: `apiservice` (the gRPC server), `ate` (the Substrate client), `mcp`, `portproxy`, `routertls`, `hostcheck`, `telemetry`, `tool`, `unknownfields`, `benchmarking/*`, the test doubles in `internaltest` (`fakecontrol`, `fakerouter`, `testcerts`) and a lifecycle walkthrough in `examples/env`. |
+| [`internal/`](./internal) | The packages the binaries are built from: `apiservice` (the gRPC server), `ate` (the Substrate client), `inventory` (fleet inventory snapshot schema), `mcp`, `portproxy`, `routertls`, `hostcheck`, `sidecarenv`, `telemetry`, `tool`, `unknownfields`, `benchmarking/*`, the test doubles and helpers in `internaltest` (`fakecontrol`, `fakerouter`, `synctestrapid`, `testcerts`) and a lifecycle walkthrough in `examples/env`. |
 | [`proto/ateenv/v1alpha`](./proto/ateenv/v1alpha) | The `ateenv.v1alpha` API: `env.proto` (`EnvironmentService`) and `guest.proto` (`ProcessService`, `FileSystemService`), with the generated Go stubs. |
+| [`proto/testdata/client-parity`](./proto/testdata/client-parity) | Shared Go and Python client conformance vectors (errors, executable names, image refs, metric families, RPC attributes, RPC coverage, semconv). |
 | [`docs/`](./docs) | [Architecture](./docs/architecture.md), [glossary](./docs/glossary.md), [observability](./docs/observability.md), the [metrics reference](./docs/metrics.md), [rootfs images and runtime layers](./docs/rootfs-images/README.md), the [threat model](./docs/security/threat-model.md), [support](./docs/support.md), [releases](./docs/release.md), the developer guides in [`docs/dev`](./docs/dev), the maintenance chores in [`docs/chores`](./docs/chores), and the plans in [`docs/plans`](./docs/plans). |
 | [`hack/`](./hack) | Repository scripts, checks and generators: the CI runners in [`hack/ci`](./hack/ci) (the Kind e2e run, the smoke test, pin and Substrate head checks), release automation in [`hack/release`](./hack/release), license boilerplate, [`hack/verify`](./hack/verify) and `metrics-docs` (renders `docs/metrics.md`). |
 | [`nix/`](./nix), [`flake.nix`](./flake.nix), [`uv.lock`](./uv.lock) | The Nix flake: the `devShell`s, the Python environments built from `uv.lock` (`python.nix`), and the CI scripts `ci-go`, `ci-python`, `ci-e2e` and `ci-release` (`ci.nix`). |
@@ -154,9 +156,12 @@ installed and tested.
 
 [`swebench-loader`](./benchmarking/swebench/README.md) drives SWE-bench Verified task images through
 the API the way a simulated RL job does: `eval` mode creates, replays, grades and deletes each task,
-and `steps` mode creates a fleet once and parks it between training steps. Image-delivery workloads
-compare image pull, image streaming and other loaders on the same images. The report breaks down
-what each phase cost.
+`steps` mode creates a fleet once and parks it between training steps, and `open-loop` fires Poisson
+task arrivals at `-arrival-rate`. `render-plan` renders a trajectory mix, `plan-placement` assigns
+task images under node cache budgets, `run -placement` steers each create into its image's domain,
+and `preflight` ensures derived templates and fills those node caches before a run. Image-delivery
+workloads compare image pull, image streaming and other loaders on the same images. The report breaks
+down what each phase cost.
 The [`bench`](./cmd/benchmarking/bench) harness runs the scenarios in
 [`benchmarking/scenarios`](./benchmarking/scenarios) (`resolve`, `render`, `prewarm`, `spinup`,
 `spindown`, `measure`, `reap`, `report`, `validate`, `upload`, `compare` and `run`), and
@@ -503,8 +508,11 @@ Each actor gets 2 CPUs and 4 GiB unless you pass `--cpu` and `--memory` (Kuberne
 derived per rootfs image inherit them.
 
 That template's container is the guest image itself. To run another image unmodified, name
-it with `--rootfs-image`: the guest is then mounted into it as a read-only OCI image volume at
-`/ate` and started from there, so the rootfs image is never rebuilt.
+it with `--rootfs-image`: the guest is then mounted into it as a read-only OCI image volume (`guest`)
+at `/ate` and started from there, so the rootfs image is never rebuilt (a hand-written base must
+either leave the `guest` volume name and `/ate` free, or mount a single digest-pinned `guest` image
+volume once alone at `/ate` with the command starting the guest there; otherwise derivation fails
+with `InvalidArgument`).
 
 ```bash
 ate-env manifest template --template py312 \
@@ -749,13 +757,13 @@ Manages process execution, I/O streaming, and signals inside the environment con
 | RPC | Description |
 | --- | ----------- |
 | `StartProcess` | Launches a process (optionally with a stdin pipe, a PTY and a timeout) and returns the `Process` resource |
-| `GetProcess` | Retrieves the process state, exit code, and timestamps |
+| `GetProcess` | Retrieves the process state, exit code, `timed_out` flag, and timestamps |
 | `StreamProcessOutput` | Streams stdout and stderr chunks; with `follow`, ends with an `exit` message carrying the final `Process` |
 | `WriteProcessInput` | Streams bytes to the process's stdin; a message with `close` sends EOF |
 | `SignalProcess` | Delivers a POSIX signal (`TERM`, `INT`, `KILL`, `USR1`, ...) to the process group |
 | `ResizeProcess` | Sets the terminal rows and columns of a process started with a PTY and delivers `SIGWINCH` to its foreground process group |
 
-`exit_code` follows the shell convention: the process's exit code, or 128 + signal number if it was killed by a signal. To wait for a process without receiving its output, follow the output stream with offsets past the end of the spool.
+`exit_code` follows the shell convention: the process's exit code, or 128 + signal number if it was killed by a signal. `timed_out` (`optional bool`) is set once `EXITED`, `true` when the guest killed the process for its timeout (`false` on normal exit or signal kills) and absent from older guests. To wait for a process without receiving its output, follow the output stream with offsets past the end of the spool.
 
 ### FileSystemService
 

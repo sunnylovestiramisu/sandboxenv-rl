@@ -10,8 +10,8 @@ cmd/
   ate-env-api/           # API server daemon: gRPC services, MCP handler, port proxy
   ate-env-guest/         # Guest daemon: Linux PID 1 subreaper init, sidecar supervision
   benchmarking/
-    bench/               # Composable RL benchmark CLI (resolve, render, prewarm, measure, reap, report)
-    swebench-loader/     # Benchmark driver: SWE-bench trajectories, event recording, report generator
+    bench/               # Composable RL benchmark CLI (scenario lifecycle subcommands)
+    swebench-loader/     # Benchmark driver: SWE-bench trajectories, placement, preflight, event recording, reports
 internal/
   apiservice/            # gRPC server implementation: auth, image template derivation, wake retries
   ate/                   # Substrate client adapter: dials ateapi control plane and atenet router
@@ -33,10 +33,11 @@ guest/
 proto/ateenv/v1alpha/
   env.proto, guest.proto # EnvironmentService, ProcessService, FileSystemService protobuf definitions
   *.pb.go, *_grpc.pb.go  # [generated] Go protobuf and gRPC stubs; never hand-edit
+proto/testdata/client-parity/ # shared Go/Python client parity conformance JSON vectors
 clients/
-  go/                    # Go SDK client: package env (Client, Env, Process)
+  go/                    # Go SDK client: package env (Client, Env, Process, StartError)
   python/                # Python SDK: distribution package ate-env-rl, import name ate_env_rl
-    src/ate_env_rl/      # Core library: Client, Env, Process, SandboxFleet, AsyncSandboxFleet
+    src/ate_env_rl/      # Core library: Client, Env, Process, SandboxFleet, AsyncSandboxFleet, sources.py
     src/ate_env_rl/_gen/ # [generated] Python protobuf and gRPC stubs; never hand-edit
     src/ate_env_rl/adapters/ # Benchmark task converters and reward evaluation adapters (SweBenchAdapter)
     src/ate_env_rl/backend/ # Fleet drivers: SubstrateBackendDriver, MockBackendDriver
@@ -45,7 +46,7 @@ clients/
 integrations/            # Framework integrations: harbor (Harbor), nemo-gym (NeMo Gym), openhands, uni-agent (R2E-Gym)
 benchmarking/            # Benchmark scenarios (scenarios/), SWE-bench (swebench/), telemetry report (telemetry_report/)
 docs/                    # Architecture, glossary, release, rootfs images, security, dev guides
-examples/                # Examples: grpo, harbor, harbor-tools-layer, openhands, verl_swebench, Qwen3-1.7B-verl, Qwen3.5-35B-A3B-verl, runtime-layers, guest-daemon, mcp
+examples/                # Examples: grpo, harbor, harbor-tools-layer, openhands, verl_swebench, Qwen3-1.7B-verl, Qwen3.5-35B-A3B-verl, Qwen3.5-397B-A17B-verl, runtime-layers, guest-daemon, mcp
 hack/                    # Repository scripts: CI (ci/), release (release/), verification (verify/, boilerplate/)
 ```
 
@@ -53,28 +54,20 @@ hack/                    # Repository scripts: CI (ci/), release (release/), ver
 
 ### `internal/apiservice` vs. `internal/ate` vs. `guest/`
 
-Put code in `internal/ate` if it communicates with Substrate's `ateapi` control plane or pools
-connections for `internal/mcp`. Put code in `guest/` if it runs inside the actor container to manage
-local processes or files. Put code in `internal/apiservice` if it handles incoming client requests
-on `ate-env-api`. `apiservice` calls `internal/ate` for actor lifecycle and dials `guest/` via
-`s.guestConn` for process and file execution. It must not execute commands locally or import
-`guest/`.
+Put code in `internal/ate` for Substrate `ateapi` calls or `internal/mcp` connection pools, `guest/`
+for in-actor execution, and `internal/apiservice` for API handlers. `apiservice` calls
+`internal/ate` for lifecycle and dials `guest/` via `s.guestConn`; it must not run local commands or
+import `guest/`.
 
 ### `clients/go` vs. `internal/ate`
 
-Put code in `clients/go` only if it belongs to the public Go SDK (`package env`) imported by
-external clients to talk to `ate-env-api`. Put code in `internal/ate` if it is internal Substrate
-client logic used by the API server to manage actors and templates (`cmd/ate-env` imports
-`clients/go`, `apiservice`, `hostcheck`, and `routertls`). External clients talk to `ate-env-api`,
-never to Substrate directly.
-
-Outside its tests, `clients/go` imports only `proto/ateenv/v1alpha` from this repository: nothing
-under `internal/`, `go.ate.dev/` or `k8s.io/`, so an external module that imports it does not pull
-the control plane's dependencies. A value it shares with the server (such as `DefaultAtespace`) is a
-copy, checked equal by a test. `hack/verify/go-client-deps.sh` enforces this in the Go CI job.
-
-A feature that one Go consumer needs (the SWE-bench loader, for example) goes into `clients/go` when
-a second consumer could use it, not into the consumer; the loader is not the place for client logic.
+Put public Go SDK code (`package env`) in `clients/go` and internal control-plane client code in
+`internal/ate` (`cmd/ate-env` imports `clients/go`, `apiservice`, `hostcheck`, and `routertls`).
+External clients talk to `ate-env-api`, never to Substrate directly. Outside tests, `clients/go`
+imports only `proto/ateenv/v1alpha` from this repo (never `internal/`, `go.ate.dev/`, or `k8s.io/`);
+shared values like `DefaultAtespace` are copied and tested equal, enforced by
+`hack/verify/go-client-deps.sh` in the Go CI job. A feature that one Go consumer needs goes into
+`clients/go` when a second consumer can use it.
 
 ### `internal/` vs. `guest/`
 
@@ -117,12 +110,10 @@ bubbles), and `testcerts` (SPIFFE client certificates).
 
 ### Agent workflows in `.agents/skills/`
 
-- Cutting releases: follow
-  [.agents/skills/create-release/SKILL.md](../../.agents/skills/create-release/SKILL.md) for
-  generating release notes, pushing tags, attaching signed assets, and publishing to PyPI and GHCR.
-- Adding a new RPC: follow
-  [.agents/skills/extend-env-surface/SKILL.md](../../.agents/skills/extend-env-surface/SKILL.md) for
-  proto definition, stubs, guest execution, `s.guestConn` with `ensureAwake`, and SDK methods.
-- Maintaining docs: follow
-  [.agents/skills/maintain-docs/SKILL.md](../../.agents/skills/maintain-docs/SKILL.md) for the style
-  rules and code validation locations.
+- Releases: [.agents/skills/create-release/SKILL.md](../../.agents/skills/create-release/SKILL.md)
+  (release notes, tags, signed assets, PyPI, GHCR).
+- Adding an RPC:
+  [.agents/skills/extend-env-surface/SKILL.md](../../.agents/skills/extend-env-surface/SKILL.md)
+  (proto, stubs, guest, `s.guestConn`/`ensureAwake`, SDKs).
+- Docs: [.agents/skills/maintain-docs/SKILL.md](../../.agents/skills/maintain-docs/SKILL.md) (style
+  and validation paths).

@@ -1,6 +1,6 @@
 # sandboxenv-rl architecture
 
-Status: describes `main` at `b815e71`. Re-check the claims in §Components when `internal/ate` or
+Status: describes `main` at `2e44e1b`. Re-check the claims in §Components when `internal/ate` or
 `internal/apiservice` changes. Companion to [README.md](../README.md) (how to use it) and
 [docs/glossary.md](./glossary.md).
 
@@ -63,8 +63,9 @@ child processes, and serves `ProcessService` and `FileSystemService`.
 ### `ate-env-api` and `internal/apiservice`
 
 - **Owns**: In-cluster gRPC API (`EnvironmentService`, `ProcessService`, `FileSystemService`),
-  bearer authentication, on-demand `ActorTemplate` derivation (`imagetemplate.go`), and wake retries
-  (`wakeretry.go`).
+  bearer authentication, on-demand `ActorTemplate` derivation (`imagetemplate.go`), wake retries
+  (`wakeretry.go`), placement discovery (`ListPlacementDomains`), and node warming (`WarmImage`,
+  capped per node of a worker selector by `-warm-max-probes-per-node` via `placement.go`).
 - **Calls**: `internal/ate.Client` for control plane lifecycle calls; dials `atenet` directly per
   request via `s.guestConn` for guest RPCs.
 - **Must not do**: Must not execute commands locally, buffer full files in memory, or manage
@@ -99,8 +100,8 @@ child processes, and serves `ProcessService` and `FileSystemService`.
   KiB). It confines paths to the configured `-workspace` flag root (`guest/filesystem.Service`); the
   default `"/"` disables confinement (`DefaultWorkspace = "/workspace"` and `WORKSPACE` apply only
   in `filesystem.DefaultConfig`, which `cmd/ate-env-guest` bypasses).
-- **Sidecars**: `cmd/ate-env-guest/sidecar.go` supervises auxiliary daemons, restarting them with
-  backoff when they exit and checking readiness endpoints during `/readyz` probes.
+- **Sidecars**: `cmd/ate-env-guest/sidecar.go` supervises daemons with restart backoff and `/readyz`
+  checks; `internal/sidecarenv` (`Take`) isolates `ATE_SIDECAR_ENV_*` (`-sidecar-env-required`).
 
 ### HTTP surfaces on `ate-env-api` (`internal/mcp`, `internal/portproxy`, `internal/hostcheck`)
 
@@ -117,14 +118,14 @@ child processes, and serves `ProcessService` and `FileSystemService`.
 
 ### CLI, SDKs, and integrations
 
-- **`cmd/ate-env`**: CLI for environment lifecycle (`create`, `get`, `suspend`, `delete`), server
-  inspection (`server-info`, `newServerInfoCommand`; `image-status`, `newImageStatusCommand`),
-  interactive shell (`shell`), file transfer (`read`, `write`), and manifest generation
-  (`ate-env manifest`).
-- **`clients/go`**: Public Go SDK client (`Client`, `Env`, `Process`).
-- **`clients/python`**: Published as `ate-env-rl` (import name `ate_env_rl`). Low-level modules
-  expose async `Client` and `Env`. High-level modules expose synchronous `SandboxFleet` (backed by a
-  shared `LoopRunner` thread) and asynchronous `AsyncSandboxFleet`.
+- **`cmd/ate-env`**: CLI for lifecycle (`create`, `get`, `suspend`, `delete`), inspection and
+  warming (`server-info`, `newServerInfoCommand`; `image-status`, `newImageStatusCommand`;
+  `placement-domains`, `newPlacementDomainsCommand`; `warm-image`, `newWarmImageCommand`), `shell`,
+  `read`/`write`, and `ate-env manifest`.
+- **`clients/go`**: Public Go SDK client (`Client`, `ClientOptions` with `Connections`,
+  `DialOptions`, and `MetricsRegisterer`, `Env`, `Process`, `StartError`).
+- **`clients/python`**: `ate-env-rl` (`ate_env_rl`): async `Client` and `Env`, sync `SandboxFleet`
+  (via `LoopRunner`), `AsyncSandboxFleet`, and `PreflightWarmer` (`preflight.py`).
 - **`integrations/harbor`**: Published as `ate-env-harbor`. Implements Harbor's environment provider
   on `ate-env`.
 - **`integrations/nemo-gym`**: Published as `nemo-gym-substrate`. Implements NeMo Gym's
@@ -136,18 +137,18 @@ child processes, and serves `ProcessService` and `FileSystemService`.
 
 ### Benchmarking (`cmd/benchmarking`, `internal/benchmarking`, `benchmarking/`)
 
-- **`cmd/benchmarking/bench`**: Composable RL benchmark CLI (`resolve`, `render`, `prewarm`,
-  `measure`, `reap`, `report`) backed by
-  `internal/benchmarking/{job,measure,overlay,schema,sut,trace}` and scenario manifests in
-  `benchmarking/scenarios/`.
-- **`cmd/benchmarking/swebench-loader`**: Drives evaluation trajectories across `eval`, `steps`, and
-  `open-loop` modes (`run`), resolves schedules (`resolve`), plans image placement under node cache
-  budgets (`plan-placement`, `swebench.PlanImagePlacement`), extracts trajectory assets
-  (`trajectory-assets`), converts traces (`convert-trace`), and writes or compares reports
-  (`report`, `compare`).
+- **`cmd/benchmarking/bench`**: RL benchmark CLI (`resolve`, `render`, `prewarm`, `spinup`,
+  `spindown`, `measure`, `reap`, `report`, `validate`, `upload`, `compare`, `run`) backed by
+  `internal/benchmarking/{job,measure,overlay,schema,sut,trace}` and `benchmarking/scenarios/`.
+- **`cmd/benchmarking/swebench-loader`**: Runs trajectories in `eval`, `steps`, and `open-loop`
+  modes (`run`, with `-strategy`, `-placement`), resolves schedules (`resolve`), renders trajectory
+  mixes (`render-plan`, `swebench.BuildRenderedPlan`), plans image placement (`plan-placement`,
+  `swebench.PlanImagePlacement`), warms caches (`preflight`, `swebench.PreflightWarmer`), and
+  handles assets, traces, and reports (`trajectory-assets`, `convert-trace`, `report`, `compare`).
 - **`internal/benchmarking/swebench`**: Emits structured JSONL events (`EventRun`, `EventCreate`,
-  `EventTTFI`, `EventWake`, `EventStep`, `EventTask`, `EventSuspend`, `EventDelete`, `EventBarrier`,
-  `EventPark`).
+  `EventTTFI`, `EventWake`, `EventStep`, `EventTask`, `EventFork`, `EventSuspend`, `EventDelete`,
+  `EventBarrier`, `EventPark`, `EventPrewarm`, `EventReap`, `EventThink`, `EventPhase`) plus
+  pre-flight events (`EventPreflightTemplate`, `EventPreflightGolden`, `EventPreflightProbe`).
 - **Scripts**: `sample-node-cache.sh` and `harvest-restore-timings.sh` in `benchmarking/swebench/`
   sample containerd image caches and harvest `atelet` restore logs.
 
@@ -186,17 +187,21 @@ sequenceDiagram
 
 Key non-obvious points:
 
-- `apiservice.(*Server).ensureImageTemplate` holds a per-template read lock (`imageTemplateLock`
-  from `imageTemplateLocks` in `internal/apiservice/templaterecover.go`) through actor creation. If
-  a derived template's golden snapshot build failed at least `failedTemplateRecreateAfter` (10
-  minutes) ago and no non-golden actor uses it (`templateUsers`), `recreateFailedImageTemplate`
-  acquires the write lock, deletes the failed template by UID, and recreates it from base. The lock
-  is in one process; across replicas see "Known limitations" in
-  [the ate-env-api acceptance criteria](plans/ate-env-api/acceptance-criteria.md#known-limitations).
-- The base template must exist beforehand (`codes.FailedPrecondition` if missing); any runtime
-  layers declared on the base template carry over into the derived template.
-- If an existing derived template runs an image with the same digest under another repository path
-  (`sameImageDigest`), `CreateEnvironment` reuses it; if the digest differs, it fails with
+- `apiservice.(*Server).ensureImageTemplate` holds a per-template read lock, held in this process
+  only (`imageTemplateLock` via `imageTemplateLocks` in `internal/apiservice/templaterecover.go`),
+  across `CreateEnvironment` actor creation (releasing immediately for `EnsureImageTemplate` and
+  `WarmImage`; across replicas, see
+  [known limitations](plans/ate-env-api/acceptance-criteria.md#known-limitations)).
+  `ensureImageTemplate` also takes the write lock and calls `recreateFailedImageTemplate` when a
+  golden bake failed at least `failedTemplateRecreateAfter` (10m) ago, recreating at zero
+  `templateUsers`. `GetImageStatus` reads only.
+- `getOrCreateImageTemplate` returns `codes.FailedPrecondition` when the base template is absent,
+  and `codes.InvalidArgument` if `DeriveImageTemplate` finds neither free `"guest"`/`GuestMountPath`
+  (`/ate`) slots (`checkGuestSlotFree`) nor one digest-pinned `"guest"` image volume mounted alone
+  at `/ate` with `command[0]` starting the guest (`checkGuestMounted`, `checkGuestCommand`). Runtime
+  layers carry over.
+- If a derived template runs the same digest under another path (`sameImageDigest`), it matches; on
+  mismatch, `CreateEnvironment`, `GetImageStatus`, `EnsureImageTemplate`, and `WarmImage` fail with
   `codes.FailedPrecondition`.
 - Optional `worker_selector` labels on `CreateEnvironment` pass to `Actor.worker_selector`
   (narrowing the template's worker pools across creation and wakes), and `GetEnvironment` reports
@@ -239,11 +244,10 @@ sequenceDiagram
 
 Key non-obvious points:
 
-- `s.guestConn` opens a connection per request and runs `ensureAwake`. If the actor is suspended,
-  traffic through `atenet` initiates restoration. `ensureAwake` polls
-  `GetProcess("ate-env-wake-probe")` across two budgets: `DefaultWakeBudget` (5 minutes bounds the
-  whole wait) and `DefaultWakeRunningBudget` (20 seconds bounds the wait once `RUNNING` is
-  observed).
+- `s.guestConn` opens a connection per request and runs `ensureAwake`. If suspended, `atenet`
+  traffic starts restoration; `ensureAwake` polls `GetProcess("ate-env-wake-probe")` across
+  `DefaultWakeBudget` (5m whole wait), `DefaultWakeRunningBudget` (20s once `RUNNING`), and
+  `DefaultWakeStateReadCap` (5s per state read).
 - `ensureAwake` fails fast on unrecoverable states: `routertls.RejectedCertificate` or `CRASHED`
   returns `codes.FailedPrecondition`, `DELETING` returns `codes.NotFound`, and sustained no-capacity
   responses over a positive `WakeNoCapacityGrace` (`-wake-no-capacity-grace`) return
@@ -266,11 +270,10 @@ Key non-obvious points:
 
 ## State and persistence
 
-- **`ate-env-api` has no durable state**: It stores no actor metadata on disk. In-memory state is
-  limited to per-actor connection and server pools (`ate.Client.guestPool`, `mcp.Server` map) and
-  per-template locks (`imageTemplateLocks`) where guest connections are evicted on `Delete`
-  (`evictGuest`). Active streams fail if an `ate-env-api` replica restarts, and callers reconnect on
-  the next request.
+- **`ate-env-api` has no durable state**: In-memory state is limited to per-actor pools
+  (`ate.Client.guestPool`, `mcp.Server` map) and per-template locks (`imageTemplateLocks`); guest
+  connections evict on `Delete` (`evictGuest`). Active streams fail on replica restart and callers
+  reconnect on the next request.
 - **Substrate control plane (`ateapi`) is the source of truth**: Stores actor records, templates,
   worker pool allocations, and state transitions in PostgreSQL.
 - **Snapshots**: Suspended actors persist memory pages and filesystem layers in object storage
@@ -319,31 +322,23 @@ list of accepted risks.
   `FileSystemService` streams directly to `ate-env-guest` over `atenet`. Keeping execution logic
   inside the guest ensures identical behavior whether invoked via gRPC, CLI, MCP, or Python SDK.
 - **Router dial paths and wake gaps (Position A)**: Three paths dial `atenet`: (1)
-  `apiservice.(*Server).guestConn` opens an ephemeral connection per request and runs `ensureAwake`
-  to resume suspended actors; all new gRPC proxy RPCs must use this path; (2)
-  `internal/ate.Client.DialGuest` maintains pooled connections per actor, duplicates interceptor
-  logic from `guestConn`, and is used only by `internal/mcp` without `ensureAwake` (known gap); (3)
-  `internal/portproxy` dials raw `CONNECT` tunnels and runs its own wake loop.
-- **Interceptors append `ate-target-actor` without forwarding caller metadata**: When dialing
-  through `atenet`, interceptors append `ate-target-actor: <atespace>/<id>` but do not forward
-  incoming client metadata headers. Forwarding incoming metadata caused duplicate headers, which
-  `atenet-router` rejects with "invalid actor reference".
-- **PID 1 child subreaper re-exec in `cmd/ate-env-guest`**: `ate-env-guest` running as PID 1
-  re-executes itself so the outer process runs non-blocking `wait4` reaping for reparented orphan
-  processes. If PID 1 served gRPC directly, its reaper would race `os/exec.Cmd.Wait` calls in the
-  process tracker and steal exit codes.
-- **OCI image volume for guest injection (`/ate`)**: Derived templates mount `ate-env-guest` into
-  rootfs images via read-only OCI image volumes at `/ate`. This allows using unmodified public or
-  proprietary task images without rebuilding and pushing layered images for each benchmark.
-- **Persistent `LoopRunner` thread for Python sync APIs**: The Python backend driver
-  (`SubstrateBackendDriver`) lazily creates a dedicated background thread with a permanent `asyncio`
-  event loop shared with `SandboxFleet` and `SandboxHandle`. Submitting coroutines to
-  `LoopRunner.run()` avoids creating short-lived event loops with `asyncio.run()`, which destroys
-  the event loop and corrupts HTTP/2 gRPC channels.
-- **HTTP/2 concurrent stream limit of 4096**: Go's HTTP/2 server defaults to 250 concurrent streams
-  per connection. `ate-env-api` sets `DefaultMaxConcurrentStreams = 4096` and `clients/python` opens
+  `apiservice.(*Server).guestConn` (ephemeral per call with `ensureAwake`; required for new gRPC
+  proxy RPCs); (2) `internal/ate.Client.DialGuest` (pooled per actor, duplicates interceptor logic
+  from `guestConn`, and is used only by `internal/mcp` without `ensureAwake`, a known gap); (3)
+  `internal/portproxy` (`CONNECT` tunnels with its own wake loop).
+- **Interceptors append `ate-target-actor` without forwarding caller metadata**: Forwarding incoming
+  headers caused duplicate `ate-target-actor: <atespace>/<id>` headers, which `atenet-router`
+  rejects with "invalid actor reference".
+- **PID 1 child subreaper re-exec in `cmd/ate-env-guest`**: Re-execs so the outer PID 1 runs
+  non-blocking `wait4` reaping for orphans without racing `os/exec.Cmd.Wait` in the process tracker.
+- **OCI image volume for guest injection (`/ate`)**: Derived templates mount `ate-env-guest`
+  read-only at `/ate`, running unmodified task images without rebuilding images per benchmark.
+- **Persistent `LoopRunner` thread for Python sync APIs**: `SubstrateBackendDriver` keeps a shared
+  background `asyncio` loop for `SandboxFleet` and `SandboxHandle` via `LoopRunner.run()`, avoiding
+  short-lived `asyncio.run()` loops that corrupt HTTP/2 channels.
+- **HTTP/2 concurrent stream limit of 4096**: `ate-env-api` sets
+  `DefaultMaxConcurrentStreams = 4096` (vs Go's 250 default) and `clients/python` opens
   `ceil(max_concurrent / 200)` connections to prevent stream exhaustion during massive RL rollouts.
 
-For code placement guidelines, see [docs/dev/code-layout.md](./dev/code-layout.md). For detailed
-concurrency invariants, see
+See [docs/dev/code-layout.md](./dev/code-layout.md) and
 [docs/dev/concurrency-and-pitfalls.md](./dev/concurrency-and-pitfalls.md).

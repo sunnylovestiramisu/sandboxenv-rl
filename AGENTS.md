@@ -1,6 +1,6 @@
 # sandboxenv-rl
 
-<!-- Last full audit: 2026-11-05 (commit b815e71) -->
+<!-- Last full audit: 2026-11-10 (commit 2e44e1b) -->
 
 Isolated execution environments for reinforcement learning and evaluation on Agent Substrate. Each
 environment runs as a gVisor actor supporting on-demand rootfs derivation, PTYs, file streaming, MCP
@@ -97,6 +97,7 @@ Run before opening a pull request:
 ```bash
 make verify-boilerplate
 make verify-gofmt
+make verify-go-client-deps
 make verify-docs
 make verify-protos
 make vet
