@@ -381,6 +381,35 @@ user needs to know across them.
   deleted by id. The default run id is `pf-<6 random characters>`, unique per
   pass, as `WarmImage`'s is, instead of the fixed `pf`.
 
+- swebench-loader: the working-set counters in `report.json`. In a
+  `-park fork` run, `created` counts the golden base after its create and
+  each child after its fork, and `retired` counts a base whose suspend
+  failed or that lost the race to another cold acquire of its image; before,
+  `created` counted one per cold image and no child, thus `retired` ran far
+  above it. In a `-park suspend-async` run, a parked sandbox whose local
+  suspend failed is deleted and counted in `retired`, and the next task of
+  its image goes to a cold create; before, that task failed with the suspend
+  error: one more in `failed`, and a tier 1 dropped rollout in
+  `fault_classification` next to the tier 3 `snapshot_restore_failure` the
+  suspend event already carries, thus `infra_fault_rate` goes down by those
+  drops. A prewarmed sandbox the pool deletes counts in `retired` too, and
+  an acquire cancelled while its parked sandbox is still suspending puts the
+  sandbox back in the pool, or retires it when the pool filled up while the
+  acquire waited, instead of leaving it behind or evicting a settled
+  sandbox for it. The pool deletes a sandbox it gives up on in the
+  background and the run's cleanup waits for those deletes, thus a slow
+  delete does not hold the acquire that goes on to a cold create; a delete
+  that fails is logged with the sandbox id. A `-prefetch` run cancelled
+  while a prewarm is in flight waits for the prewarm at cleanup and deletes
+  the sandbox it made, instead of leaving it parked in a pool already
+  closed. An acquire whose context expired before it ran leaves the pool as
+  it is and counts nothing, and a `-park fork` acquire whose fork fails
+  counts no hit; before, both could count a hit for a task that got no
+  sandbox. A task whose acquire fails (a cancelled run, a fork error, a
+  failed base suspend) or whose trajectory does not render is recorded as
+  failed and the run goes on to its cleanup; before, the task event
+  crashed the loader on the missing trajectory before the cleanup ran, and
+  the step's sandboxes and a prewarm in flight stayed behind.
 - swebench-loader: a step the guest kills at its timeout (exit 137 at or
   past the deadline) fails the task and stops the trajectory, as
   `run_fleet_bench.py` does on its `TimeoutError`. Before, the Go arm marked

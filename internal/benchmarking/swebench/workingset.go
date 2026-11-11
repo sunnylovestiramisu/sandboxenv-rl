@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +75,8 @@ type WorkingSetConfig struct {
 	// MaxParked caps the number of idle sandboxes retained in the standing pool.
 	// Zero means unbounded.
 	MaxParked int
+	// Logger receives the pool's warnings; nil means slog.Default().
+	Logger *slog.Logger
 }
 
 type prewarmFuture struct {
@@ -82,11 +85,16 @@ type prewarmFuture struct {
 	err    error
 }
 
+// errWorkingSetClosed is what enqueueParked returns once Close has run: the
+// entry was not parked.
+var errWorkingSetClosed = errors.New("swebench: working set closed")
+
 // WorkingSet manages a client-side standing pool of parked sandboxes across
 // training steps, matching each step's scheduled tasks by Image.
 type WorkingSet struct {
 	cfg     WorkingSetConfig
 	backend Backend
+	log     *slog.Logger
 
 	mu          sync.Mutex
 	parked      map[string][]*WorkingSetEntry // image -> FIFO queue of parked sandboxes
@@ -94,6 +102,9 @@ type WorkingSet struct {
 	forkBases   map[string]*WorkingSetEntry   // image -> golden base sandbox for ParkFork
 	inFlight    []*WorkingSetEntry            // in-flight async suspends
 	prewarms    map[int]*prewarmFuture        // step -> async prewarm job
+	retiring    int                           // background retire deletes in flight
+	retireIdle  chan struct{}                 // closed when retiring drops to zero
+	closed      bool                          // set by Close; a late prewarm retires what it made
 
 	seq       atomic.Uint64
 	totalHits int
@@ -122,9 +133,13 @@ func NewWorkingSet(cfg WorkingSetConfig) (*WorkingSet, error) {
 		return nil, err
 	}
 	cfg.ParkPolicy = norm
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	return &WorkingSet{
 		cfg:       cfg,
 		backend:   cfg.Backend,
+		log:       cfg.Logger,
 		parked:    make(map[string][]*WorkingSetEntry),
 		forkBases: make(map[string]*WorkingSetEntry),
 		prewarms:  make(map[int]*prewarmFuture),
@@ -162,40 +177,60 @@ func (ws *WorkingSet) BeginStep() {
 // base snapshot exists under ParkFork), it is reused (Hit = true); otherwise a
 // new sandbox is created (Hit = false).
 func (ws *WorkingSet) Acquire(ctx context.Context, step, taskIndex int, instanceID, image string) (*WorkingSetEntry, error) {
+	// A context that expired before the acquire ran takes nothing off the
+	// pool and counts nothing, under every park policy: a hit would only go
+	// back, or be retired, for nothing, and a fork acquire would count a
+	// miss, and create or fork, for a task that gets no sandbox.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if ws.cfg.ParkPolicy == schema.ParkFork {
 		return ws.acquireFork(ctx, step, taskIndex, instanceID, image)
 	}
 
-	ws.mu.Lock()
-	queue := ws.parked[image]
-	var hit *WorkingSetEntry
-	if len(queue) > 0 {
-		hit = queue[0]
-		ws.parked[image] = queue[1:]
-		ws.removeFromOrderLocked(hit)
+	for {
+		// A retired hit sends the loop round again: check the context
+		// before the next sandbox comes off the pool.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ws.mu.Lock()
+		queue := ws.parked[image]
+		var hit *WorkingSetEntry
+		if len(queue) > 0 {
+			hit = queue[0]
+			if len(queue) == 1 {
+				delete(ws.parked, image)
+			} else {
+				ws.parked[image] = queue[1:]
+			}
+			ws.removeFromOrderLocked(hit)
+		}
+		ws.mu.Unlock()
+
+		if hit == nil {
+			break
+		}
+		if hit.asyncDone != nil {
+			if !awaitSettled(ctx, hit.asyncDone) {
+				ws.repark(ctx, hit)
+				return nil, ctx.Err()
+			}
+			if hit.asyncErr != nil {
+				ws.deleteRetired(ctx, hit.SandboxID, hit.Sandbox, nil)
+				ws.mu.Lock()
+				ws.retired++
+				ws.stepRetired++
+				ws.mu.Unlock()
+				continue
+			}
+		}
+		ws.mu.Lock()
 		ws.totalHits++
 		ws.reused++
 		ws.stepHits++
 		ws.stepReused++
-	} else {
-		ws.totalMiss++
-		ws.created++
-		ws.stepMisses++
-		ws.stepCreated++
-	}
-	ws.mu.Unlock()
-
-	if hit != nil {
-		if hit.asyncDone != nil {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-hit.asyncDone:
-			}
-			if hit.asyncErr != nil {
-				return nil, hit.asyncErr
-			}
-		}
+		ws.mu.Unlock()
 		hit.InstanceID = instanceID
 		hit.LastStep = step
 		hit.ReuseCount++
@@ -203,12 +238,21 @@ func (ws *WorkingSet) Acquire(ctx context.Context, step, taskIndex int, instance
 		return hit, nil
 	}
 
+	ws.mu.Lock()
+	ws.totalMiss++
+	ws.stepMisses++
+	ws.mu.Unlock()
+
 	sbID := ws.nextSandboxID(instanceID, step, taskIndex)
 	createStart := time.Now()
 	sb, err := ws.backend.Create(ctx, sbID, image)
 	if err != nil {
 		return nil, err
 	}
+	ws.mu.Lock()
+	ws.created++
+	ws.stepCreated++
+	ws.mu.Unlock()
 	return &WorkingSetEntry{
 		SandboxID:   sbID,
 		BaseID:      sbID,
@@ -224,6 +268,103 @@ func (ws *WorkingSet) Acquire(ctx context.Context, step, taskIndex int, instance
 	}, nil
 }
 
+// awaitSettled waits, up to ctx, for the suspend of a parked sandbox and
+// reports whether it settled. A settled suspend wins over an expired ctx:
+// select picks at random between two ready cases, and a sandbox that
+// settled, with or without an error, must not go back in the pool as one
+// still suspending.
+func awaitSettled(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// deleteRetired deletes, in the background, a sandbox the pool gives up on:
+// one whose suspend failed, a base that lost the fork-base race, a prewarm
+// the pool no longer needs, a parked sandbox a cancelled acquire found no
+// room for. The delete starts once settled is closed (nil: at once) and
+// runs under cleanupTimeout on a context that survives the caller's
+// cancellation, thus a slow delete holds neither the acquire nor the
+// release that gave the sandbox up. Close waits for the deletes still in
+// flight. A failed delete is logged and not retried, thus the sandbox
+// leaks. The caller counts the sandbox out.
+func (ws *WorkingSet) deleteRetired(ctx context.Context, id string, sb Sandbox, settled <-chan struct{}) {
+	if sb == nil {
+		return
+	}
+	ws.mu.Lock()
+	if ws.retiring == 0 {
+		ws.retireIdle = make(chan struct{})
+	}
+	ws.retiring++
+	ws.mu.Unlock()
+	go func() {
+		defer func() {
+			ws.mu.Lock()
+			ws.retiring--
+			if ws.retiring == 0 {
+				close(ws.retireIdle)
+			}
+			ws.mu.Unlock()
+		}()
+		if settled != nil {
+			<-settled
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		err := sb.Delete(cleanupCtx)
+		cancel()
+		if err != nil && !isNotFound(err) {
+			ws.log.Warn("working set: delete on retire failed; the sandbox leaks",
+				slog.String("env", id), slog.String("err", err.Error()))
+		}
+	}()
+}
+
+// awaitRetires waits for the retire deletes in flight, up to ctx. Each delete
+// runs under cleanupTimeout, thus the wait ends with or without a deadline
+// on ctx.
+func (ws *WorkingSet) awaitRetires(ctx context.Context) error {
+	ws.mu.Lock()
+	idle, pending := ws.retireIdle, ws.retiring
+	ws.mu.Unlock()
+	if pending == 0 {
+		return nil
+	}
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// repark puts a parked sandbox back at the head of its queue, and of the
+// eviction order, after the acquire that took it was cancelled while the
+// sandbox still suspended. When other releases filled MaxParked in the
+// meantime, the sandbox is counted out and deleted once its suspend
+// settles: the pool keeps a settled sandbox over one a cancelled acquire
+// hands back.
+func (ws *WorkingSet) repark(ctx context.Context, e *WorkingSetEntry) {
+	ws.mu.Lock()
+	if ws.cfg.MaxParked > 0 && len(ws.parkedOrder) >= ws.cfg.MaxParked {
+		ws.retired++
+		ws.stepRetired++
+		ws.mu.Unlock()
+		ws.deleteRetired(ctx, e.SandboxID, e.Sandbox, e.asyncDone)
+		return
+	}
+	ws.parked[e.Image] = append([]*WorkingSetEntry{e}, ws.parked[e.Image]...)
+	ws.parkedOrder = append([]*WorkingSetEntry{e}, ws.parkedOrder...)
+	ws.mu.Unlock()
+}
+
 func suspendSandbox(ctx context.Context, sb Sandbox, async bool) error {
 	if ms, ok := sb.(ModeSuspender); ok {
 		return ms.SuspendWithMode(ctx, async)
@@ -237,18 +378,13 @@ func suspendSandbox(ctx context.Context, sb Sandbox, async bool) error {
 }
 
 func (ws *WorkingSet) acquireFork(ctx context.Context, step, taskIndex int, instanceID, image string) (*WorkingSetEntry, error) {
+	// As in Acquire, a miss counts before the create and a hit counts once
+	// the sandbox is handed out: here, once the fork returns the child.
 	ws.mu.Lock()
 	base, hasBase := ws.forkBases[image]
-	if hasBase {
-		ws.totalHits++
-		ws.reused++
-		ws.stepHits++
-		ws.stepReused++
-	} else {
+	if !hasBase {
 		ws.totalMiss++
-		ws.created++
 		ws.stepMisses++
-		ws.stepCreated++
 	}
 	ws.mu.Unlock()
 
@@ -259,8 +395,16 @@ func (ws *WorkingSet) acquireFork(ctx context.Context, step, taskIndex int, inst
 		if err != nil {
 			return nil, err
 		}
+		ws.mu.Lock()
+		ws.created++
+		ws.stepCreated++
+		ws.mu.Unlock()
 		if err := suspendSandbox(ctx, baseSB, true); err != nil {
-			_ = baseSB.Delete(context.Background())
+			ws.deleteRetired(ctx, baseID, baseSB, nil)
+			ws.mu.Lock()
+			ws.retired++
+			ws.stepRetired++
+			ws.mu.Unlock()
 			return nil, err
 		}
 		base = &WorkingSetEntry{
@@ -276,8 +420,10 @@ func (ws *WorkingSet) acquireFork(ctx context.Context, step, taskIndex int, inst
 		}
 		ws.mu.Lock()
 		if existing, ok := ws.forkBases[image]; ok {
+			ws.retired++
+			ws.stepRetired++
 			ws.mu.Unlock()
-			_ = baseSB.Delete(context.Background())
+			ws.deleteRetired(ctx, baseID, baseSB, nil)
 			base = existing
 		} else {
 			ws.forkBases[image] = base
@@ -303,6 +449,16 @@ func (ws *WorkingSet) acquireFork(ctx context.Context, step, taskIndex int, inst
 	if err != nil {
 		return nil, err
 	}
+	ws.mu.Lock()
+	ws.created++
+	ws.stepCreated++
+	if hasBase {
+		ws.totalHits++
+		ws.reused++
+		ws.stepHits++
+		ws.stepReused++
+	}
+	ws.mu.Unlock()
 	return &WorkingSetEntry{
 		SandboxID:   childID,
 		BaseID:      base.SandboxID,
@@ -353,7 +509,7 @@ func (ws *WorkingSet) Release(ctx context.Context, entry *WorkingSetEntry) error
 	case schema.ParkSuspendSync:
 		start := time.Now()
 		if err := suspendSandbox(ctx, entry.Sandbox, false); err != nil {
-			_ = entry.Sandbox.Delete(context.Background())
+			ws.deleteRetired(ctx, entry.SandboxID, entry.Sandbox, nil)
 			ws.mu.Lock()
 			ws.retired++
 			ws.stepRetired++
@@ -456,6 +612,11 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 				return
 			}
 			ws.mu.Lock()
+			if ws.closed {
+				ws.mu.Unlock()
+				fut.err = errWorkingSetClosed
+				return
+			}
 			alreadyParked := len(ws.parked[img]) > 0
 			if ws.cfg.ParkPolicy == schema.ParkFork && ws.forkBases[img] != nil {
 				alreadyParked = true
@@ -472,18 +633,26 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 				fut.err = err
 				continue
 			}
+			// A prewarm runs between steps, thus it counts into the run totals
+			// only: created here, retired when the pool gives the sandbox up.
 			ws.mu.Lock()
 			ws.created++
 			ws.mu.Unlock()
+			retire := func() {
+				ws.deleteRetired(ctx, sbID, sb, nil)
+				ws.mu.Lock()
+				ws.retired++
+				ws.mu.Unlock()
+			}
 
 			if ws.cfg.ParkPolicy == schema.ParkFork {
 				if err := suspendSandbox(ctx, sb, true); err != nil {
-					_ = sb.Delete(context.Background())
+					retire()
 					fut.err = err
 					continue
 				}
 				ws.mu.Lock()
-				if ws.forkBases[img] == nil {
+				if ws.forkBases[img] == nil && !ws.closed {
 					ws.forkBases[img] = &WorkingSetEntry{
 						SandboxID:   sbID,
 						BaseID:      sbID,
@@ -495,9 +664,17 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 						WasParked:   true,
 					}
 					ws.mu.Unlock()
-				} else {
-					ws.mu.Unlock()
-					_ = sb.Delete(context.Background())
+					continue
+				}
+				closed := ws.closed
+				ws.mu.Unlock()
+				// Another cold acquire made the base first, or the pool closed
+				// meanwhile: either way the pool has no use for this one. A
+				// closed pool ends the prewarm, and WaitPrewarm says so.
+				retire()
+				if closed {
+					fut.err = errWorkingSetClosed
+					return
 				}
 				continue
 			}
@@ -505,7 +682,7 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 			wasParked := false
 			if ws.cfg.ParkPolicy == schema.ParkSuspendAsync || ws.cfg.ParkPolicy == schema.ParkSuspendSync {
 				if err := suspendSandbox(ctx, sb, ws.cfg.ParkPolicy == schema.ParkSuspendAsync); err != nil {
-					_ = sb.Delete(context.Background())
+					retire()
 					fut.err = err
 					continue
 				}
@@ -521,7 +698,11 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 				LastStep:    nextStep - 1,
 				WasParked:   wasParked,
 			}
-			_ = ws.enqueueParked(ctx, entry)
+			if err := ws.enqueueParked(ctx, entry); errors.Is(err, errWorkingSetClosed) {
+				retire()
+				fut.err = errWorkingSetClosed
+				return
+			}
 		}
 	}()
 }
@@ -532,16 +713,22 @@ func (ws *WorkingSet) Prewarm(ctx context.Context, nextStep int, prefetchImages 
 func (ws *WorkingSet) WaitPrewarm(ctx context.Context, step int, stepStart time.Time) (float64, error) {
 	ws.mu.Lock()
 	fut, ok := ws.prewarms[step]
-	delete(ws.prewarms, step)
 	ws.mu.Unlock()
 	if !ok || fut == nil {
 		return 0, nil
 	}
 	select {
 	case <-ctx.Done():
+		// The future stays registered: Close waits for the prewarm a
+		// cancelled wait leaves running.
 		return 0, ctx.Err()
 	case <-fut.done:
 	}
+	ws.mu.Lock()
+	if ws.prewarms[step] == fut {
+		delete(ws.prewarms, step)
+	}
+	ws.mu.Unlock()
 	lead := stepStart.Sub(fut.doneAt)
 	if lead < 0 {
 		lead = 0
@@ -551,6 +738,10 @@ func (ws *WorkingSet) WaitPrewarm(ctx context.Context, step int, stepStart time.
 
 func (ws *WorkingSet) enqueueParked(ctx context.Context, entry *WorkingSetEntry) error {
 	ws.mu.Lock()
+	if ws.closed {
+		ws.mu.Unlock()
+		return errWorkingSetClosed
+	}
 	var evict []*WorkingSetEntry
 	if ws.cfg.MaxParked > 0 {
 		for len(ws.parkedOrder)+1 > ws.cfg.MaxParked && len(ws.parkedOrder) > 0 {
@@ -609,8 +800,41 @@ func (ws *WorkingSet) RetireSurplus(ctx context.Context, keepImages map[string]b
 	return len(toDelete), firstErr
 }
 
-// Close deletes all parked and fork-base sandboxes remaining in the pool.
+// awaitPrewarms waits, up to ctx, for the prewarms still in flight.
+func (ws *WorkingSet) awaitPrewarms(ctx context.Context) error {
+	ws.mu.Lock()
+	pending := make([]*prewarmFuture, 0, len(ws.prewarms))
+	for _, fut := range ws.prewarms {
+		pending = append(pending, fut)
+	}
+	ws.mu.Unlock()
+	for _, fut := range pending {
+		select {
+		case <-fut.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// Close marks the pool closed, waits for the prewarms still in flight,
+// deletes all parked and fork-base sandboxes remaining in the pool, and
+// waits for the retire deletes still in flight, each wait up to ctx. A
+// parked sandbox whose suspend has not settled when ctx expires is deleted
+// in the background once it settles, and Close returns the context error.
+// A prewarm that reaches the pool after Close started retires what it
+// made, thus a run cancelled mid-step leaves no sandbox behind in a closed
+// pool.
 func (ws *WorkingSet) Close(ctx context.Context) error {
+	ws.mu.Lock()
+	ws.closed = true
+	ws.mu.Unlock()
+	var firstErr error
+	if err := ws.awaitPrewarms(ctx); err != nil {
+		firstErr = err
+	}
+
 	ws.mu.Lock()
 	all := append([]*WorkingSetEntry(nil), ws.parkedOrder...)
 	for _, b := range ws.forkBases {
@@ -622,16 +846,24 @@ func (ws *WorkingSet) Close(ctx context.Context) error {
 	ws.retired += len(all)
 	ws.mu.Unlock()
 
-	var firstErr error
 	for _, e := range all {
-		if e.asyncDone != nil {
-			<-e.asyncDone
+		if e.asyncDone != nil && !awaitSettled(ctx, e.asyncDone) {
+			// The suspend outlives ctx: the delete follows it in the
+			// background, under cleanupTimeout, as for any retired sandbox.
+			ws.deleteRetired(ctx, e.SandboxID, e.Sandbox, e.asyncDone)
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			continue
 		}
 		if e.Sandbox != nil {
 			if err := e.Sandbox.Delete(ctx); err != nil && !isNotFound(err) && firstErr == nil {
 				firstErr = err
 			}
 		}
+	}
+	if err := ws.awaitRetires(ctx); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
 }

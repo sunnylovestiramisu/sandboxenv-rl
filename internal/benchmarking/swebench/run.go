@@ -1177,6 +1177,7 @@ func (r *runner) runScheduledSteps(ctx context.Context) error {
 		JobID:      r.cfg.RunID,
 		Backend:    r.cfg.Backend,
 		ParkPolicy: parkPolicy,
+		Logger:     r.log,
 	})
 	if err != nil {
 		return err
@@ -1224,7 +1225,7 @@ func (r *runner) runScheduledSteps(ctx context.Context) error {
 			inst := stepInsts[i]
 			traj := stepTrajs[i]
 			if rerr := stepRenderErrs[i]; rerr != nil {
-				e := &environment{id: EnvID(r.cfg.RunID, tk.InstanceID, i), inst: inst, task: i}
+				e := &environment{id: EnvID(r.cfg.RunID, tk.InstanceID, i), inst: inst, task: i, traj: traj}
 				r.rec.Record(r.event(EventTask, e, stepNum, 0, rerr))
 				r.countTask(e, stepNum, false, nil)
 				return
@@ -1235,7 +1236,7 @@ func (r *runner) runScheduledSteps(ctx context.Context) error {
 			entry, aerr := ws.Acquire(cctx, stepNum, i, tk.InstanceID, tk.Image)
 			cancel()
 			if aerr != nil {
-				e := &environment{id: EnvID(r.cfg.RunID, tk.InstanceID, i), inst: inst, task: i}
+				e := &environment{id: EnvID(r.cfg.RunID, tk.InstanceID, i), inst: inst, task: i, traj: traj}
 				r.rec.Record(r.event(EventCreate, e, stepNum, time.Since(acqStart), aerr))
 				r.rec.Record(r.event(EventTask, e, stepNum, 0, aerr))
 				r.countTask(e, stepNum, false, nil)
@@ -1763,8 +1764,9 @@ func (r *runner) remove(ctx context.Context, e *environment, step int) {
 func (r *runner) event(kind string, e *environment, step int, d time.Duration, err error) Event {
 	ev := Event{RunID: r.cfg.RunID, Event: kind, Env: e.id, Instance: e.inst.InstanceID,
 		Step: step, Task: e.task, DurMS: ms(d), OK: err == nil}
-	if kind == EventTask {
-		// Which trajectory the task replayed; one run can mix several.
+	if kind == EventTask && e.traj != nil {
+		// Which trajectory the task replayed; one run can mix several. A
+		// task whose trajectory did not render has none to name.
 		ev.Name = e.traj.Name
 	}
 	if err != nil {
