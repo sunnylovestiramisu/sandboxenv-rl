@@ -39,7 +39,7 @@ clients/
   python/                # Python SDK: distribution package ate-env-rl, import name ate_env_rl
     src/ate_env_rl/      # Core library: Client, Env, Process, SandboxFleet, AsyncSandboxFleet, sources.py
     src/ate_env_rl/_gen/ # [generated] Python protobuf and gRPC stubs; never hand-edit
-    src/ate_env_rl/adapters/ # Benchmark task converters and reward evaluation adapters (SweBenchAdapter)
+    src/ate_env_rl/adapters/ # Benchmark task converters and evaluation adapters (SweBenchAdapter, r2egym)
     src/ate_env_rl/backend/ # Fleet drivers: SubstrateBackendDriver, MockBackendDriver
     src/ate_env_rl/runtime/ # Guest hooks: SubstrateEnvClientRuntime, MockRuntimeHook
     src/ate_env_rl/telemetry/ # Telemetry: Prometheus metric collectors and OpenTelemetry tracer
@@ -88,12 +88,16 @@ Define in-guest services (`ProcessService`, `FileSystemService`) in
 files. Run `buf generate` for Go stubs and `make python-protos`
 (`clients/python/scripts/gen-protos.sh`) for Python stubs in `clients/python/src/ate_env_rl/_gen/`.
 
-### Python SDK: low-level vs. fleet
+### Python SDK: low-level vs. fleet vs. adapters
 
 Put low-level gRPC wrappers in `clients/python/src/ate_env_rl/{client,env,handle}.py`. Put pool
 scheduling algorithms, warm pool maintenance, and batch rollout drivers in
 `clients/python/src/ate_env_rl/{fleet,async_fleet,strategies}.py`. Synchronous fleet methods must
-run coroutines through `LoopRunner.run()` to preserve shared HTTP/2 channels.
+run coroutines through `LoopRunner.run()` to preserve shared HTTP/2 channels. Put benchmark task
+converters and handle-bound evaluation adapters without third-party SDK dependencies in
+`clients/python/src/ate_env_rl/adapters/` (`swebench.py`, `r2egym.py`, with
+`ate_env_openhands.r2egym` re-exporting `ate_env_rl.adapters.r2egym`). Put packages that pin
+external agent frameworks or ship container runtime layers under `integrations/`.
 
 ### Benchmarking: `cmd/benchmarking` vs. `internal/benchmarking` vs. `benchmarking/`
 

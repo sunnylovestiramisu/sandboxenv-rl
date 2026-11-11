@@ -60,7 +60,7 @@ asyncio.run(run_rollouts())
 The SDK has three layers:
 - **Layer 1 (`Client` / `Env`)**: Direct asyncio gRPC client talking to `ate-env-api` for lifecycle (create, get, suspend, delete) and guest daemon execution (streaming processes and chunked filesystem I/O).
 - **Layer 2 (`SandboxFleet` / `AsyncSandboxFleet`)**: Fleet management, sizing, pre-warming, pooling, and automated lifecycle with task-bound `SandboxHandle`.
-- **Layer 3 (`ate_env_rl.adapters`)**: Zero-dependency benchmark task converters and in-sandbox reward evaluators (such as `SweBenchAdapter`) returning typed `EvalResult` outcomes.
+- **Layer 3 (`ate_env_rl.adapters`)**: Zero-dependency benchmark task converters and in-sandbox reward evaluators (such as `SweBenchAdapter`) returning typed `EvalResult` outcomes, and the R2E-Gym adapter `ate_env_rl.adapters.r2egym`, which imports R2E-Gym on first use.
 
 ### Execution Contract:
 - `sb.exec(cmd)` and `sb.exec_async(cmd)` return an `ExecResult(exit_code, stdout, stderr, duration_s, timed_out)`.

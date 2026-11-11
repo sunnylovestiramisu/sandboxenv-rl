@@ -14,6 +14,7 @@
 
 """Benchmark task converters and in-sandbox reward evaluation adapters."""
 
+from . import r2egym
 from .base import BenchmarkAdapter, EvalResult
 from .swebench import EvalSetupError, SweBenchAdapter
 
@@ -22,4 +23,5 @@ __all__ = [
     "EvalResult",
     "EvalSetupError",
     "SweBenchAdapter",
+    "r2egym",
 ]

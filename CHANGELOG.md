@@ -279,6 +279,12 @@ user needs to know across them.
   from the Git tag (`setuptools-scm`) and is published to PyPI via OIDC Trusted
   Publishing when a GitHub Release is published; `hack/release/create-release.py`
   drafts release notes and cuts draft releases (see [docs/release.md](docs/release.md)).
+- Python client: `ate_env_rl.adapters.r2egym`, the R2E-Gym adapter
+  (`make_fleet_repo_env`, `fresh_eval_env`, `r2egym_command_files`;
+  `AteEnvRuntime` and `AteEnvRepoEnv` are built on first access), moved from
+  the OpenHands integration so a caller without OpenHands installs only
+  `ate-env-rl`. Python >= 3.10, no extra dependency: R2E-Gym itself is still
+  installed from its checkout and imported on first use.
 
 ### Changed
 
@@ -353,6 +359,10 @@ user needs to know across them.
   - Blank or non-string `template`: no template (was the value).
   - Whitespace-only or binary id: skipped for the next key (was the value);
     a UTF-8 bytes id is decoded (was `"b'...'"`).
+- Python client: the R2E-Gym adapter's logger is named
+  `ate_env_rl.adapters.r2egym` (was `ate_env_openhands.r2egym`); a logging
+  configuration keyed on the old name must follow. `ate_env_openhands.r2egym`
+  stays as a re-export of the new module, with the same names.
 
 ### Fixed
 - `preflight-coverage.json` (schema v1) gains two optional fields per image,

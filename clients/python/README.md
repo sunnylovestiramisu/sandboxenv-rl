@@ -480,7 +480,7 @@ Two more sources read from outside the process:
   a plain name such as `test`, and an `offset` past the end reads no tasks. It
   needs the `datasets` package (`pip install datasets`), imported when `load()`
   runs. `keep_row=True` also stores a copy of the row under
-  `Task.metadata["ds"]`, which the OpenHands R2E-Gym adapter needs.
+  `Task.metadata["ds"]`, which the R2E-Gym adapter (`ate_env_rl.adapters.r2egym`) needs.
 - `ImageListSource(path)` reads an image manifest, one image per line with `#`
   comments; each task's id is its image.
 

@@ -506,8 +506,9 @@ class SweBenchSource:
         image_field / id_field: as for ``row_to_task``. The defaults read
             ``docker_image`` or ``image_name``, and ``instance_id``.
         keep_row: also store a deep copy of the row under
-            ``Task.metadata["ds"]``, which the R2E-Gym adapter of the OpenHands
-            integration needs for its environment and reward grading. The copy
+            ``Task.metadata["ds"]``, which the R2E-Gym adapter
+            (``ate_env_rl.adapters.r2egym``) needs for its environment and
+            reward grading. The copy
             keeps the row the adapter grades with apart from ``Task.metadata``,
             which a rollout may edit; ``copy.deepcopy`` copies only the
             containers and shares the strings, so a large text field (such as

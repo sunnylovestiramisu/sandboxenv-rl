@@ -37,7 +37,7 @@ How it fits together:
 
 | path | what it is |
 |---|---|
-| [`src/ate_env_openhands/`](src/ate_env_openhands) | `AteEnvWorkspace`, `port_url`, the fleet and R2E-Gym adapters, `agent_sandbox_rl` |
+| [`src/ate_env_openhands/`](src/ate_env_openhands) | `AteEnvWorkspace`, `port_url`, the fleet adapters, the `r2egym` re-export, `agent_sandbox_rl` |
 | [`layer/`](layer) | the runtime layer: Dockerfile, hash-locked dependencies, `lock.sh` |
 | [`../../examples/openhands`](../../examples/openhands) | the examples: OpenHands' agent-sandbox example 17, CodeAct, trajectory execution, a plain-HTTP demo, a fleet rollout |
 | [`tests/`](tests) | unit and integration tests: a fake ate-env-api and port proxy in front of a real agent-server |
@@ -314,12 +314,13 @@ results = fleet.run(rollout)
 
 ## 7. R2E-Gym adapter
 
-`ate_env_openhands.r2egym` has the names of `agent_sandbox_rl.adapters.r2egym`, for ate-env:
-R2E-Gym's `RepoEnv` on a sandbox the fleet acquired. No agent-server is involved: the runtime's
-exec and file copy go through the handle.
+`ate_env_rl.adapters.r2egym` (re-exported by `ate_env_openhands.r2egym`) has the names of
+`agent_sandbox_rl.adapters.r2egym` for ate-env: R2E-Gym's `RepoEnv` on a sandbox the fleet
+acquired. No agent-server is involved: the runtime's exec and file copy go through the handle, so
+callers that do not use OpenHands only install `ate-env-rl`.
 
 ```python
-from ate_env_openhands.r2egym import fresh_eval_env, make_fleet_repo_env, r2egym_command_files
+from ate_env_rl.adapters.r2egym import fresh_eval_env, make_fleet_repo_env, r2egym_command_files
 
 def rollout(task, handle):                        # task.metadata["ds"] is the dataset row
     env = make_fleet_repo_env(handle, command_files=r2egym_command_files())
