@@ -804,9 +804,10 @@ ate_env_fleet.run
   command word of the command line's first simple command, after leading
   `NAME=value` assignments and redirections (`cmd1 && cmd2` records `cmd1`);
   nothing is recorded when an assignment's value or a redirection target holds
-  `$` or a backtick, or for an argv list whose first item is an assignment.
-  They never hold command arguments, file content or image tags. A command
-  that fails with `check=True` marks its `exec` span as an error.
+  `$` or a backtick, when a redirection has no target or is followed by an
+  operator, or for an argv list whose first item is an assignment. They never
+  hold command arguments, file content or image tags. A command that fails with
+  `check=True` marks its `exec` span as an error.
 - **Propagation.** Every gRPC call on a channel the client creates carries
   the W3C `traceparent` / `tracestate` (never baggage), so `ate-env-api`
   can continue the trace. A caller-owned `Client(channel=...)` gets spans

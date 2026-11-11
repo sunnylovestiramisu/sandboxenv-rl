@@ -354,6 +354,18 @@ func isRedirectionOp(op string) bool {
 	return op == "&>" || op == "&>>"
 }
 
+func isOperator(op string) bool {
+	if isRedirectionOp(op) {
+		return true
+	}
+	for _, o := range ops {
+		if o == op {
+			return true
+		}
+	}
+	return false
+}
+
 // executable returns the executable name of a shell command line, as the
 // Python client's executable_attr does: the base name of the first command
 // word of the line's first simple command, never an argument. The line is
@@ -371,9 +383,10 @@ func isRedirectionOp(op string) bool {
 // "cmd1 && A=s cmd2" gives "cmd1" and "; A=s cmd" gives "". It also gives
 // "" when an assignment's value or a redirection target holds "$" or a
 // backtick (an expansion such as "$(echo my secret)" can span words, and
-// its rest would read as the command), when the command word holds "=",
-// "$" or a backtick, and when the line cannot be split (an unterminated
-// quote, a trailing backslash). "" records no attribute.
+// its rest would read as the command), when a redirection has no target or
+// its target is an operator ("2>&1<<<x", "A=>(x) cmd"), when the command
+// word holds "=", "$" or a backtick, and when the line cannot be split (an
+// unterminated quote, a trailing backslash). "" records no attribute.
 func executable(commandLine string) string {
 	words, ok := shellWords(commandLine)
 	if !ok {
@@ -395,7 +408,11 @@ func executableWordsFromShell(words []string) string {
 			return ""
 		default:
 			if isRedirectionOp(w) {
-				if i+1 < len(words) && strings.ContainsAny(words[i+1], "$`") {
+				if i+1 >= len(words) {
+					return ""
+				}
+				target := words[i+1]
+				if isOperator(target) || strings.ContainsAny(target, "$`") {
 					return ""
 				}
 				inCommand = true
@@ -420,6 +437,9 @@ func executableWordsFromShell(words []string) string {
 	return ""
 }
 
+// executableWords returns the base name of words[0], or "" when words is
+// empty or words[0] holds "=", "$" or a backtick (so a leading assignment
+// item records nothing), matching executable_attr on a sequence in Python.
 func executableWords(words []string) string {
 	if len(words) == 0 {
 		return ""
@@ -431,6 +451,14 @@ func executableWords(words []string) string {
 	return w[strings.LastIndex(w, "/")+1:]
 }
 
+// shellWords splits s into shell words and operator tokens, matching the
+// Python client's _tokenize_sh: blanks separate words; unquoted control and
+// redirection operators (ops, with an optional leading ASCII fd number on
+// redirections) become their own tokens; '#' outside a word starts a comment
+// to the next newline; single quotes keep everything literal; inside double
+// quotes a backslash escapes '"', '\\', '$', '`' and '\n'; outside quotes a
+// backslash escapes the next character (joining lines on "\\\n"). ok is
+// false for an unterminated quote or a trailing backslash.
 func shellWords(s string) (words []string, ok bool) {
 	var cur strings.Builder
 	inWord := false
@@ -544,6 +572,10 @@ func shellWords(s string) (words []string, ok bool) {
 	return words, true
 }
 
+// spanReader counts the bytes read through it and ends its span on EOF, on a
+// read error or on Close, whichever comes first; ate_env.file.size is set
+// only when the stream reaches io.EOF without an error, matching
+// ate_env_rl.Env.read_file.
 type spanReader struct {
 	io.ReadCloser
 	span trace.Span

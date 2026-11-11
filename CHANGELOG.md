@@ -22,18 +22,6 @@ user needs to know across them.
   of an image reach a node only when an environment boots there: that is the
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
-### Fixed
-- Go and Python clients: the executable attribute (`ate_env.command.executable`)
-  splits shell operators (`;`, `&`, `|`, `&&`, `||`, redirections) and skips
-  comments, so an assignment after an operator or in a comment is never
-  recorded. It holds the first command of a compound line (`cmd1 && A=s cmd2`
-  gives `cmd1`) and records nothing when an assignment's value or a redirection
-  target holds `$` or a backtick (`A="$(echo my secret)" cmd`,
-  `<<<"$(echo my secret)" cmd`). Two cases that recorded a name now record
-  nothing: an argv list whose first item is an assignment
-  (`["API_KEY=s3cr3t", "python3", "x.py"]` gave `python3`), and a first word
-  that holds `=`, `$` or a backtick (`./a=b` gave `a=b`).
-
 ### Added
 - `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to
   the dataset (under the plan's own file name, so the run's `placement` label
@@ -393,6 +381,17 @@ user needs to know across them.
   stays as a re-export of the new module, with the same names.
 
 ### Fixed
+- Go and Python clients: the executable attribute (`ate_env.command.executable`)
+  splits shell operators (`;`, `&`, `|`, `&&`, `||`, redirections) and skips
+  comments, so an assignment after an operator or in a comment is never
+  recorded. It holds the first command of a compound line (`cmd1 && A=s cmd2`
+  gives `cmd1`) and records nothing when an assignment's value or a redirection
+  target holds `$` or a backtick (`A="$(echo my secret)" cmd`,
+  `<<<"$(echo my secret)" cmd`) or when a redirection has no target or is
+  followed by an operator (`2>&1<<<x cmd`). Two cases that recorded a name now
+  record nothing: an argv list whose first item is an assignment
+  (`["API_KEY=s3cr3t", "python3", "x.py"]` gave `python3`), and a first word
+  that holds `=`, `$` or a backtick (`./a=b` gave `a=b`).
 - `preflight-coverage.json` (schema v1) gains two optional fields per image,
   `undeleted_probes` and `waited_ms`, the ones `WarmImage`'s coverage already
   carries. `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` list

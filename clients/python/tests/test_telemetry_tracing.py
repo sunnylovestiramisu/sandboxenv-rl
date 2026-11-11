@@ -423,6 +423,9 @@ def test_carrier_never_carries_baggage(spans):
         ("X+=s3cr3t cmd", "cmd"),  # bash appends with NAME+=value
         ("PATH+=:/opt/bin A=1 make", "make"),
         ("./a+=b", None),  # likewise
+        ("A=>(s3cr3t x) cmd", None),  # redirection op followed by "(" records nothing
+        ("A=<(cat s3cr3t) cmd", None),
+        ("2>&1<<<s3cr3t", None),
     ],
 )
 def test_executable_attr_skips_env_assignments(command, want):
@@ -1021,7 +1024,7 @@ _ASSIGNMENT_VALUES = ["{}", '"$(echo "my {}")"', "${{B:-my {}}}", "`echo {} x`",
 
 @settings(max_examples=300)
 @given(
-    prefix=st.sampled_from(["", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${{B:-my {}}} "]),
+    prefix=st.sampled_from(["", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${{B:-my {}}} ", "2>&1<<<{} "]),
     name=st.sampled_from(["API_KEY", "TOKEN", "A", "X+"]),
     secret=st.text(alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", min_size=6, max_size=20),
     value=st.sampled_from(_ASSIGNMENT_VALUES),

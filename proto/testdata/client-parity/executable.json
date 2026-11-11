@@ -274,5 +274,25 @@
   {
     "line": "<<<$'a\\' secret' cmd don\\'t",
     "want": null
+  },
+  {
+    "line": "2>&1<<<hunter2 sudo -S id",
+    "want": null
+  },
+  {
+    "line": "2>&1>/var/log/SEKRET cmd",
+    "want": null
+  },
+  {
+    "line": ">&2>SEKRET cmd",
+    "want": null
+  },
+  {
+    "line": "1>&2<<<'my SEKRET' cmd",
+    "want": null
+  },
+  {
+    "line": ">'5'>|'SEKRET' cmd",
+    "want": null
   }
 ]

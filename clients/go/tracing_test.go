@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"pgregory.net/rapid"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +41,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"pgregory.net/rapid"
 )
 
 // tracingFixture is the stack the SDK talks to, with the API server's gRPC
@@ -712,7 +712,7 @@ func TestNonEmptyDropsEmptyStrings(t *testing.T) {
 
 func TestExecutableNeverRecordsAssignments(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${B:-my %s} "}
+		prefixes := []string{"", " ", "\n", "(", "{ ", ">out ", "2>&1 ", "<<<input ", "<<<${B:-my %s} ", "2>&1<<<%s "}
 		names := []string{"API_KEY", "TOKEN", "A", "X+"}
 		cmds := []string{"", " python x.py", " 'unterminated", " cmd"}
 		// Values whose expansion holds a space, so the secret lands in a

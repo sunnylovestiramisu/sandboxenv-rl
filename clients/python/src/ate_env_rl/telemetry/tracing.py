@@ -432,6 +432,11 @@ def _is_redirection_op(op: str) -> bool:
         base = ""
     return base in _REDIR_BASES or op in ("&>", "&>>")
 
+
+def _is_operator(op: str) -> bool:
+    return op in _OPS or _is_redirection_op(op)
+
+
 def _tokenize_sh(s: str) -> list[str] | None:
     words = []
     cur = []
@@ -533,11 +538,12 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
     command word (``; A=s cmd``) gives None, and ``cmd1 && A=s cmd2`` gives
     ``cmd1``. None also when an assignment's value or a redirection target holds
     ``$`` or a backtick (an expansion such as ``"$(echo my secret)"`` can span
-    words), when the command word holds ``=``, ``$`` or a backtick, or when the
-    line cannot be split. An argv list is not parsed: its first item is the command word,
-    so a leading assignment item gives None. The Go client's ``executable``
-    and ``executableWords`` give the same answers
-    (proto/testdata/client-parity/executable.json).
+    words), when a redirection has no target or its target is an operator
+    (``2>&1<<<x``, ``A=>(x) cmd``), when the command word holds ``=``, ``$`` or
+    a backtick, or when the line cannot be split. An argv list is not parsed:
+    its first item is the command word, so a leading assignment item gives
+    None. The Go client's ``executable`` and ``executableWords`` give the same
+    answers (proto/testdata/client-parity/executable.json).
     """
     if isinstance(command, (list, tuple)):
         if not command:
@@ -561,7 +567,10 @@ def executable_attr(command: str | list[str] | tuple[str, ...]) -> str | None:
             i += 1
             continue
         if _is_redirection_op(w):
-            if i + 1 < len(words) and ('$' in words[i + 1] or '`' in words[i + 1]):
+            if i + 1 >= len(words):
+                return None
+            target = words[i + 1]
+            if _is_operator(target) or '$' in target or '`' in target:
                 return None
             in_command = True
             i += 2

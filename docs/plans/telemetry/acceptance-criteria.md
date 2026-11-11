@@ -357,9 +357,9 @@ Conventions:
 - Status: pass. Example tests: `test_executable_attr_skips_env_assignments` and the
   `executable.json` vector. Property tests in both clients (`TestExecutableNeverRecordsAssignments`,
   `test_executable_never_records_assignments_prop`) draw assignment values and redirection prefixes
-  with spaces inside `$(...)`, `${...}`, backticks and `$'...'` (#341), which an expansion-unaware
-  split leaked; an assignment or redirection target whose value holds `$` or a backtick records
-  nothing.
+  with spaces inside `$(...)`, `${...}`, backticks and `$'...'` and unspaced chained digit
+  redirections (`2>&1<<<...`) (#341); an assignment or redirection target whose value holds `$` or a
+  backtick, or a redirection with no target or an operator target, records nothing.
 - Properties: P-21.
 
 ## AC-19: Several fleets share the warm-replica gauge
