@@ -49,6 +49,13 @@ updates:
       # as new as the generator; it moves with the client's grpcio floor and a
       # `make protos`, by hand.
       - dependency-name: grpcio-tools
+      # A build-system floor in clients/python/pyproject.toml, not a pin. The
+      # release build (hack/release/build-dists.sh, `--no-isolation`) takes
+      # setuptools-scm from nixpkgs (nix/ci.nix, pythonReleaseTools), so a
+      # floor above the nixpkgs version fails release validation and
+      # publish-pypi (#284). Raise it by hand, after the flake.lock bump that
+      # brings a newer one.
+      - dependency-name: setuptools-scm
   - package-ecosystem: github-actions
     # The workflows, plus the local composite actions under .github/actions,
     # which pin actions of their own.
