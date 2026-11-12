@@ -95,6 +95,9 @@ type Server struct {
 	// ListWorkersUnavailable is how many ListWorkers calls answer
 	// Unavailable first, as an api server restarting does.
 	ListWorkersUnavailable int
+	// OnListWorkers, when set, runs at the start of each ListWorkers call,
+	// without the server's lock. Set it before the calls start.
+	OnListWorkers func()
 	// BornSuspended makes CreateActor leave a new actor SUSPENDED and
 	// unplaced, as Substrate does: only ResumeActor (the router's wake on a
 	// guest call, or a direct resume) places it on a worker and runs it. Off,
@@ -272,6 +275,9 @@ func Worker(namespace, pool, node string, labels map[string]string, slots int32)
 }
 
 func (s *Server) ListWorkers(ctx context.Context, req *ateapipb.ListWorkersRequest) (*ateapipb.ListWorkersResponse, error) {
+	if s.OnListWorkers != nil {
+		s.OnListWorkers()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.DenyListWorkers {

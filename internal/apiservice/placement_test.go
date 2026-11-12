@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -903,6 +904,43 @@ func TestWarmImageNodeCountFromTheWorkers(t *testing.T) {
 	control.ListWorkersUnavailable = 0
 	if n := control.ActorCount(); n != 0 {
 		t.Errorf("%d actors left, want 0", n)
+	}
+}
+
+// The retries of the worker listing keep the backoff the call started with:
+// a knob that a test's SetWarmTimings (or its cleanup) changes while the call
+// retries does not change the waits of that call.
+func TestWarmImageListingBackoffKeepsItsTimings(t *testing.T) {
+	te := newFullTestEnv(t)
+	client, control := te.envClient, te.control
+	seedDomains(t, control)
+	const backoff = 50 * time.Millisecond
+	apiservice.SetWarmTimings(t, backoff, backoff, time.Second)
+
+	var mu sync.Mutex
+	var calls []time.Time
+	control.ListWorkersUnavailable = 3
+	control.OnListWorkers = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, time.Now())
+		if len(calls) == 1 {
+			// The call read its knobs before this first listing. A cap of 0
+			// would make the wait after the second listing 0.
+			apiservice.SetWarmTimings(t, backoff, 0, time.Second)
+		}
+	}
+	_, _, err := warm(t, client, &ateenvv1alpha.WarmImageRequest{RootfsImage: testRootfsImage, WorkerSelector: map[string]string{"ate-env/domain": "d0"}, Nodes: 2})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("three Unavailable listings: err = %v, want Unavailable", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 3 {
+		t.Fatalf("%d listings, want 3", len(calls))
+	}
+	if gap := calls[2].Sub(calls[1]); gap < backoff {
+		t.Errorf("wait before the third listing = %v, want at least the %v cap the call started with", gap, backoff)
 	}
 }
 

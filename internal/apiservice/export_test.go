@@ -23,9 +23,15 @@ import (
 // probe's create, resume and delete, and the budget of its delete, for the
 // duration of t.
 func SetWarmTimings(t *testing.T, retryInitial, retryMax, deleteTimeout time.Duration) {
-	oldInitial, oldMax, oldDelete := warmRetryInitial, warmRetryMax, warmDeleteTimeout
-	warmRetryInitial, warmRetryMax, warmDeleteTimeout = retryInitial, retryMax, deleteTimeout
-	t.Cleanup(func() { warmRetryInitial, warmRetryMax, warmDeleteTimeout = oldInitial, oldMax, oldDelete })
+	oldInitial, oldMax, oldDelete := warmRetryInitial.Load(), warmRetryMax.Load(), warmDeleteTimeout.Load()
+	warmRetryInitial.Store(retryInitial)
+	warmRetryMax.Store(retryMax)
+	warmDeleteTimeout.Store(deleteTimeout)
+	t.Cleanup(func() {
+		warmRetryInitial.Store(oldInitial)
+		warmRetryMax.Store(oldMax)
+		warmDeleteTimeout.Store(oldDelete)
+	})
 }
 
 // SetTemplateRecreateTimeout sets the bound of the recreate loop for the
@@ -54,7 +60,7 @@ func (s *Server) WarmProbesInFlight() int {
 // SetWarmLateCreateSettle sets how long WarmImage watches for the late create
 // of a probe whose create was never confirmed, for the duration of t.
 func SetWarmLateCreateSettle(t *testing.T, d time.Duration) {
-	old := warmLateCreateSettle
-	warmLateCreateSettle = d
-	t.Cleanup(func() { warmLateCreateSettle = old })
+	old := warmLateCreateSettle.Load()
+	warmLateCreateSettle.Store(d)
+	t.Cleanup(func() { warmLateCreateSettle.Store(old) })
 }

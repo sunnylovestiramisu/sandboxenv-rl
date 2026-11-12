@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agent-substrate/env/internal/ate"
@@ -68,19 +69,31 @@ const (
 	warmCreateAttemptTimeout = 30 * time.Second
 )
 
-// Timings of the retries around a probe, variables so tests shorten them:
-// the backoff between the attempts of a create, resume or delete, and the
-// budget of a probe's delete.
+// The timings of a WarmImage probe's retries and delete. Atomic because a
+// test sets them while the delete goroutines of an earlier test's call,
+// which outlive that call, still read them; each function reads a knob once.
 var (
-	warmRetryInitial  = 500 * time.Millisecond
-	warmRetryMax      = 5 * time.Second
-	warmDeleteTimeout = 60 * time.Second
+	warmRetryInitial  = newAtomicDuration(500 * time.Millisecond)
+	warmRetryMax      = newAtomicDuration(5 * time.Second)
+	warmDeleteTimeout = newAtomicDuration(60 * time.Second)
 	// warmLateCreateSettle is how long a probe whose create was never
 	// confirmed (an attempt was cut off) is watched after its delete found
 	// nothing: the control plane can still commit such a create after the
 	// delete, and the call then deletes the probe again.
-	warmLateCreateSettle = 2 * time.Second
+	warmLateCreateSettle = newAtomicDuration(2 * time.Second)
 )
+
+// atomicDuration is a duration read and written from different goroutines.
+type atomicDuration struct{ ns atomic.Int64 }
+
+func newAtomicDuration(d time.Duration) *atomicDuration {
+	a := &atomicDuration{}
+	a.Store(d)
+	return a
+}
+
+func (a *atomicDuration) Load() time.Duration   { return time.Duration(a.ns.Load()) }
+func (a *atomicDuration) Store(d time.Duration) { a.ns.Store(int64(d)) }
 
 // warmLateCreateRechecks is how many more deletes an unconfirmed probe gets
 // in its settle window, spread evenly, after one that found nothing. Few, so
@@ -636,7 +649,7 @@ func (s *Server) domainNodes(ctx context.Context, selector map[string]string) (i
 // (an api server restarting, a deadline on the call) retried a few times
 // inside ctx; PermissionDenied and FailedPrecondition are final.
 func (s *Server) listedNodes(ctx context.Context, selector map[string]string) (int, error) {
-	wait := warmRetryInitial
+	wait, retryMax := warmRetryInitial.Load(), warmRetryMax.Load()
 	for attempt := 1; ; attempt++ {
 		n, err := s.domainNodes(ctx, selector)
 		if err == nil || attempt == 3 || ctx.Err() != nil {
@@ -652,7 +665,7 @@ func (s *Server) listedNodes(ctx context.Context, selector map[string]string) (i
 			return n, err
 		case <-time.After(wait):
 		}
-		wait = min(wait*2, warmRetryMax)
+		wait = min(wait*2, retryMax)
 	}
 }
 
@@ -804,7 +817,7 @@ func grpcStatus(err error) *status.Status {
 // spend the whole budget. The last error is returned, with the attempt
 // count once there were retries.
 func warmRetry(ctx context.Context, attemptTimeout time.Duration, call func(ctx context.Context, attempt int) error) error {
-	wait := warmRetryInitial
+	wait, retryMax := warmRetryInitial.Load(), warmRetryMax.Load()
 	for attempt := 1; ; attempt++ {
 		actx, cancel := ctx, context.CancelFunc(func() {})
 		if attemptTimeout > 0 {
@@ -823,7 +836,7 @@ func warmRetry(ctx context.Context, attemptTimeout time.Duration, call func(ctx 
 			return withAttempts(err, attempt)
 		case <-time.After(wait):
 		}
-		wait = min(wait*2, warmRetryMax)
+		wait = min(wait*2, retryMax)
 	}
 }
 
@@ -884,20 +897,21 @@ func (s *Server) waitRunning(ctx context.Context, atespace, id string, timeout t
 // delete that the budget cuts off after an earlier one left the probe gone
 // counts as done.
 func (s *Server) deleteWarmProbe(ctx context.Context, atespace, id string, uncertain bool) error {
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout.Load())
 	defer cancel()
-	wait := warmRetryInitial
+	wait, retryMax := warmRetryInitial.Load(), warmRetryMax.Load()
 	rechecks := 0
+	settle := warmLateCreateSettle.Load()
 	step := time.Duration(0)
 	if warmLateCreateRechecks > 0 {
-		step = warmLateCreateSettle / time.Duration(warmLateCreateRechecks)
+		step = settle / time.Duration(warmLateCreateRechecks)
 	}
 	for attempt := 1; ; attempt++ {
 		err := s.client.Delete(dctx, atespace, id)
 		// A missing probe is ate.ErrNotFound: the ate client folds the
 		// NotFound status into it, so no status code is left to read.
 		if err == nil || errors.Is(err, ate.ErrNotFound) {
-			if !uncertain || warmLateCreateSettle <= 0 || rechecks == warmLateCreateRechecks {
+			if !uncertain || settle <= 0 || rechecks == warmLateCreateRechecks {
 				return nil
 			}
 			if deadline, ok := dctx.Deadline(); ok && time.Until(deadline) < step {
@@ -924,7 +938,7 @@ func (s *Server) deleteWarmProbe(ctx context.Context, atespace, id string, uncer
 		if retry {
 			select {
 			case <-time.After(wait):
-				wait = min(wait*2, warmRetryMax)
+				wait = min(wait*2, retryMax)
 				continue
 			case <-dctx.Done():
 			}
@@ -952,7 +966,7 @@ func (s *Server) sweepWarmProbes(ctx context.Context, atespace string, uncertain
 	for _, id := range undeleted {
 		known[id] = true
 	}
-	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout)
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmDeleteTimeout.Load())
 	defer cancel()
 	actors, err := s.client.List(lctx, atespace)
 	if err != nil {
