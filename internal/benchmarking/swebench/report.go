@@ -3268,6 +3268,9 @@ func (rep *Report) WriteMarkdown(w io.Writer) {
 				fmt.Fprintf(w, "  - %s\n", reason)
 			}
 		}
+		for _, ev := range rep.Validity.Evidence {
+			fmt.Fprintf(w, "  - evidence: %s\n", ev)
+		}
 	}
 
 	if rep.SystemDescription != nil {

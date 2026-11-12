@@ -893,3 +893,182 @@ func TestReapCmdTrimsPrefixDashFromRunID(t *testing.T) {
 		t.Fatalf("unexpected reap event: %+v", reap)
 	}
 }
+
+// A scenario whose footing rests on a pre-flight: bench run puts the
+// coverage into the bundle, writes no synthetic prewarm event, and the
+// report's validity names the coverage as its Rule 1 evidence.
+func TestBenchRunScenarioWithPreflightCoverage(t *testing.T) {
+	dir := t.TempDir()
+	scenYAML := `schema_version: v1
+name: preflight-footing
+footing: warm
+seed: 7
+sut:
+  backend: substrate
+  access: ate-env-api
+  endpoint: localhost:7777
+jobs:
+  - name: job
+    kind: simulated
+    mode: closed-loop
+    steps: 1
+    batch_size: 2
+    concurrency: 2
+    park_policy: snapshot
+    instances: 2
+`
+	// A first run tells which images the simulated job uses.
+	scenPath := filepath.Join(dir, "scenario.yaml")
+	if err := os.WriteFile(scenPath, []byte(scenYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	probe := filepath.Join(dir, "probe-out")
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", probe}, &out, &errBuf); code != 0 {
+		t.Fatalf("bench run failed (code=%d): %s", code, errBuf.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(probe, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"event":"prewarm"`) {
+		t.Fatalf("a warm footing without a coverage gets the synthetic prewarm event:\n%s", raw)
+	}
+	images := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var ev struct {
+			Event string `json:"event"`
+			Image string `json:"image"`
+		}
+		if json.Unmarshal([]byte(line), &ev) == nil && ev.Image != "" {
+			images[ev.Image] = true
+		}
+	}
+	if len(images) == 0 {
+		t.Fatal("no create events with an image in the probe run")
+	}
+	now := time.Now().UTC()
+	cov := &schema.PreflightCoverage{SchemaVersion: schema.SchemaVersion, RunID: "pf-fixture", StartedAt: now, FinishedAt: now, Plan: "image-placement.json", Complete: true}
+	d := schema.DomainCoverage{Name: "d0", Nodes: 1, NodesSeen: []string{"node-1"}, Complete: true}
+	for img := range images {
+		cov.Goldens = append(cov.Goldens, schema.GoldenRecord{Image: img, Template: "default-template-x", State: "ready", Tag: "golden-x", WaitMS: 1})
+		d.Images = append(d.Images, schema.ImageCoverage{Image: img, Nodes: []string{"node-1"}, Wanted: 1, Probes: 1, Rounds: 1, Complete: true})
+	}
+	cov.Domains = []schema.DomainCoverage{d}
+	// The coverage sits next to the scenario file and is named relative to it.
+	covPath := filepath.Join(dir, "cov.json")
+	if err := swebench.WritePreflightCoverage(covPath, cov); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scenPath, []byte(scenYAML+"preflight:\n  plan: image-placement.json\n  coverage: cov.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(dir, "run-out")
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", runDir}, &out, &errBuf); code != 0 {
+		t.Fatalf("bench run with preflight.coverage failed (code=%d): %s", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "preflight-coverage.json")); err != nil {
+		t.Fatalf("coverage not in the bundle: %v", err)
+	}
+	raw, err = os.ReadFile(filepath.Join(runDir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"event":"prewarm"`) {
+		t.Errorf("a synthetic prewarm event next to a coverage file:\n%s", raw)
+	}
+	repRaw, err := os.ReadFile(filepath.Join(runDir, "report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Validity struct {
+			Valid    bool     `json:"valid"`
+			Reasons  []string `json:"reasons"`
+			Evidence []string `json:"evidence"`
+		} `json:"validity"`
+	}
+	if err := json.Unmarshal(repRaw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Validity.Valid || len(rep.Validity.Evidence) == 0 || !strings.Contains(strings.Join(rep.Validity.Evidence, ";"), "pre-flight coverage complete") {
+		t.Errorf("validity = %+v, want valid with the coverage as evidence", rep.Validity)
+	}
+	// The evidence names the file by its place in the bundle, not by the
+	// path it was read from.
+	if ev := strings.Join(rep.Validity.Evidence, ";"); !strings.Contains(ev, "(preflight-coverage.json)") || strings.Contains(ev, dir) {
+		t.Errorf("evidence = %q, want the bundle-relative name", ev)
+	}
+	md, _ := os.ReadFile(filepath.Join(runDir, "report.md"))
+	if !strings.Contains(string(md), "evidence: rule 1 (footing=warm): pre-flight coverage complete") {
+		t.Errorf("report.md lacks the evidence line:\n%s", md)
+	}
+	// Single-file validation takes the coverage by flag; without it the warm
+	// footing has no prewarm evidence.
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"validate", "-report", filepath.Join(runDir, "report.json"), "-schedule", filepath.Join(runDir, "schedule.json"), "-footing", "warm", "-preflight-coverage", filepath.Join(runDir, "preflight-coverage.json")}, &out, &errBuf); code != 0 {
+		t.Fatalf("bench validate failed (code=%d): %s", code, errBuf.String())
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"validate", "-report", filepath.Join(runDir, "report.json"), "-schedule", filepath.Join(runDir, "schedule.json"), "-footing", "warm"}, &out, &errBuf); code == 0 || !strings.Contains(errBuf.String(), "expected prewarm events, found 0") {
+		t.Fatalf("bench validate without the coverage: code=%d, %s", code, errBuf.String())
+	}
+
+	// A plan that the coverage was not written for is refused, as is a
+	// coverage that names no plan when the scenario names one.
+	if err := os.WriteFile(scenPath, []byte(scenYAML+"preflight:\n  plan: other-plan.json\n  coverage: cov.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", filepath.Join(dir, "mismatch")}, &out, &errBuf); code == 0 || !strings.Contains(errBuf.String(), "is not the plan the coverage") {
+		t.Fatalf("plan mismatch: code=%d, %s", code, errBuf.String())
+	}
+	noPlan := *cov
+	noPlan.Plan = ""
+	if err := swebench.WritePreflightCoverage(filepath.Join(dir, "cov-noplan.json"), &noPlan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scenPath, []byte(scenYAML+"preflight:\n  plan: image-placement.json\n  coverage: cov-noplan.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", filepath.Join(dir, "noplan")}, &out, &errBuf); code == 0 || !strings.Contains(errBuf.String(), "is not the plan the coverage") {
+		t.Fatalf("coverage without a plan: code=%d, %s", code, errBuf.String())
+	}
+	// A warm footing that names a plan and no coverage is refused rather
+	// than passing on the synthetic event.
+	if err := os.WriteFile(scenPath, []byte(scenYAML+"preflight:\n  plan: image-placement.json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", filepath.Join(dir, "plan-only")}, &out, &errBuf); code == 0 || !strings.Contains(errBuf.String(), "but no coverage") {
+		t.Fatalf("plan without coverage on warm footing: code=%d, %s", code, errBuf.String())
+	}
+
+	// A cold footing with a coverage named gets no coverage in its bundle
+	// and no synthetic event, and is valid as a cold run.
+	coldScen := strings.Replace(scenYAML, "footing: warm", "footing: cold", 1) + "preflight:\n  coverage: cov.json\n"
+	if err := os.WriteFile(scenPath, []byte(coldScen), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	coldDir := filepath.Join(dir, "cold-out")
+	out.Reset()
+	errBuf.Reset()
+	if code := execute([]string{"run", "-scenario", scenPath, "-dest", coldDir}, &out, &errBuf); code != 0 {
+		t.Fatalf("cold bench run failed (code=%d): %s", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(coldDir, "preflight-coverage.json")); err == nil {
+		t.Error("a cold footing got the coverage in its bundle")
+	}
+	coldRep, _ := os.ReadFile(filepath.Join(coldDir, "report.json"))
+	if !strings.Contains(string(coldRep), `"valid": true`) || !strings.Contains(string(coldRep), "no prewarm events and no pre-flight coverage") {
+		t.Errorf("cold report validity:\n%s", coldRep)
+	}
+}

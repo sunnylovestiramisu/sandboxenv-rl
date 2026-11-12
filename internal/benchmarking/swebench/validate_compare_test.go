@@ -570,6 +570,15 @@ func TestValidateRule1ReadsThePreflightCoverage(t *testing.T) {
 	}
 	// A complete pre-flight stands in for prewarm events on warm footing.
 	v := Validate(&Report{DistinctImages: []string{"img"}}, ValidateOptions{Footing: "warm", PreflightCoverage: complete})
+	if !v.Valid || len(v.Evidence) != 1 || !strings.Contains(v.Evidence[0], "pre-flight coverage complete") || !strings.Contains(v.Evidence[0], "run "+complete.RunID) {
+		t.Errorf("warm with a complete pre-flight: valid=%v evidence=%v, want the coverage named", v.Valid, v.Evidence)
+	}
+	if ev := Validate(&Report{PrewarmCount: 3}, ValidateOptions{Footing: "warm"}).Evidence; len(ev) != 1 || !strings.Contains(ev[0], "3 prewarm event(s), no pre-flight coverage") {
+		t.Errorf("warm on prewarm events: evidence=%v", ev)
+	}
+	if ev := Validate(&Report{}, ValidateOptions{Footing: "cold"}).Evidence; len(ev) != 1 || !strings.Contains(ev[0], "no prewarm events and no pre-flight coverage") {
+		t.Errorf("cold: evidence=%v", ev)
+	}
 	if has(v, "expected prewarm events") || has(v, "pre-flight is incomplete") || has(v, "did not cover") {
 		t.Errorf("warm + complete pre-flight: %v", v.Reasons)
 	}

@@ -43,19 +43,34 @@ const (
 
 // Scenario defines one benchmark run against a System Under Test (SUT).
 type Scenario struct {
-	SchemaVersion string                    `json:"schema_version"`
-	Name          string                    `json:"name"`
-	Description   string                    `json:"description,omitempty"`
-	Seed          int64                     `json:"seed,omitempty"`
-	Repeat        int                       `json:"repeat,omitempty"`
-	Footing       string                    `json:"footing,omitempty"`
-	SUT           SUTSpec                   `json:"sut"`
-	Jobs          []JobSpec                 `json:"jobs"`
-	WindowPolicy  *WindowPolicy             `json:"window_policy,omitempty"`
-	Window        WindowPolicy              `json:"window,omitempty"`
-	Telemetry     *TelemetrySpec            `json:"telemetry,omitempty"`
-	Variants      []FeatureOverlay          `json:"variants,omitempty"`
-	Overlays      map[string]FeatureOverlay `json:"overlays,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	Seed          int64  `json:"seed,omitempty"`
+	Repeat        int    `json:"repeat,omitempty"`
+	Footing       string `json:"footing,omitempty"`
+	// Preflight names the image placement pre-flight a warm footing rests
+	// on: the plan the loader ran with (`swebench-loader run -placement
+	// -preflight`) and the coverage file it wrote, which `bench run` copies
+	// into the bundle as preflight-coverage.json for Validity Rule 1.
+	Preflight    *PreflightSpec            `json:"preflight,omitempty"`
+	SUT          SUTSpec                   `json:"sut"`
+	Jobs         []JobSpec                 `json:"jobs"`
+	WindowPolicy *WindowPolicy             `json:"window_policy,omitempty"`
+	Window       WindowPolicy              `json:"window,omitempty"`
+	Telemetry    *TelemetrySpec            `json:"telemetry,omitempty"`
+	Variants     []FeatureOverlay          `json:"variants,omitempty"`
+	Overlays     map[string]FeatureOverlay `json:"overlays,omitempty"`
+}
+
+// PreflightSpec is the pre-flight a scenario's footing rests on. Plan is the
+// image-placement.json; Coverage is the preflight-coverage.json a pre-flight
+// over it wrote, relative to the scenario file when not absolute. Either can
+// be absent; when both are given, bench run checks that the coverage names
+// the plan (by file name), and a coverage is used for a warm footing only.
+type PreflightSpec struct {
+	Plan     string `json:"plan,omitempty"`
+	Coverage string `json:"coverage,omitempty"`
 }
 
 // Validate checks Scenario invariants.
@@ -71,6 +86,13 @@ func (s Scenario) Validate() error {
 	}
 	if s.Repeat < 0 {
 		return fmt.Errorf("scenario: repeat must be >= 0, got %d", s.Repeat)
+	}
+	// scenario.schema.json has the same enum; absent is allowed.
+	if s.Footing != "" && s.Footing != "warm" && s.Footing != "cold" {
+		return fmt.Errorf("scenario: footing must be warm or cold, got %q", s.Footing)
+	}
+	if s.Preflight != nil && s.Preflight.Plan == "" && s.Preflight.Coverage == "" {
+		return errors.New("scenario: preflight needs a plan or a coverage path")
 	}
 	if err := s.SUT.Validate(); err != nil {
 		return fmt.Errorf("scenario sut: %w", err)

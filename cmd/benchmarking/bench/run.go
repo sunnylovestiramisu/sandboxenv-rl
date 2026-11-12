@@ -68,6 +68,11 @@ func runScenarioCmd(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A relative preflight.coverage is next to the scenario file, as a
+	// reader of the file expects, not relative to the working directory.
+	if scen.Preflight != nil && scen.Preflight.Coverage != "" && !filepath.IsAbs(scen.Preflight.Coverage) {
+		scen.Preflight.Coverage = filepath.Join(filepath.Dir(*scenarioPath), scen.Preflight.Coverage)
+	}
 
 	dsSource := *datasetPath
 	if dsSource == "" {
@@ -267,9 +272,35 @@ func executeScenarioRun(
 		return nil, err
 	}
 
-	// 4. If footing == "warm", record a prewarm event so Validity Rule 1 passes.
+	// 4. A scenario whose footing rests on a pre-flight names its coverage
+	// file: for a warm arm it goes into the bundle as preflight-coverage.json,
+	// the evidence Validity Rule 1 reads (a cold arm of an overlay run gets
+	// none, as a pre-flight contradicts cold footing). Without one, a warm
+	// footing gets the synthetic prewarm event this local run stands in
+	// with.
 	eventsPath := filepath.Join(outDir, "events.jsonl")
-	if runScen.Footing == "warm" {
+	var coverage *schema.PreflightCoverage
+	coverageName := ""
+	if runScen.Preflight != nil && runScen.Footing == "warm" {
+		if runScen.Preflight.Coverage == "" {
+			// A plan alone is not evidence: the warm footing would fall back
+			// to the synthetic prewarm event and pass for the wrong reason.
+			return nil, fmt.Errorf("scenario preflight names a plan (%s) but no coverage; a warm footing that rests on a pre-flight needs its preflight-coverage.json", runScen.Preflight.Plan)
+		}
+		cov, err := swebench.ReadPreflightCoverage(runScen.Preflight.Coverage)
+		if err != nil {
+			return nil, fmt.Errorf("scenario preflight.coverage: %w", err)
+		}
+		if runScen.Preflight.Plan != "" && (cov.Plan == "" || filepath.Base(cov.Plan) != filepath.Base(runScen.Preflight.Plan)) {
+			return nil, fmt.Errorf("scenario preflight.plan %q is not the plan the coverage %s was written for (%q)", runScen.Preflight.Plan, runScen.Preflight.Coverage, cov.Plan)
+		}
+		coverageName = "preflight-coverage.json"
+		if err := swebench.WritePreflightCoverage(filepath.Join(outDir, coverageName), cov); err != nil {
+			return nil, err
+		}
+		coverage = cov
+	}
+	if runScen.Footing == "warm" && coverage == nil {
 		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0o644)
 		if err == nil {
 			rec := swebench.NewRecorder(f)
@@ -324,6 +355,10 @@ func executeScenarioRun(
 		Schedule:       sched,
 		TraceCaptured:  slices.ContainsFunc(runScen.Jobs, func(j schema.JobSpec) bool { return j.TraceMode == "trace" }),
 		TraceFileCount: len(swebench.FindTraceFiles(outDir)),
+		// The coverage is given as read, and named by its place in the
+		// bundle, so the evidence holds after the bundle moves.
+		PreflightCoverage:     coverage,
+		PreflightCoveragePath: coverageName,
 	})
 
 	var mdBuf bytes.Buffer
@@ -356,14 +391,16 @@ func validateCmd(args []string, stdout, stderr io.Writer) error {
 	footing := fs.String("footing", "", "Declared footing (warm or cold).")
 	minTasks := fs.Int("min-tasks", 0, "Minimum required tasks.")
 	minRewardRate := fs.Float64("min-reward-rate", 0, "Minimum required reward rate.")
+	coveragePath := fs.String("preflight-coverage", "", "Optional preflight-coverage.json for Validity Rule 1 (single-file mode; a bundle's own is found without this).")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	opts := swebench.ValidateOptions{
-		Footing:         *footing,
-		MinTasks:        *minTasks,
-		MinRewardRate:   *minRewardRate,
-		CheckRewardRate: *minRewardRate > 0,
+		Footing:               *footing,
+		MinTasks:              *minTasks,
+		MinRewardRate:         *minRewardRate,
+		CheckRewardRate:       *minRewardRate > 0,
+		PreflightCoveragePath: *coveragePath,
 	}
 	if strings.TrimSpace(*destDir) != "" {
 		bRes, err := ValidateArtifactBundle(*destDir, opts, *folderName)

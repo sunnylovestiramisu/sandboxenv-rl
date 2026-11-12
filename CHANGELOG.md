@@ -23,6 +23,27 @@ user needs to know across them.
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
 ### Added
+- `swebench-loader run -preflight`: with `-placement`, runs the pre-flight
+  over the plan inside the same command before the run (the `preflight`
+  subcommand's defaults), writing `preflight-events.jsonl` and
+  `preflight-coverage.json` next to the run's events (above an `events/`
+  directory, never in it); an incomplete pre-flight is logged and the run
+  goes on, as it does after a complete one that could not delete all its
+  probes (the log then says so and counts them), a cancelled one ends the
+  command with an error.
+- Reports carry `validity.evidence`: the inputs Validity Rule 1 held on (a
+  complete pre-flight coverage, the prewarm events, the node cache delta),
+  in `report.json` and `report.md`.
+- `bench` scenarios take `preflight: {plan, coverage}` (the coverage path
+  relative to the scenario file): for a warm footing `bench run` puts the
+  named coverage into the bundle as `preflight-coverage.json`, writes no
+  synthetic `prewarm` event, checks that the coverage names the plan when
+  both are given, and the report's evidence names the coverage by its place
+  in the bundle. `scenario.schema.json` takes `preflight` (at least one
+  non-empty path) and `footing` (`warm` or `cold`), and `Scenario.Validate`
+  refuses any other `footing` too, so `bench` fails on one at load.
+- `bench validate -preflight-coverage PATH` gives single-file validation
+  (`-report`) a coverage file; a bundle's own (`-dest`) was already found.
 - Harbor provider (`integrations/harbor`): `python -m ate_env_harbor.warm
   <tasks-dir>` (and `examples/harbor/run-tb2.sh warm`) warms a dataset's
   images before a run: it ensures the derived template of each (class
@@ -401,6 +422,9 @@ user needs to know across them.
   stays as a re-export of the new module, with the same names.
 
 ### Fixed
+- `swebench-loader preflight -events-dir <run>/events` writes its two files
+  to `<run>`, next to the shards directory, as documented, where it wrote
+  them among the shards; `-out` and `-coverage-out` on one path are refused.
 - `ate_env_openhands.agent_sandbox_rl.SandboxFleet.run` tears down once in its
   own `finally`. Before, a `preflight()` or `plan()` failure of the `sliding`
   or `pipelined` strategy on the last pass skipped the teardown, because those

@@ -94,6 +94,72 @@ func TestFixturesValidateAndRoundTrip(t *testing.T) {
 		roundTripJSON(t, "schedule.schema.json", v)
 	})
 
+	t.Run("scenario with preflight", func(t *testing.T) {
+		// The fixture plus a preflight block validates and decodes.
+		var scen map[string]any
+		if err := yaml.Unmarshal(mustRead(t, "testdata/scenario.yaml"), &scen); err != nil {
+			t.Fatal(err)
+		}
+		scen["preflight"] = map[string]any{"plan": "image-placement.json", "coverage": "runs/pf/preflight-coverage.json"}
+		raw, err := json.Marshal(scen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateAgainstJSONSchema("scenario.schema.json", raw); err != nil {
+			t.Fatalf("schema validate with preflight: %v", err)
+		}
+		v, err := DecodeJSONStrict[Scenario](bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Preflight == nil || v.Preflight.Plan != "image-placement.json" || v.Preflight.Coverage != "runs/pf/preflight-coverage.json" {
+			t.Errorf("Preflight = %+v", v.Preflight)
+		}
+		scen["preflight"] = map[string]any{"plan": "x", "other": 1}
+		raw, _ = json.Marshal(scen)
+		if err := ValidateAgainstJSONSchema("scenario.schema.json", raw); err == nil {
+			t.Error("an unknown preflight key validated")
+		}
+		// The schema refuses what Scenario.Validate refuses (a preflight
+		// with neither path) and an empty path, and takes the footing the
+		// preflight block goes with.
+		for name, pf := range map[string]map[string]any{
+			"empty":          {},
+			"empty plan":     {"plan": ""},
+			"empty coverage": {"plan": "p.json", "coverage": ""},
+		} {
+			scen["preflight"] = pf
+			raw, _ = json.Marshal(scen)
+			if err := ValidateAgainstJSONSchema("scenario.schema.json", raw); err == nil {
+				t.Errorf("preflight %s validated", name)
+			}
+		}
+		// Go and the schema agree on footing: warm, cold or absent.
+		scen["preflight"] = map[string]any{"coverage": "cov.json"}
+		for footing, want := range map[string]bool{"warm": true, "cold": true, "hot": false, "Warm": false, " warm": false} {
+			scen["footing"] = footing
+			raw, _ = json.Marshal(scen)
+			if err := ValidateAgainstJSONSchema("scenario.schema.json", raw); (err == nil) != want {
+				t.Errorf("footing %q: schema err = %v, want valid = %v", footing, err, want)
+			}
+			_, err := DecodeJSONStrict[Scenario](bytes.NewReader(raw))
+			if (err == nil) != want {
+				t.Errorf("footing %q: Go err = %v, want valid = %v", footing, err, want)
+			}
+			if !want && (err == nil || !strings.Contains(err.Error(), "footing")) {
+				t.Errorf("footing %q: Go err = %v, want it to name footing", footing, err)
+			}
+		}
+		delete(scen, "footing")
+		raw, _ = json.Marshal(scen)
+		if err := ValidateAgainstJSONSchema("scenario.schema.json", raw); err != nil {
+			t.Errorf("no footing: schema err = %v", err)
+		}
+		if _, err := DecodeJSONStrict[Scenario](bytes.NewReader(raw)); err != nil {
+			t.Errorf("no footing: Go err = %v", err)
+		}
+	})
+
 	t.Run("preflight_coverage.json", func(t *testing.T) {
 		raw := mustRead(t, "testdata/preflight_coverage.json")
 		if err := ValidateAgainstJSONSchema("preflight_coverage.schema.json", raw); err != nil {

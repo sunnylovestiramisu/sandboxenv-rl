@@ -277,43 +277,64 @@ func Validate(rep *Report, opts ValidateOptions) schema.ReportValidity {
 	}
 
 	// Rule 1: Warm or cold footing matches prewarm events, the pre-flight and
-	// the node cache delta.
+	// the node cache delta. evidence names what the verdict rests on.
+	var evidence []string
+	coverageSource := opts.PreflightCoveragePath
+	if coverageSource == "" && coverage != nil {
+		coverageSource = "run " + coverage.RunID
+	}
 	switch opts.Footing {
 	case "warm":
 		if coverage != nil {
+			missing := preflightMissingImages(coverage, rep.DistinctImages)
 			if !coverage.Complete {
 				reasons = append(reasons, "rule 1 (footing=warm): the pre-flight is incomplete: "+preflightShortfall(coverage))
 			}
 			// A pre-flight over a subset (-images, -domains) is complete for
 			// what it ran; the run's images must all be in it.
-			if missing := preflightMissingImages(coverage, rep.DistinctImages); len(missing) > 0 {
+			if len(missing) > 0 {
 				reasons = append(reasons, fmt.Sprintf("rule 1 (footing=warm): the pre-flight did not cover %d of the run's %d images (first: %s)", len(missing), len(rep.DistinctImages), missing[0]))
+			}
+			if coverage.Complete && len(missing) == 0 {
+				evidence = append(evidence, fmt.Sprintf("rule 1 (footing=warm): pre-flight coverage complete, %d images over %d domains (%s)", len(coverage.Goldens), len(coverage.Domains), coverageSource))
+			}
+			if prewarmCount > 0 {
+				evidence = append(evidence, fmt.Sprintf("rule 1 (footing=warm): %d prewarm event(s), not needed next to the pre-flight", prewarmCount))
 			}
 		} else if prewarmCount == 0 {
 			reasons = append(reasons, "rule 1 (footing=warm): expected prewarm events, found 0")
+		} else {
+			evidence = append(evidence, fmt.Sprintf("rule 1 (footing=warm): %d prewarm event(s), no pre-flight coverage", prewarmCount))
 		}
 		if hasCacheDelta && hitsDelta <= 0 {
 			reasons = append(reasons, fmt.Sprintf("rule 1 (footing=warm): expected positive node cache hit delta, got hits_delta=%d (misses_delta=%d)", hitsDelta, missesDelta))
+		} else if hasCacheDelta {
+			evidence = append(evidence, fmt.Sprintf("rule 1 (footing=warm): node cache hits delta +%d (misses delta %d)", hitsDelta, missesDelta))
 		}
 		if createMisses > 0 {
 			reasons = append(reasons, fmt.Sprintf("rule 1 (footing=warm): %d create event(s) had cache_hit=false", createMisses))
+		} else if createHits > 0 {
+			evidence = append(evidence, fmt.Sprintf("rule 1 (footing=warm): %d create event(s) with cache_hit=true", createHits))
 		}
 	case "cold":
 		if prewarmCount > 0 {
 			reasons = append(reasons, fmt.Sprintf("rule 1 (footing=cold): expected 0 prewarm events, found %d", prewarmCount))
 		}
 		if coverage != nil {
-			source := opts.PreflightCoveragePath
-			if source == "" {
-				source = "run " + coverage.RunID
-			}
-			reasons = append(reasons, "rule 1 (footing=cold): a pre-flight ran before the run ("+source+")")
+			reasons = append(reasons, "rule 1 (footing=cold): a pre-flight ran before the run ("+coverageSource+")")
+		}
+		if prewarmCount == 0 && coverage == nil {
+			evidence = append(evidence, "rule 1 (footing=cold): no prewarm events and no pre-flight coverage")
 		}
 		if hasCacheDelta && hitsDelta > 0 {
 			reasons = append(reasons, fmt.Sprintf("rule 1 (footing=cold): expected 0 node cache hit delta on cold footing, got hits_delta=%d", hitsDelta))
+		} else if hasCacheDelta {
+			evidence = append(evidence, fmt.Sprintf("rule 1 (footing=cold): node cache hits delta 0 (misses delta %d)", missesDelta))
 		}
 		if createHits > 0 {
 			reasons = append(reasons, fmt.Sprintf("rule 1 (footing=cold): %d create event(s) had cache_hit=true", createHits))
+		} else if createMisses > 0 {
+			evidence = append(evidence, fmt.Sprintf("rule 1 (footing=cold): %d create event(s) with cache_hit=false", createMisses))
 		}
 	case "":
 		// Footing not declared; skip Rule 1.
@@ -415,8 +436,9 @@ func Validate(rep *Report, opts ValidateOptions) schema.ReportValidity {
 	}
 
 	validity := schema.ReportValidity{
-		Valid:   len(reasons) == 0,
-		Reasons: reasons,
+		Valid:    len(reasons) == 0,
+		Reasons:  reasons,
+		Evidence: evidence,
 	}
 	rep.Validity = &validity
 	return validity

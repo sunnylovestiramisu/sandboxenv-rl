@@ -422,9 +422,13 @@ type Report struct {
 }
 
 // ReportValidity records whether the run passed all validity gates and why.
+// Evidence names the inputs a rule held on (for Rule 1: the pre-flight
+// coverage, the prewarm events, the node cache delta), so a reader knows
+// which footing evidence the verdict rests on.
 type ReportValidity struct {
-	Valid   bool     `json:"valid"`
-	Reasons []string `json:"reasons,omitempty"`
+	Valid    bool     `json:"valid"`
+	Reasons  []string `json:"reasons,omitempty"`
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // JobReportSummary summarizes per-job results in Report.

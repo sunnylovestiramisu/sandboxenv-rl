@@ -332,7 +332,8 @@ staying the source of truth so a run does not depend on a collector.
    It writes `preflight-events.jsonl` (a `preflight_template` and a
    `preflight_golden` per image, a `preflight_probe` per probe with its
    node; next to the run's `events/` directory, not in it, so the run report
-   does not count them) and `preflight-coverage.json` (`schema_version: v1`):
+   does not count them: `-events-dir runs/x/events` writes to `runs/x`) and
+   `preflight-coverage.json` (`schema_version: v1`):
    per domain the nodes seen and per image the nodes covered, probes, rounds
    and failures. It exits non-zero when a golden is not ready, a pair is
    short of its nodes or a probe could not be deleted, and says which; the
@@ -361,10 +362,19 @@ After a pre-flight (step 5 above), `-placement image-placement.json` makes
 every create carry the worker selector of one of its image's domains,
 round-robin per image, so the environments land on the nodes that already
 hold the image; images the plan left unplaced get no selector. It needs the
-ate-env API backend. Give the report the pre-flight's result too:
+ate-env API backend. `-preflight` next to `-placement` runs the pre-flight
+(step 5, with its defaults) inside the same command before the run, writing
+`preflight-events.jsonl` and `preflight-coverage.json` next to the run's
+events (`-events-dir`, or the directory of `-out`; the directory above when
+that one is named `events`, so `events/*.jsonl` stays the run's shards); an
+incomplete pre-flight is logged and the run goes on (as is a complete one that
+left probes it could not delete: they hold slots until swept), a cancel during
+it ends the command, and `-out` cannot be one of the two file names. Give the report the pre-flight's result too:
 `swebench-loader report run.jsonl -validate -footing warm -preflight-coverage preflight-coverage.json`
 takes a complete pre-flight as Validity Rule 1's prewarm evidence and fails
-on an incomplete one, naming the shortfall.
+on an incomplete one, naming the shortfall; the report's `validity.evidence`
+says which Rule 1 evidence the verdict rests on (the coverage, the prewarm
+events, the node cache delta).
 
 When ate-env-api requires a bearer token (`-auth-token-file` on the API), give
 the loader the same token: `-auth-token-file PATH`, or the

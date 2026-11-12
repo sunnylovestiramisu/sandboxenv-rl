@@ -61,6 +61,20 @@ go run ./cmd/benchmarking/bench run \
 go run ./cmd/benchmarking/bench validate -dest "$ARTIFACT_DIR"
 ```
 
+A scenario whose warm footing rests on an image placement pre-flight names
+it, and `bench run` puts the coverage into the bundle as
+`preflight-coverage.json` instead of the synthetic `prewarm` event it writes
+for a warm footing otherwise; the report's `validity.evidence` names it. The
+coverage path is relative to the scenario file; a cold arm of an overlay run
+gets no coverage; when `plan` is given too, the coverage must name it:
+
+```yaml
+footing: warm
+preflight:
+  plan: image-placement.json # what swebench-loader run -placement -preflight ran with
+  coverage: runs/pf/preflight-coverage.json # what that pre-flight wrote, next to this file
+```
+
 ### 2. Real RL Training Run (`examples/*-verl`)
 
 ```bash

@@ -105,6 +105,9 @@ swebench-loader.run          attributes run, mode
   suspend | delete | wake
   step_barrier | park        steps mode, count
   run                        the whole run, count
+  preflight_template | preflight_golden | preflight_probe
+                             with run -preflight: the pass's events, before
+                             the run's own, from the same recorder shape
 ```
 
 The span is named after the event (`Event.Event`); its status is Ok when the
@@ -214,6 +217,7 @@ NeMo Gym rollout benchmark (`integrations/nemo-gym/benchmarks/rollout_bench.py`,
 | `preflight` | the backend's connectivity, permission and capacity checks |
 | `plan` | sizing the run: one entry per image, resolving its template |
 | `ensure_template` | resolving or creating the template for an image, once per image |
+| `preflight_template` | `PreflightWarmer` (the Go loader's event): ensuring an image's derived template, which starts its golden bake |
 | `preflight_golden` | `PreflightWarmer`: from an image's template being ensured to its golden snapshot settling (ready, none, failed, or given up) |
 | `preflight_probe` | `PreflightWarmer`: one probe environment, from its create to the node read back |
 | `warm_pool` | bringing an image's warm pool to its size |

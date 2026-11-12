@@ -113,6 +113,21 @@ const authTokenEnv = "SUBSTRATE_ENV_AUTH_TOKEN"
 // exercise runCmd without dialing a live gRPC server.
 var testBackendOverride swebench.Backend
 
+// noWarmer stands in for the backend when a pre-flight's options are
+// validated before the backend exists (-dry-run).
+type noWarmer struct{}
+
+func (noWarmer) EnsureImageTemplate(context.Context, string) (swebench.ImageState, error) {
+	return swebench.ImageState{}, errors.New("no backend")
+}
+func (noWarmer) ImageStatus(context.Context, string) (swebench.ImageState, error) {
+	return swebench.ImageState{}, errors.New("no backend")
+}
+func (noWarmer) CreateWith(context.Context, string, string, swebench.CreateOptions) (swebench.Sandbox, error) {
+	return nil, errors.New("no backend")
+}
+func (noWarmer) Node(context.Context, string) (string, error) { return "", errors.New("no backend") }
+
 // resolveAuthToken returns the token from file when file is set, otherwise
 // from authTokenEnv, otherwise "" (no token sent). A file that holds only
 // whitespace is an error, because it is a misconfiguration and not a request
@@ -520,7 +535,7 @@ func preflightCmd(args []string, stderr io.Writer) (retErr error) {
 		connections   = fs.Int("connections", 1, "gRPC connections to ate-env-api.")
 		authTokenFile = fs.String("auth-token-file", "", "File with the ate-env-api bearer token; SUBSTRATE_ENV_AUTH_TOKEN otherwise.")
 		runID         = fs.String("run-id", "", "Prefix of the probe environment names (at most 20 characters; default pf-<6 random characters>, unique per pass).")
-		eventsDir     = fs.String("events-dir", "", "Directory for preflight-events.jsonl and preflight-coverage.json; required unless -out is given.")
+		eventsDir     = fs.String("events-dir", "", "Directory for preflight-events.jsonl and preflight-coverage.json (the directory above, when this one is named events: a run's shards directory); required unless -out is given.")
 		out           = fs.String("out", "", "Events file to write instead of -events-dir.")
 		coverageOut   = fs.String("coverage-out", "", "Where to write preflight-coverage.json; default <events-dir>/preflight-coverage.json.")
 		probesPerNode = fs.Int("probes-per-node", 2, "Probes a round starts per node of a domain; the round holds them until all are placed.")
@@ -554,9 +569,20 @@ func preflightCmd(args []string, stderr io.Writer) (retErr error) {
 	coveragePath := *coverageOut
 	if coveragePath == "" {
 		if *eventsDir != "" {
-			coveragePath = filepath.Join(*eventsDir, "preflight-coverage.json")
+			coveragePath = filepath.Join(preflightFilesDir(*eventsDir), "preflight-coverage.json")
 		} else {
 			coveragePath = "preflight-coverage.json"
+		}
+	}
+	// The events go next to the run's events/ directory, not into it: the
+	// run report aggregates events/*.jsonl and must not count the probes.
+	eventsPath := *out
+	if *eventsDir != "" {
+		eventsPath = filepath.Join(preflightFilesDir(*eventsDir), "preflight-events.jsonl")
+	}
+	if a, aerr := filepath.Abs(eventsPath); aerr == nil {
+		if b, berr := filepath.Abs(coveragePath); berr == nil && a == b {
+			return fmt.Errorf("-out and -coverage-out name the same file %s", eventsPath)
 		}
 	}
 
@@ -576,30 +602,13 @@ func preflightCmd(args []string, stderr io.Writer) (retErr error) {
 		backend = b
 	}
 
-	// The events go next to the run's events/ directory, not into it: the
-	// run report aggregates events/*.jsonl and must not count the probes.
-	eventsPath := *out
-	if *eventsDir != "" {
-		eventsPath = filepath.Join(*eventsDir, "preflight-events.jsonl")
-	}
-	rec, err := swebench.NewFileRecorder(eventsPath, *runID)
-	if err != nil {
-		return err
-	}
-	rec.SetWorker("preflight")
-	defer func() {
-		if rerr := rec.Close(); rerr != nil && retErr == nil {
-			retErr = fmt.Errorf("writing events: %w", rerr)
-		}
-	}()
-
-	log := slog.New(slog.NewJSONHandler(stderr, nil))
-	warmer, err := swebench.NewPreflightWarmer(swebench.PreflightOptions{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	_, err = runPreflightPass(ctx, swebench.PreflightOptions{
 		Plan:             placement,
 		PlanPath:         *plan,
 		Backend:          backend,
-		Recorder:         rec,
-		Logger:           log,
+		Logger:           slog.New(slog.NewJSONHandler(stderr, nil)),
 		RunID:            *runID,
 		ProbesPerNode:    *probesPerNode,
 		ImageConcurrency: *imageConc,
@@ -609,26 +618,127 @@ func preflightCmd(args []string, stderr io.Writer) (retErr error) {
 		ProbeTimeout:     *probeTimeout,
 		Images:           splitList(*images),
 		Domains:          splitList(*domains),
-	})
-	if err != nil {
-		return err
+	}, eventsPath, coveragePath, nil, stderr)
+	return err
+}
+
+// eventTracing is the tracer and the parent span context a recorder's events
+// become spans under (-enable-tracing).
+type eventTracing struct {
+	tracer oteltrace.Tracer
+	parent context.Context
+}
+
+// preflightRunID names a run's pre-flight probes after the run and the
+// worker: pf-<6 hex of sha256(run id / worker)>, within the 20 characters
+// WarmImage takes, so two loaders on one cluster never name a probe alike
+// unless they share both.
+func preflightRunID(runID, worker string) string {
+	sum := sha256.Sum256([]byte(runID + "/" + worker))
+	return "pf-" + hex.EncodeToString(sum[:3])
+}
+
+// preflightFilesDir is where a pre-flight's files go for a run's events
+// location: the directory given, or the one above it when that directory is
+// the events/ directory itself (ShardEventPath writes the shards straight
+// into a base directory named events). The report and bench validate read
+// events/*.jsonl as the run's shards, so the pre-flight's files stay out.
+func preflightFilesDir(dir string) string {
+	if clean := filepath.Clean(dir); filepath.Base(clean) == "events" {
+		return filepath.Dir(clean)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	report, runErr := warmer.Run(ctx)
-	if report != nil {
-		wrotePath := coveragePath
-		if werr := swebench.WritePreflightCoverage(coveragePath, report); werr != nil {
-			wrotePath = ""
-			if runErr == nil {
-				runErr = werr
+	return dir
+}
+
+// preflightVerdict is what run -preflight does with the pass's outcome: the
+// error that ends the command, or nil for the run to go on, then with the
+// warning to log ("" for a clean pass). No coverage on disk (a pass that
+// could not run, a file that could not be written) and a cancel both end it,
+// the cancel also when it lands after the pass returned without an error.
+// A pass that returned an error with a coverage lets the run go on; the
+// warning tells a short coverage (cold first boots) from a complete one
+// whose probes could not all be deleted (slots held until a sweep).
+func preflightVerdict(ctxErr error, coverage *schema.PreflightCoverage, perr error) (warn string, err error) {
+	if coverage == nil {
+		if perr == nil {
+			perr = errors.New("no coverage")
+		}
+		return "", fmt.Errorf("-preflight: %w", perr)
+	}
+	if ctxErr != nil {
+		if perr == nil {
+			perr = ctxErr
+		}
+		return "", fmt.Errorf("-preflight: %w", perr)
+	}
+	if perr == nil {
+		return "", nil
+	}
+	left := len(swebench.UndeletedProbes(coverage))
+	switch {
+	case !coverage.Complete && left > 0:
+		return fmt.Sprintf("preflight incomplete; the run goes on and pays cold first boots where it is short; %d probes not deleted and still holding slots", left), nil
+	case !coverage.Complete:
+		return "preflight incomplete; the run goes on and pays cold first boots where it is short", nil
+	case left > 0:
+		return fmt.Sprintf("preflight coverage complete; %d probes not deleted and still holding slots; the run goes on", left), nil
+	}
+	return "preflight returned an error with a complete coverage; the run goes on", nil
+}
+
+// runPreflightPass runs a PreflightWarmer with opts (its Recorder is set
+// here: a file recorder on eventsPath under the worker name "preflight",
+// with spans when tracing is given), writes the coverage to coveragePath
+// whatever the outcome, prints the summary to stderr and returns the
+// coverage with the warmer's error. The preflight subcommand and run
+// -preflight share it.
+//
+// The coverage is nil when the pass could not run, when the coverage file
+// could not be written, or when the events file did not flush: a caller
+// that got no coverage has nothing on disk to trust and must fail. With a
+// coverage, the error is the pass's own (incomplete, cancelled).
+func runPreflightPass(ctx context.Context, opts swebench.PreflightOptions, eventsPath, coveragePath string, tracing *eventTracing, stderr io.Writer) (report *schema.PreflightCoverage, retErr error) {
+	// Validate before any file is created: a bad plan or an empty pass must
+	// not truncate the events file or leave an empty one.
+	if _, err := swebench.NewPreflightWarmer(opts); err != nil {
+		return nil, err
+	}
+	rec, err := swebench.NewFileRecorder(eventsPath, opts.RunID)
+	if err != nil {
+		return nil, err
+	}
+	rec.SetWorker("preflight")
+	if tracing != nil {
+		rec.SetTracer(tracing.tracer, tracing.parent)
+	}
+	defer func() {
+		if rerr := rec.Close(); rerr != nil {
+			report = nil
+			if retErr == nil {
+				retErr = fmt.Errorf("writing events: %w", rerr)
 			} else {
-				log.Warn("preflight: writing coverage failed", slog.String("path", coveragePath), slog.Any("err", werr))
+				retErr = fmt.Errorf("writing events: %w (after: %v)", rerr, retErr)
 			}
 		}
-		printPreflightSummary(stderr, report, wrotePath)
+	}()
+	opts.Recorder = rec
+	warmer, err := swebench.NewPreflightWarmer(opts)
+	if err != nil {
+		return nil, err
 	}
-	return runErr
+	report, runErr := warmer.Run(ctx)
+	if report == nil {
+		return nil, runErr
+	}
+	if werr := swebench.WritePreflightCoverage(coveragePath, report); werr != nil {
+		printPreflightSummary(stderr, report, "")
+		if runErr != nil {
+			return nil, fmt.Errorf("writing coverage to %s: %w (after: %v)", coveragePath, werr, runErr)
+		}
+		return nil, fmt.Errorf("writing coverage to %s: %w", coveragePath, werr)
+	}
+	printPreflightSummary(stderr, report, coveragePath)
+	return report, runErr
 }
 
 func splitList(s string) []string {
@@ -842,6 +952,7 @@ func runCmd(args []string) (retErr error) {
 		stepPause        = fs.Duration("step-pause", 0, "steps: simulated trainer pause between steps.")
 		prefetch         = fs.Bool("prefetch", false, "steps: asynchronously prewarm next step's prefetch_images off the critical path.")
 		placementPath    = fs.String("placement", "", "image-placement.json from plan-placement: each create carries the worker selector of one of its image's domains, round-robin, so environments land where the pre-flight put the image. ate-env API backend only.")
+		preflightFlag    = fs.Bool("preflight", false, "With -placement: run the pre-flight (the preflight subcommand, with its defaults) over the plan before the run, writing preflight-events.jsonl and preflight-coverage.json next to the run's events (-events-dir, or the directory of -out; the directory above, when that one is named events). An incomplete pre-flight is logged and the run goes on, as is a complete one that left probes it could not delete; a cancelled one ends the command; report -preflight-coverage reads the file for Validity Rule 1.")
 		createTimeout    = fs.Duration("create-timeout", 5*time.Minute, "Deadline for one create call.")
 		stepTimeout      = fs.Duration("step-timeout", 10*time.Minute, "Default deadline for a run step without its own timeout.")
 		wakeBudget       = fs.Duration("wake-budget", 3*time.Minute, "How long a task's first command is retried while the environment is still waking or its image is still being baked.")
@@ -1104,6 +1215,23 @@ func runCmd(args []string) (retErr error) {
 		}
 		log.Info("placement", slog.String("plan", *placementPath), slog.Int("images", len(placement.Images)), slog.Int("domains", len(placement.Domains)), slog.Int("unplaced", len(placement.Unplaced)))
 	}
+	if *preflightFlag && *placementPath == "" {
+		return fmt.Errorf("-preflight needs -placement, the plan to warm the nodes from")
+	}
+	if *preflightFlag && *eventsDir == "" {
+		// The pass writes these two names into the directory of -out; a run
+		// that writes its events to one of them would share the file.
+		if name := filepath.Base(*out); name == "preflight-events.jsonl" || name == "preflight-coverage.json" {
+			return fmt.Errorf("-out %s: the pre-flight writes %s next to the run's events; give the run's events another name", *out, name)
+		}
+	}
+	if *preflightFlag {
+		// The pass's own checks (a plan that places no image, a run id that
+		// leaves no room for the indexes) fail here, also under -dry-run.
+		if _, err := swebench.NewPreflightWarmer(swebench.PreflightOptions{Plan: placement, PlanPath: *placementPath, Backend: noWarmer{}, Logger: log, RunID: preflightRunID(*runID, *worker)}); err != nil {
+			return fmt.Errorf("-preflight: %w", err)
+		}
+	}
 	if *dryRun {
 		return nil
 	}
@@ -1143,6 +1271,17 @@ func runCmd(args []string) (retErr error) {
 		backend = drv
 	}
 
+	// Before the recorder creates -out: a refused -preflight must not
+	// truncate an events file.
+	var preflightWarmer swebench.ImageWarmer
+	if *preflightFlag {
+		w, ok := backend.(swebench.ImageWarmer)
+		if !ok {
+			return fmt.Errorf("-preflight needs the ate-env API backend (-backend substrate -access ate-env-api)")
+		}
+		preflightWarmer = w
+	}
+
 	var rec *swebench.Recorder
 	var f *os.File
 	if *eventsDir != "" {
@@ -1163,6 +1302,7 @@ func runCmd(args []string) (retErr error) {
 	if *jobName != "" {
 		rec.SetJob(*jobName)
 	}
+	var tracing *eventTracing
 	if *enableTracing {
 		shutdown, err := telemetry.SetupOTel(context.Background(), tracingServiceName)
 		if err != nil {
@@ -1178,6 +1318,9 @@ func runCmd(args []string) (retErr error) {
 			oteltrace.WithAttributes(attribute.String("run", *runID), attribute.String("mode", *mode)))
 		defer runSpan.End()
 		rec.SetTracer(tracer, runCtx)
+		// The pre-flight's recorder gets the same tracer and parent, so its
+		// events become spans under the run span too.
+		tracing = &eventTracing{tracer: tracer, parent: runCtx}
 		log.Info("tracing enabled", slog.String("otlp_endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")))
 	}
 	// Events lost to a write error, or a file that does not flush, must fail
@@ -1195,6 +1338,27 @@ func runCmd(args []string) (retErr error) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *preflightFlag {
+		dir := preflightFilesDir(*eventsDir)
+		if *eventsDir == "" {
+			dir = preflightFilesDir(filepath.Dir(*out))
+		}
+		coverage, perr := runPreflightPass(ctx, swebench.PreflightOptions{
+			Plan:     placement,
+			PlanPath: *placementPath,
+			Backend:  preflightWarmer,
+			Logger:   log,
+			RunID:    preflightRunID(*runID, *worker),
+		}, filepath.Join(dir, "preflight-events.jsonl"), filepath.Join(dir, "preflight-coverage.json"), tracing, os.Stderr)
+		warn, err := preflightVerdict(ctx.Err(), coverage, perr)
+		if err != nil {
+			return err
+		}
+		if warn != "" {
+			log.Warn(warn, slog.Any("err", perr))
+		}
+	}
 
 	startTS := time.Now().UTC()
 	cfg.Backend = backend

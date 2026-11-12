@@ -35,6 +35,10 @@
         "reasons": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
         }
       }
     },

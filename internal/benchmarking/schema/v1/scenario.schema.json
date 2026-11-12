@@ -9,6 +9,7 @@
     "schema_version": { "type": "string", "enum": ["v1"] },
     "name": { "type": "string", "minLength": 1 },
     "repeat": { "type": "integer", "minimum": 0 },
+    "footing": { "type": "string", "enum": ["warm", "cold"] },
     "sut": { "$ref": "#/$defs/SUTSpec" },
     "jobs": {
       "type": "array",
@@ -17,12 +18,22 @@
     },
     "window_policy": { "$ref": "#/$defs/WindowPolicy" },
     "telemetry": { "$ref": "#/$defs/TelemetrySpec" },
+    "preflight": { "$ref": "#/$defs/PreflightSpec" },
     "variants": {
       "type": "array",
       "items": { "$ref": "#/$defs/FeatureOverlay" }
     }
   },
   "$defs": {
+    "PreflightSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "plan": { "type": "string", "minLength": 1 },
+        "coverage": { "type": "string", "minLength": 1 }
+      }
+    },
     "TelemetrySpec": {
       "type": "object",
       "additionalProperties": false,
