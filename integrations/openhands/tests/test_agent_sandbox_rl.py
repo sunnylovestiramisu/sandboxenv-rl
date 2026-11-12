@@ -36,6 +36,7 @@ import pydantic
 import pytest
 from ate_env_rl import DEFAULT_ATESPACE
 from ate_env_rl.backend.mock import MockBackendDriver
+from ate_env_rl.errors import InfrastructureError, PreflightError
 
 import ate_env_openhands.agent_sandbox_rl.adapters.openhands as compat_openhands
 from ate_env_openhands import fleet as oh_fleet
@@ -270,6 +271,74 @@ def test_a_failed_pass_before_the_last_tears_down(monkeypatch):
     with pytest.raises(RuntimeError, match="warm failed"):
         fleet.run(lambda task, handle: task.id, epochs=3)
     assert teardowns == [1]
+
+
+@pytest.mark.parametrize("strategy", ["sliding", "pipelined"])
+@pytest.mark.parametrize("epochs", [1, 2])
+def test_a_failed_preflight_on_the_last_pass_tears_down(monkeypatch, strategy, epochs):
+    # run_sliding and run_pipelined call preflight() before their try, thus
+    # their own teardown does not cover it.
+    fleet = _mock_fleet()
+    fleet.load_tasks([Task(id="t1", image=IMAGE)])
+    teardowns, preflights = [], []
+    teardown, preflight = fleet.teardown, fleet.preflight
+
+    def failing_last_preflight():
+        preflights.append(1)
+        if len(preflights) == epochs:
+            raise RuntimeError("preflight failed")
+        preflight()
+
+    monkeypatch.setattr(fleet, "teardown", lambda: (teardowns.append(1), teardown()))
+    monkeypatch.setattr(fleet, "preflight", failing_last_preflight)
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        fleet.run(lambda task, handle: task.id, strategy=strategy, epochs=epochs)
+    assert teardowns == [1]
+
+
+def _failing_reap(run_id):
+    raise InfrastructureError("Failed to delete 1 environments during reap: ['env-1']")
+
+
+def test_a_failed_teardown_keeps_the_error_of_a_failed_preflight(monkeypatch, caplog):
+    fleet = _mock_fleet()
+    fleet.load_tasks([Task(id="t1", image=IMAGE)])
+
+    def failing_preflight():
+        raise PreflightError("ate-env-api is down")
+
+    monkeypatch.setattr(fleet, "preflight", failing_preflight)
+    monkeypatch.setattr(fleet.backend, "reap", _failing_reap)
+    with caplog.at_level(logging.WARNING, logger="ate_env_openhands.agent_sandbox_rl"):
+        with pytest.raises(PreflightError, match="ate-env-api is down"):
+            fleet.run(lambda task, handle: task.id, strategy="sliding")
+    # The teardown error is logged with its traceback, not raised.
+    record = next(r for r in caplog.records if "teardown" in r.getMessage())
+    assert record.exc_info is not None and record.exc_info[0] is InfrastructureError
+
+
+@pytest.mark.parametrize("strategy", ["none", "naive", "sliding", "pipelined"])
+def test_a_failed_teardown_keeps_an_interrupt_of_a_task(monkeypatch, strategy):
+    # An InfrastructureError in place of the KeyboardInterrupt would turn a
+    # cancelled run into a failed one.
+    fleet = _mock_fleet()
+    fleet.load_tasks([Task(id="t1", image=IMAGE)])
+
+    def interrupted(task, handle):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleet.backend, "reap", _failing_reap)
+    with pytest.raises(KeyboardInterrupt):
+        fleet.run(interrupted, strategy=strategy)
+
+
+@pytest.mark.parametrize("epochs", [1, 2])
+def test_a_failed_teardown_after_clean_passes_raises(monkeypatch, epochs):
+    fleet = _mock_fleet()
+    fleet.load_tasks([Task(id="t1", image=IMAGE)])
+    monkeypatch.setattr(fleet.backend, "reap", _failing_reap)
+    with pytest.raises(InfrastructureError, match="during reap"):
+        fleet.run(lambda task, handle: task.id, epochs=epochs)
 
 
 def _windows(fleet: SandboxFleet, monkeypatch, strategy: str) -> list[int]:

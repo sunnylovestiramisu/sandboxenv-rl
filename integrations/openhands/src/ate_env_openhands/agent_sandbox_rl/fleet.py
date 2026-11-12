@@ -157,16 +157,25 @@ class SandboxFleet(AteSandboxFleet):
             with self.observer.run(strategy, backend=self.backend_label) as report:
                 self.report = report
                 report.environment = self.describe_environment(concurrency=conc)
-                for e in range(epochs):
-                    last = e == epochs - 1
-                    if epochs > 1:
-                        logger.info("epoch %d/%d", e + 1, epochs)
+                # The fleet tears down here, once, and not in a strategy:
+                # run_sliding and run_pipelined call preflight() and plan()
+                # before their own try, thus a failure there skips the
+                # strategy's teardown, also on the last pass.
+                try:
+                    for e in range(epochs):
+                        if epochs > 1:
+                            logger.info("epoch %d/%d", e + 1, epochs)
+                        passes.append(STRATEGIES[strategy](self, process_fn, conc, teardown=False))
+                except BaseException:
+                    # The error of the pass is the one to report: a teardown
+                    # error in its place would also turn an interrupt (a
+                    # BaseException) into a failed run.
                     try:
-                        passes.append(STRATEGIES[strategy](self, process_fn, conc, teardown=last))
-                    except BaseException:
-                        if not last:  # a pass before the last one did not tear down
-                            self.teardown()
-                        raise
+                        self.teardown()
+                    except Exception:
+                        logger.warning("teardown after a failed pass", exc_info=True)
+                    raise
+                self.teardown()
         finally:
             self.config = configured
         logger.debug("\n%s", report.summary())

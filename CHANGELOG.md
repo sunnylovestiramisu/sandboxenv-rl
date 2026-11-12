@@ -393,6 +393,16 @@ user needs to know across them.
   stays as a re-export of the new module, with the same names.
 
 ### Fixed
+- `ate_env_openhands.agent_sandbox_rl.SandboxFleet.run` tears down once in its
+  own `finally`. Before, a `preflight()` or `plan()` failure of the `sliding`
+  or `pipelined` strategy on the last pass skipped the teardown, because those
+  strategies call both before their own `try`. The pools the caller warmed
+  (`warm_image`, `set_pool_replicas`) and the environments whose earlier
+  delete failed then stayed. The pools of earlier `sliding` or `pipelined`
+  passes were not among them: those strategies drain each window after use.
+  When a pass fails and the teardown fails too, `run` raises the error of the
+  pass (a `PreflightError`, a `KeyboardInterrupt`) and logs the teardown
+  error; a teardown error after clean passes still raises.
 - `preflight-coverage.json` (schema v1) gains two optional fields per image,
   `undeleted_probes` and `waited_ms`, the ones `WarmImage`'s coverage already
   carries. `swebench-loader preflight` and `ate_env_rl.PreflightWarmer` list
