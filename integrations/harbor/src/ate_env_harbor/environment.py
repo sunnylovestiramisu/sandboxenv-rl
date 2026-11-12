@@ -36,6 +36,7 @@ import shlex
 import stat
 import tarfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +151,12 @@ class AteEnvEnvironment(BaseEnvironment):
       ``start`` so login shells (terminus-2's ``bash --login`` tmux session)
       see the tool paths too; default ``/etc/profile.d/zz-harbor-tools.sh``,
       empty to skip. A write the image user is not allowed is a warning.
+    - ``worker_selector``: labels the worker pool must carry, ``key=value``
+      pairs separated by commas (``pool=a,zone=b``, the syntax of ``ate-env
+      create --worker-selector``) or a mapping. Substrate ANDs them with the
+      template's own selector, thus they narrow the template's pools and
+      never widen them; empty keeps the template's pools. A key given twice,
+      an empty item or a value that is not a string is a ``ValueError``.
     """
 
     def __init__(
@@ -177,6 +184,7 @@ class AteEnvEnvironment(BaseEnvironment):
         gcloud_bin: str = "gcloud",
         tool_paths: str | list[str] | tuple[str, ...] | None = None,
         tool_paths_profile: str | None = DEFAULT_TOOL_PATHS_PROFILE,
+        worker_selector: str | Mapping[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         self._api_url = api_url or os.environ.get(API_ENV) or DEFAULT_API_URL
@@ -195,6 +203,7 @@ class AteEnvEnvironment(BaseEnvironment):
         self._scratch_dir = str(scratch_dir).rstrip("/") or "/tmp"
         self._tool_paths = _parse_tool_paths(tool_paths)
         self._tool_paths_profile = str(tool_paths_profile) if tool_paths_profile else None
+        self._worker_selector = parse_worker_selector(worker_selector)
         self._resolver = ImageResolver(
             registry=registry or os.environ.get(REGISTRY_ENV),
             build=self._build,
@@ -242,6 +251,11 @@ class AteEnvEnvironment(BaseEnvironment):
     def tool_paths(self) -> tuple[str, ...]:
         """Layer directories put first on PATH for every command."""
         return self._tool_paths
+
+    @property
+    def worker_selector(self) -> dict[str, str]:
+        """Labels the worker pool must carry; empty keeps the template's pools."""
+        return dict(self._worker_selector)
 
     def _tooled(self, command: str) -> str:
         """``command`` with the tool paths first on PATH, when there are any."""
@@ -353,6 +367,7 @@ class AteEnvEnvironment(BaseEnvironment):
                 atespace=self._atespace,
                 template_name=template,
                 rootfs_image=image,
+                worker_selector=self._worker_selector or None,
             )
         except FailedPreconditionError as e:
             if template == self._template or not (
@@ -376,6 +391,7 @@ class AteEnvEnvironment(BaseEnvironment):
                 atespace=self._atespace,
                 template_name=template,
                 rootfs_image=image,
+                worker_selector=self._worker_selector or None,
             )
         self._template_used = template
         self._image_ref = image
@@ -522,6 +538,7 @@ class AteEnvEnvironment(BaseEnvironment):
             "api_url": self._api_url,
             "tool_paths": list(self._tool_paths),
             "tool_paths_profile": self._tool_paths_profile if self._tool_paths else None,
+            "worker_selector": dict(self._worker_selector),
         }
         try:
             self.trial_paths.trial_dir.mkdir(parents=True, exist_ok=True)
@@ -742,6 +759,49 @@ def _parse_tool_paths(value: str | list[str] | tuple[str, ...] | None) -> tuple[
         if not path.startswith("/"):
             raise ValueError(f"tool_paths must be absolute directories inside the environment, got {path!r}")
     return paths
+
+
+def parse_worker_selector(value: str | Mapping[str, str] | None) -> dict[str, str]:
+    """``{"pool": "a"}`` from ``"pool=a,zone=b"`` or from a mapping; ``{}`` when unset.
+
+    The syntax of ``ate-env create --worker-selector``, with its errors: an
+    item without ``=`` or with an empty key, an empty item between commas
+    and a key given twice are a ``ValueError``, typos to surface rather than
+    guess at. A mapping must have non-empty string keys and string values:
+    Harbor's ``--ek`` decodes a JSON value, thus ``worker_selector=true`` or
+    ``worker_selector=["d0"]`` arrive as other types, and are refused too.
+    """
+    if value is None or value == "":
+        return {}
+    items: list[tuple[str, str]] = []
+    if isinstance(value, str):
+        for item in value.split(","):
+            key, sep, label = item.partition("=")
+            if not sep or not key.strip():
+                what = "an empty item" if not item.strip() else repr(item.strip())
+                raise ValueError(
+                    "worker_selector must be key=value pairs separated by commas; "
+                    f"{what} in {value!r}"
+                )
+            items.append((key.strip(), label.strip()))
+    elif isinstance(value, Mapping):
+        for key, label in value.items():
+            if not isinstance(key, str) or not key.strip() or not isinstance(label, str):
+                raise ValueError(
+                    "worker_selector must map non-empty string keys to string values, "
+                    f"got {value!r}"
+                )
+            items.append((key.strip(), label.strip()))
+    else:
+        raise ValueError(
+            f"worker_selector must be a string or a mapping, got {type(value).__name__} {value!r}"
+        )
+    selector: dict[str, str] = {}
+    for key, label in items:
+        if key in selector:
+            raise ValueError(f"worker_selector gives {key} twice ({selector[key]!r} and {label!r})")
+        selector[key] = label
+    return selector
 
 
 def _path_prefix(paths: tuple[str, ...]) -> str:

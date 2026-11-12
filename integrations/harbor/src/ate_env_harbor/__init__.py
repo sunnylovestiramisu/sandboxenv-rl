@@ -18,7 +18,7 @@ Select it with ``harbor run ... -e ate_env_harbor:AteEnvEnvironment`` and pass
 settings with ``--ek key=value``; see :class:`AteEnvEnvironment` for the keys.
 """
 
-from .environment import ENV_TYPE, AteEnvEnvironment
+from .environment import ENV_TYPE, AteEnvEnvironment, parse_worker_selector
 from .images import ImageError
 
-__all__ = ["ENV_TYPE", "AteEnvEnvironment", "ImageError"]
+__all__ = ["ENV_TYPE", "AteEnvEnvironment", "ImageError", "parse_worker_selector"]

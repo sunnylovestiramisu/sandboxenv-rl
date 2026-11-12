@@ -39,6 +39,7 @@ Each setting is a constructor kwarg and an `--ek key=value` flag (repeatable).
 | `docker_bin`, `gcloud_bin` | `docker`, `gcloud` | The executables used for images |
 | `tool_paths` | none | Directories a runtime layer mounts into the environment, `:`-separated, put first on `PATH` for every command; `start` fails when one is missing. See [Tools as a second layer](#tools-as-a-second-layer) |
 | `tool_paths_profile` | `/etc/profile.d/zz-harbor-tools.sh` | The drop-in that gives login shells the tool paths; written at `start` when `tool_paths` is set, a warning when the image user cannot write it; empty disables it |
+| `worker_selector` | none | Labels the worker pool must carry, `key=value` pairs separated by commas (`pool=a,zone=b`), the syntax of `ate-env create --worker-selector`: a key given twice or an empty item is an error. Substrate ANDs them with the template's own selector, thus they narrow the template's pools and never widen them. The pools and their labels: `ate-env placement-domains`, or `Client.list_placement_domains()` |
 
 `preflight()` checks the API (the `api_url` kwarg Harbor 0.26 passes, else
 `SUBSTRATE_ENV_API`; reachable, token accepted) before any trial is queued; without
@@ -103,7 +104,7 @@ applied) select the base:
    wait for the guest to answer, learn the image's user, create the working
    directory when the image lacks it, upload `environment/` for prebuilt-image
    tasks, and write `trial_dir/ate_env.json` (environment id, atespace,
-   template, image digest, session and context ids; never the token). A verifier that Harbor runs in a separate environment
+   template, image digest, worker selector, session and context ids; never the token). A verifier that Harbor runs in a separate environment
    (`[verifier] environment_mode = "separate"`) records its own environment in
    `trial_dir/ate_env.verifier.<step>.json`, so the agent's record is kept.
 2. `exec`: `sh -c <command>` through the guest, with the working directory

@@ -23,6 +23,11 @@ user needs to know across them.
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
 ### Added
+- Harbor provider (`integrations/harbor`): `--ek worker_selector=key=value,...`
+  (the `worker_selector` kwarg; a string in the syntax of `ate-env create
+  --worker-selector`, or a mapping) pins a job's environments to a worker
+  pool. Substrate ANDs the labels with the template's own selector, and
+  `ate_env.json` records them.
 - `run-in-cluster.sh` bakes a `-placement` plan into the loader image next to
   the dataset (under the plan's own file name, so the run's `placement` label
   tells plans apart) and rewrites the flag to the baked path; relative paths

@@ -280,6 +280,7 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
                 "atespace": atespace,
                 "template": template,
                 "rootfs_image": request.rootfs_image,
+                "worker_selector": dict(request.worker_selector),
             }
         )
         if s.create_code is not None:

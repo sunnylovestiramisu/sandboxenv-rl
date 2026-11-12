@@ -32,7 +32,7 @@ from ate_env_rl import FailedPreconditionError, RpcError
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.config import ResourceMode
 
-from ate_env_harbor import AteEnvEnvironment
+from ate_env_harbor import AteEnvEnvironment, parse_worker_selector
 from ate_env_harbor.environment import RECORD_FILE, WHOAMI_COMMAND, pack_dir_as_root
 
 from .conftest import ALPINE
@@ -61,7 +61,13 @@ async def test_start_creates_from_the_digest_and_the_class_template(fake, make_e
     await env.start(force_build=False)
     try:
         assert fake.state.creates == [
-            {"id": env.env_id, "atespace": "ate-env", "template": "harbor-c1-m512", "rootfs_image": ALPINE}
+            {
+                "id": env.env_id,
+                "atespace": "ate-env",
+                "template": "harbor-c1-m512",
+                "rootfs_image": ALPINE,
+                "worker_selector": {},
+            }
         ]
         assert env.env_id.startswith("hb-echo-abcdef")
         assert "true" in commands(fake) and WHOAMI_COMMAND in commands(fake)
@@ -131,6 +137,63 @@ def test_record_file_survives_harbor_truncation_and_multi_step_verifiers(fake, m
     short = make_env(session_id="echo__AbCdEf__verifier__grade")
     short.trial_paths = TrialPaths(trial_dir=tmp_path / "echo__AbCdEf")
     assert short.record_file == "ate_env.verifier.grade.json"
+
+
+async def test_worker_selector_narrows_the_pool(fake, make_env):
+    env = make_env(worker_selector="pool=a, zone=b")
+    assert env.worker_selector == {"pool": "a", "zone": "b"}
+    await env.start(force_build=False)
+    try:
+        assert fake.state.creates[-1]["worker_selector"] == {"pool": "a", "zone": "b"}
+        record = json.loads((env.trial_paths.trial_dir / RECORD_FILE).read_text())
+        assert record["worker_selector"] == {"pool": "a", "zone": "b"}
+    finally:
+        await env.stop(delete=True)
+    # The fallback create under the auto policy carries it too.
+    fake.state.missing_templates.add("harbor-c1-m512")
+    env = make_env(worker_selector={"pool": "a"})
+    await env.start(force_build=False)
+    try:
+        assert fake.state.creates[-1]["template"] == "default-template"
+        assert fake.state.creates[-1]["worker_selector"] == {"pool": "a"}
+    finally:
+        await env.stop(delete=True)
+    assert make_env().worker_selector == {}
+    with pytest.raises(ValueError, match="key=value"):
+        make_env(worker_selector="pool")
+
+
+def test_worker_selector_accepts_the_cli_forms():
+    assert parse_worker_selector(None) == {} and parse_worker_selector("") == {}
+    assert parse_worker_selector(" pool = a ,zone=b") == {"pool": "a", "zone": "b"}
+    assert parse_worker_selector("pool=") == {"pool": ""}  # as ate-env create: an empty value
+    assert parse_worker_selector({"pool": "a"}) == {"pool": "a"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Harbor's --ek decodes JSON: a list, a bool and a number arrive as such.
+        pytest.param(["d0"], id="list"),
+        pytest.param(True, id="bool"),
+        pytest.param(123, id="int"),
+        pytest.param({"": "a"}, id="empty-key"),
+        pytest.param({"gpu": True}, id="bool-value"),
+        pytest.param({"pool": None}, id="none-value"),
+        # What ate-env create --worker-selector refuses.
+        pytest.param("pool=a,pool=b", id="twice"),
+        pytest.param("pool=a,pool=a", id="twice-same"),
+        pytest.param(",", id="comma"),
+        pytest.param("pool=a,,zone=b", id="empty-item"),
+        pytest.param("=a", id="no-key"),
+        pytest.param(" ", id="blank"),
+    ],
+)
+def test_worker_selector_refuses_what_the_cli_refuses(value, make_env):
+    with pytest.raises(ValueError, match="worker_selector"):
+        parse_worker_selector(value)
+    with pytest.raises(ValueError, match="worker_selector"):
+        make_env(worker_selector=value)
 
 
 async def test_environment_dir_is_uploaded_to_the_workdir(fake, make_env):
