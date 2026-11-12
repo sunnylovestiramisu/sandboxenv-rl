@@ -29,6 +29,10 @@ import re
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from harbor.models.task.config import EnvironmentConfig
 
 DEFAULT_PREFIX = "harbor-"
 _MAX_NAME_LEN = 63
@@ -98,23 +102,40 @@ def register_command(
     return " ".join(parts) + " | kubectl-ate create actor-template -f -"
 
 
+def task_environments(root: str | Path) -> list[tuple[str, EnvironmentConfig]]:
+    """Each task under ``root`` (its directory, relative to ``root``) with its
+    ``[environment]`` table, in the order the tasks are found.
+
+    The table of each ``task.toml`` is parsed with Harbor's ``EnvironmentConfig``,
+    thus the values are the ones ``AteEnvEnvironment`` sees: ``memory = "4G"``
+    normalizes to ``memory_mb = 4096``, and ``cpus`` is normalized the same way.
+    The rest of the file is not validated.
+    """
+    from harbor.models.task.config import EnvironmentConfig
+
+    root = Path(root)
+    tasks: list[tuple[str, EnvironmentConfig]] = []
+    for task_toml in sorted(root.rglob("task.toml")):
+        try:
+            with task_toml.open("rb") as f:
+                env = EnvironmentConfig.model_validate(tomllib.load(f).get("environment", {}))
+        except ValueError as e:  # TOMLDecodeError and pydantic's ValidationError both are
+            raise ValueError(f"{task_toml}: {e}") from e
+        name = task_toml.parent.relative_to(root).as_posix()
+        # root is the task directory itself: its own name, resolved, as "."
+        # has none.
+        tasks.append((task_toml.parent.resolve().name if name == "." else name, env))
+    return tasks
+
+
 def task_classes(
     root: str | Path, prefix: str = DEFAULT_PREFIX
 ) -> dict[str, tuple[int | float | None, int | None]]:
     """The resource classes the tasks under ``root`` ask for: template name to
-    ``(cpus, memory_mb)``, in the order the tasks are found.
-
-    The ``[environment]`` table of each ``task.toml`` is parsed with Harbor's
-    ``EnvironmentConfig``, thus the values are the ones ``AteEnvEnvironment``
-    sees: ``memory = "4G"`` normalizes to ``memory_mb = 4096``, and ``cpus`` is
-    normalized the same way. The rest of the file is not validated.
+    ``(cpus, memory_mb)``, in the order the tasks are found (``task_environments``).
     """
-    from harbor.models.task.config import EnvironmentConfig
-
     classes: dict[str, tuple[int | float | None, int | None]] = {}
-    for task_toml in sorted(Path(root).rglob("task.toml")):
-        with task_toml.open("rb") as f:
-            env = EnvironmentConfig.model_validate(tomllib.load(f).get("environment", {}))
+    for _, env in task_environments(root):
         name = class_template_name(prefix, env.cpus, env.memory_mb)
         if name is not None:
             classes.setdefault(name, (env.cpus, env.memory_mb))

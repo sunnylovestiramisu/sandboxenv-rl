@@ -31,6 +31,7 @@ import shutil
 import signal
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -48,6 +49,11 @@ from ate_env_harbor.environment import WHOAMI_COMMAND
 CHUNK = 64 * 1024
 DEFAULT_ATESPACE = "ate-env"
 DEFAULT_TEMPLATE = "default-template"
+# WarmImage's limits and default in internal/apiservice/placement.go.
+WARM_DEFAULT_PROBES_PER_NODE = 2
+WARM_MAX_PROBES_PER_NODE = 8
+WARM_MAX_ROUNDS = 10
+WARM_MAX_PROBES = 256
 RUNNING = env_pb2.ENVIRONMENT_STATUS_RUNNING
 SUSPENDED = env_pb2.ENVIRONMENT_STATUS_SUSPENDED
 
@@ -225,6 +231,30 @@ class FakeState:
     required_token: str | None = None  # every call needs "authorization: Bearer <token>"
     wakes: int = 0
     counter: int = 0
+    # Image templates, goldens and placement (the warm step). A derived
+    # template is keyed by (base template, image). The golden of an ensured
+    # template is PENDING for golden_ready_after status calls, then READY. An
+    # image in golden_failures models a bake that fails after the ensure: the
+    # ensure answers PENDING (a recreate, as the server does for a FAILED
+    # template), the later status calls FAILED with the error.
+    ensures: list[tuple[str, str]] = field(default_factory=list)
+    status_polls: dict[tuple[str, str], int] = field(default_factory=dict)
+    # GetImageStatus fails with these codes, one per call, before it counts a poll.
+    status_transient: list[grpc.StatusCode] = field(default_factory=list)
+    golden_ready_after: int = 1
+    golden_failures: dict[str, str] = field(default_factory=dict)  # image -> golden_error
+    goldens_disabled: bool = False  # the templates bake no golden: NONE with the template
+    domains: list[dict[str, Any]] = field(
+        default_factory=lambda: [
+            {"name": "pool-a", "selector": {"pool": "a"}, "nodes": 2, "workers": 2},
+            {"name": "pool-b", "selector": {"pool": "b"}, "nodes": 3, "workers": 3},
+        ]
+    )
+    deny_list_workers: bool = False  # no global viewer role: no domain list, no node count
+    warm_calls: list[dict[str, Any]] = field(default_factory=list)
+    warm_runs: int = 0  # a run id per WarmImage call without one, as the server's random suffix
+    warm_short: set[str] = field(default_factory=set)  # images whose warm ends one node short
+    warm_undeleted: set[str] = field(default_factory=set)  # images whose last probe stays behind
 
     def env_pb(self, env_id: str) -> env_pb2.Environment:
         rec = self.envs[env_id]
@@ -340,6 +370,186 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
         await rec["executor"].close()
         return env_pb2.DeleteEnvironmentResponse()
 
+    @staticmethod
+    def _template_key(request) -> tuple[str, str, str]:
+        """(base template, atespace, image) as apiservice's templateDefaults resolves them:
+        the request's atespace first, then the template's, then the default."""
+        base = DEFAULT_TEMPLATE
+        template_atespace = ""
+        if request.HasField("template"):
+            base = request.template.name or base
+            template_atespace = request.template.atespace
+        return base, request.atespace or template_atespace or DEFAULT_ATESPACE, request.rootfs_image
+
+    def _image_status(self, request) -> env_pb2.ImageStatus:
+        s = self.state
+        base, atespace, image = self._template_key(request)
+        derived = f"{base}-{image.split('@sha256:', 1)[1][:12]}"
+        polls = s.status_polls.get((base, image))
+        if polls is None:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_NONE
+        elif s.goldens_disabled:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_NONE
+        elif polls == 0:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_PENDING
+        elif image in s.golden_failures:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_FAILED
+        elif polls >= s.golden_ready_after:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_READY
+        else:
+            golden = env_pb2.GOLDEN_SNAPSHOT_STATE_PENDING
+        ready = golden == env_pb2.GOLDEN_SNAPSHOT_STATE_READY
+        failed = golden == env_pb2.GOLDEN_SNAPSHOT_STATE_FAILED
+        return env_pb2.ImageStatus(
+            rootfs_image=image,
+            template=env_pb2.Template(name=derived, atespace=atespace),
+            template_exists=polls is not None,
+            golden=golden,
+            golden_tag="golden-1" if ready else "",
+            golden_error=s.golden_failures[image] if failed else "",
+        )
+
+    async def _require_digest(self, request, context) -> None:
+        if "@sha256:" not in request.rootfs_image:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"image {request.rootfs_image!r} is not pinned by digest",
+            )
+
+    async def GetImageStatus(self, request, context):
+        await _check_token(self.state, context)
+        await self._require_digest(request, context)
+        if self.state.status_transient:
+            await context.abort(self.state.status_transient.pop(0), "the fake's transient failure")
+        base, _, image = self._template_key(request)
+        if (base, image) in self.state.status_polls:
+            self.state.status_polls[(base, image)] += 1
+        return self._image_status(request)
+
+    async def EnsureImageTemplate(self, request, context):
+        s = self.state
+        await _check_token(s, context)
+        await self._require_digest(request, context)
+        base, atespace, image = self._template_key(request)
+        if base in s.missing_templates:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f'base actor template "{base}" not found in atespace "{atespace}"; '
+                "register it first (ate-env manifest template)",
+            )
+        s.ensures.append((base, image))
+        s.status_polls[(base, image)] = 0  # a FAILED template is recreated: PENDING again
+        return self._image_status(request)
+
+    async def ListPlacementDomains(self, request, context):
+        await _check_token(self.state, context)
+        if self.state.deny_list_workers:
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "listing workers takes the global viewer role (ate-env manifest access-policy --global)",
+            )
+        if request.HasField("template") and request.template.name in self.state.missing_templates:
+            await context.abort(
+                grpc.StatusCode.NOT_FOUND, f'template "{request.template.name}" not found'
+            )
+        return env_pb2.ListPlacementDomainsResponse(
+            domains=[
+                env_pb2.PlacementDomain(
+                    name=d["name"],
+                    worker_namespace=d.get("worker_namespace", "ate-system"),
+                    selector=d["selector"],
+                    nodes=d["nodes"],
+                    workers=d["workers"],
+                    node_slots=8,
+                )
+                for d in self.state.domains
+            ]
+        )
+
+    async def WarmImage(self, request, context):
+        s = self.state
+        await _check_token(s, context)
+        await self._require_digest(request, context)
+        base, atespace, image = self._template_key(request)
+        selector = dict(request.worker_selector)
+        s.warm_calls.append(
+            {
+                "image": image,
+                "selector": selector,
+                "nodes": request.nodes,
+                "probes_per_node": request.probes_per_node,
+                "max_rounds": request.max_rounds,
+                "probe_timeout": request.probe_timeout.ToTimedelta().total_seconds()
+                if request.HasField("probe_timeout")
+                else None,
+                "run_id": request.run_id,
+                "atespace": atespace,
+                "template": base,
+            }
+        )
+        # The checks in ate-env-api's order (internal/apiservice/placement.go):
+        # parseWarmOptions, the template, the node count, the round's width.
+        invalid = _warm_options_error(request)
+        if invalid:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, invalid)
+        if base in s.missing_templates:  # the server derives the template first
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f'base actor template "{base}" not found in atespace "{atespace}"; '
+                "register it first (ate-env manifest template)",
+            )
+        if request.nodes == 0 and s.deny_list_workers:
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "counting the nodes takes the global viewer role; pass nodes",
+            )
+        # The server ANDs the selector with the workers' labels: a pool
+        # matches when its workers carry every label of the selector.
+        pools = [
+            d for d in s.domains if all(d["selector"].get(k) == v for k, v in selector.items())
+        ]
+        # With nodes given the server does not look for workers first: the
+        # probes of a selector nothing carries fail, and the coverage is short.
+        node_names = [f"{d['name']}-node{i}" for d in pools for i in range(d["nodes"])]
+        if request.nodes == 0 and not node_names:  # domainNodes: nothing to count
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"no active worker matches the selector {selector}",
+            )
+        wanted = request.nodes or len(node_names)
+        per_node = request.probes_per_node or WARM_DEFAULT_PROBES_PER_NODE
+        if wanted * per_node > WARM_MAX_PROBES:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"{wanted} nodes x {per_node} probes per node exceed the {WARM_MAX_PROBES} "
+                "probes a round may start",
+            )
+        covered = node_names[:wanted]
+        short = image in s.warm_short
+        if short:
+            covered = covered[:-1]
+        s.warm_runs += 1
+        run = request.run_id or f"warm-fake{s.warm_runs}"
+        for i, node in enumerate(covered):
+            event = env_pb2.WarmImageEvent(
+                probe=env_pb2.WarmProbe(id=f"{run}-{i}", node=node, round=1)
+            )
+            event.probe.duration.FromTimedelta(timedelta(seconds=0.5))
+            yield event
+        undeleted = [f"{run}-{len(covered) - 1}"] if image in s.warm_undeleted and covered else []
+        yield env_pb2.WarmImageEvent(
+            coverage=env_pb2.WarmImageCoverage(
+                nodes=sorted(covered),
+                wanted=wanted,
+                probes=len(covered) + (1 if short else 0),
+                failed=1 if short else 0,
+                rounds=1,
+                complete=len(covered) >= wanted,
+                error="probe did not start: no slot on the last node" if short else "",
+                undeleted_probes=undeleted,
+            )
+        )
+
     async def GetServerInfo(self, request, context):
         await _check_token(self.state, context)
         return env_pb2.GetServerInfoResponse(
@@ -348,6 +558,19 @@ class FakeEnvironmentService(env_pb2_grpc.EnvironmentServiceServicer):
             substrate_version="unknown",
             features=["rootfs_image", "pty"],
         )
+
+
+def _warm_options_error(request) -> str:
+    """ate-env-api's ``parseWarmOptions``: the message of the first limit ``request`` breaks."""
+    if request.nodes < 0:
+        return "nodes must be >= 0"
+    if not 0 <= request.probes_per_node <= WARM_MAX_PROBES_PER_NODE:
+        return f"probes_per_node must be between 1 and {WARM_MAX_PROBES_PER_NODE}"
+    if not 0 <= request.max_rounds <= WARM_MAX_ROUNDS:
+        return f"max_rounds must be between 1 and {WARM_MAX_ROUNDS}"
+    if request.HasField("probe_timeout") and request.probe_timeout.ToTimedelta() <= timedelta(0):
+        return "probe_timeout must be positive"
+    return ""
 
 
 class FakeProcessService(guest_pb2_grpc.ProcessServiceServicer):

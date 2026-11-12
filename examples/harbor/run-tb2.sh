@@ -18,10 +18,12 @@
 # ate-env provider selected and its settings taken from the environment.
 #
 #   run-tb2.sh [harbor run flags...]
+#   run-tb2.sh warm <tasks-dir> [python -m ate_env_harbor.warm flags...]
 #
 # Without flags: `-d terminal-bench@2.0 -a oracle -n 10`. Everything given is
 # passed to `harbor run` after the provider flags, thus `-p ./tb2 -a terminus-2
-# -m <model> -n 50` works as it does with any other --env.
+# -m <model> -n 50` works as it does with any other --env. `warm` puts the
+# dataset's images on every node of the pool before a run (README.md, step 5).
 #
 # Environment:
 #   SUBSTRATE_ENV_API              the port-forwarded ate-env-api (required)
@@ -32,9 +34,37 @@
 #   HB_TEMPLATE                    the default base template (default-template)
 #   HB_ATESPACE                    the atespace (ate-env)
 #   HB_PLATFORM                    the build platform (linux/amd64)
+#   HB_WORKER_SELECTOR             the pool's labels, key=value pairs separated by
+#                                  commas: the run's --ek worker_selector and the
+#                                  warm step's --selector (unless --domain or
+#                                  --selector is given to warm)
 set -o errexit -o nounset -o pipefail
 
 : "${SUBSTRATE_ENV_API:?set SUBSTRATE_ENV_API to the port-forwarded ate-env-api, e.g. 127.0.0.1:7777}"
+
+if [[ "${1:-}" == "warm" ]]; then
+  shift
+  warm=()
+  if [[ -n "${HB_TEMPLATE:-}" ]]; then
+    warm+=(--template "${HB_TEMPLATE}")
+  fi
+  if [[ -n "${HB_ATESPACE:-}" ]]; then
+    warm+=(--atespace "${HB_ATESPACE}")
+  fi
+  # --domain and --selector exclude each other, thus the caller's choice of
+  # either wins over HB_WORKER_SELECTOR. The patterns take in the prefixes
+  # argparse accepts (--dom, --sel=...); --do is not one, --docker shares it.
+  pool_given=""
+  for arg in "$@"; do
+    case "${arg}" in
+      --dom* | --s*) pool_given=1 ;;
+    esac
+  done
+  if [[ -n "${HB_WORKER_SELECTOR:-}" && -z "${pool_given}" ]]; then
+    warm+=(--selector "${HB_WORKER_SELECTOR}")
+  fi
+  exec "${PYTHON:-python3}" -m ate_env_harbor.warm ${warm[@]+"${warm[@]}"} "$@"
+fi
 
 provider=(-e ate_env_harbor:AteEnvEnvironment --ek "build=${HB_BUILD:-none}")
 if [[ -n "${SUBSTRATE_ENV_HARBOR_REGISTRY:-}" ]]; then
@@ -48,6 +78,9 @@ if [[ -n "${HB_ATESPACE:-}" ]]; then
 fi
 if [[ -n "${HB_PLATFORM:-}" ]]; then
   provider+=(--ek "platform=${HB_PLATFORM}")
+fi
+if [[ -n "${HB_WORKER_SELECTOR:-}" ]]; then
+  provider+=(--ek "worker_selector=${HB_WORKER_SELECTOR}")
 fi
 
 if [[ $# -eq 0 ]]; then

@@ -102,6 +102,9 @@ async def run_command(
         )
     except FileNotFoundError as e:
         raise ImageError(f"{argv[0]} is not installed or not on PATH") from e
+    except OSError as e:
+        # ENOEXEC, EACCES: the executable is there and cannot run.
+        raise ImageError(f"cannot run {argv[0]}: {e}") from e
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError) as e:
@@ -196,6 +199,9 @@ class ImageResolver:
 
     async def resolve_tag(self, ref: str) -> str:
         """``repo@sha256:...`` for a tag, through the registry, cached per process."""
+        if ref.startswith("-"):
+            # Never a reference; as a trailing argument it would be a docker flag.
+            raise ImageError(f"{ref!r} is not an image reference")
         key = (self.docker, ref)
         async with _lock_for(self.docker, ref):
             cached = _digest_cache.get(key)
@@ -224,9 +230,12 @@ class ImageResolver:
         if code != 0:
             self.logger.debug("imagetools inspect %s: %s", ref, err.strip())
             return None
-        digest = json.loads(out.strip() or '""')
+        try:
+            digest = json.loads(out.strip() or '""')
+        except json.JSONDecodeError:
+            digest = None
         if not isinstance(digest, str) or not digest.startswith("sha256:"):
-            raise ImageError(f"unexpected digest for {ref!r}: {out.strip()!r}")
+            raise ImageError(f"unexpected digest for {ref!r}: {out.strip()[:200]!r}")
         return f"{repository_of(ref)}@{digest}"
 
     async def _build_local(self, context: Path, tag: str, timeout: float) -> str:

@@ -87,7 +87,28 @@ integrations/harbor/hack/register-templates.sh ./tb2/terminal-bench -- \
 Without a class template the provider falls back to `default-template` with a
 warning (the `auto` policy); `harbor run --cpus limit` makes that an error.
 
-## 5. Run
+## 5. Warm the nodes
+
+Optional, and worth it for a run at `-n 50` or a dataset run more than once:
+the first trial of an image pulls it on its node and bakes the derived
+template's golden snapshot. One step before the run pays both, on every node
+of the pool the run uses:
+
+```bash
+export HB_WORKER_SELECTOR=pool=harbor   # the pool's labels
+examples/harbor/run-tb2.sh warm ./tb2/terminal-bench --nodes 4
+```
+
+`warm` is `python -m ate_env_harbor.warm` with `HB_TEMPLATE`, `HB_ATESPACE` and
+`HB_WORKER_SELECTOR` applied; flags after the tasks directory pass through
+(`--nodes`, needed without the global viewer role; `--golden-timeout`,
+`--parallel`, `--json`), and a `--domain` or `--selector` among them replaces
+`HB_WORKER_SELECTOR` for the step. It works per (class template, image) pair, the
+classes step 4 registered, prints one line per pair, and exits non-zero when
+an image is not on every node or a golden snapshot failed, with the reason.
+The same `HB_WORKER_SELECTOR` on the run (below) keeps the trials in that pool.
+
+## 6. Run
 
 ```bash
 examples/harbor/run-tb2.sh -p ./tb2/terminal-bench -a oracle -n 10
@@ -95,7 +116,7 @@ examples/harbor/run-tb2.sh -p ./tb2/terminal-bench -a oracle -n 10
 
 `run-tb2.sh` is `harbor run` with the provider selected and its settings read
 from the environment (`HB_BUILD`, `HB_PLATFORM`, `HB_TEMPLATE`, `HB_ATESPACE`,
-`SUBSTRATE_ENV_HARBOR_REGISTRY`); every flag is passed through. The `oracle`
+`HB_WORKER_SELECTOR`, `SUBSTRATE_ENV_HARBOR_REGISTRY`); every flag is passed through. The `oracle`
 agent runs each task's reference solution and needs no model: its rewards are
 the dataset's ground truth, which makes it the right first run and the right
 comparison with Docker. With a model:
@@ -108,7 +129,7 @@ examples/harbor/run-tb2.sh -p ./tb2/terminal-bench -a terminus-2 -m anthropic/cl
 Keep the token in `SUBSTRATE_ENV_AUTH_TOKEN`, not in `--ek api_token=`: Harbor
 records the environment kwargs in each trial's `result.json`.
 
-## 6. Read the results
+## 7. Read the results
 
 ```bash
 harbor view jobs/<job>
@@ -120,7 +141,7 @@ cat jobs/<job>/<trial>/ate_env.json          # environment id, atespace, templat
 the `ate-env <id> shell` command to inspect it. Delete them when done:
 `ate-env delete <id>`.
 
-## 7. Compare with Docker
+## 8. Compare with Docker
 
 The same command with `-e docker` (Harbor's default) runs the tasks in local
 containers:
@@ -139,9 +160,9 @@ the end. The durations are Harbor's own, from each trial's `result.json`:
 `environment/` upload; the verifier phase is the `tests/` upload, five
 commands and the download of `/logs/verifier`.
 
-| Measure | ate-env, plain create, `-n 10` | ate-env, plain create, `-n 50` | ate-env, warm pool | Docker |
+| Measure | ate-env, plain create, `-n 10` | ate-env, plain create, `-n 50` | ate-env, warm nodes | Docker |
 |---|---|---|---|---|
-| Environment setup, p50 / p95 | 2.6 s / 3.9 s | 2.2 s / 7.6 s | not implemented: the provider creates per trial; a `SandboxFleet` pool lives in one process and a second `harbor run` cannot adopt it | not comparable: on 2026-11-06 Harbor's Docker provider on the measuring machine (Docker Desktop) started the containers (setup p50 2.8 s at `-n 10`) but every trial failed at the log download |
+| Environment setup, p50 / p95 | 2.6 s / 3.9 s | 2.2 s / 7.6 s | not measured yet: `run-tb2.sh warm` (step 5), then the run, once the cluster runs `ate-env-api` from current `main` | not comparable: on 2026-11-06 Harbor's Docker provider on the measuring machine (Docker Desktop) started the containers (setup p50 2.8 s at `-n 10`) but every trial failed at the log download |
 | Verifier phase, p50 / p95 | 1.7 s / 1.7 s | 1.7 s / 1.7 s | | |
 | Trial, p50 / p95 | 6.4 s / 7.7 s | 6.5 s / 11.5 s | | |
 | Job wall time | 7.9 s | 11.9 s | | |
@@ -159,6 +180,7 @@ the actors on that cluster have no egress.
 | `FailedPrecondition: base actor template "harbor-c..." not found` | Register the class template (step 4). Under the `auto` policy this is a warning and the run goes on with `default-template`. |
 | The create succeeds, then `did not answer within 600s` | The nodes cannot pull the image from the registry, the image has no `sh`, or port 80 is taken inside it. Check the derived template's state and the worker pod logs. |
 | `apt-get` or `curl` fail inside the task | No egress from the actors (prerequisites). |
+| Slow first trials of an image | The first trial creates the derived template and bakes its golden snapshot; `ate-env image-status --template <class-template> <image>` (the task's `harbor-c<cpus>-m<memory_mb>`, else `default-template`) shows the template and the golden state (`FAILED` names the reason). Run `run-tb2.sh warm` (step 5) before the run. |
 | The verifier fails at its first command with a permission error | The image runs as a non-root user and has no `sudo`; see the provider README's limits. |
 | A guest call hangs, then fails with `Unavailable` and `connection refused` | The router's allow-list is empty, thus the router serves no TLS listener. ate-setup does not check the list. Set it to ate-env-api's SPIFFE ID (root README, deployment guide). |
 | A guest call fails at once with `FailedPrecondition` about the client certificate | The router rejected `ate-env-api`'s certificate: its SPIFFE ID is missing from the router's allow-list. |

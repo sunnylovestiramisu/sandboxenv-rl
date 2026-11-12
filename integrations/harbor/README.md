@@ -67,6 +67,55 @@ snapshots taken from it.
 
 The worker nodes' service account must be able to pull from the registry.
 
+## Warm the nodes before a run
+
+The first trial of an image on a node pulls the image there, and the first
+trial of an image on a base template creates the derived template and starts
+the golden snapshot that later environments restore from; an environment
+created before the snapshot is ready boots from the image. Node caches and
+templates outlive the process, thus a step before `harbor run` pays both once:
+
+```bash
+python -m ate_env_harbor.warm <tasks-dir> --selector pool=harbor --nodes 4
+```
+
+The unit is a (base template, image) pair: each task's `docker_image` with
+the class template its resources select (`<template_prefix>c<cpus>-m<memory_mb>`,
+else `--template`; a run with `--override-*` or `--cpus ignore` picks other
+bases and derives again). A tag is resolved as the provider resolves it. For
+every pair the step ensures the derived template (`EnsureImageTemplate`; the
+bakes start together), then, `--parallel` pairs at a time (default 4), waits
+until the golden snapshot is `READY` (`--golden-timeout`, default 1800 s; a
+template without golden snapshots goes on) and puts the image on every node
+of the pool (`WarmImage`). One line per pair reports the derived template,
+the golden state and the nodes covered.
+
+`--selector` gives the pool's labels; `--domain` names a pool from
+`ListPlacementDomains` (`ate-env placement-domains`) and uses its labels;
+without either the base templates' own pools are warmed. The server counts
+the nodes the labels match (`--nodes 0`, the default), which includes
+another pool whose workers carry the same labels, where a run with the
+selector lands too; the step says so. Counting the nodes and listing the
+domains take the global viewer role (`ate-env manifest access-policy
+--global`); without it pass `--nodes` and `--selector`. Pass the same
+selector to the run (`--ek worker_selector=...`) so the trials land on the
+warmed nodes.
+
+The exit code is 0 when every pair is on every node and every golden is
+`READY` (or disabled), 1 otherwise: a `FAILED` golden names its reason and is
+still warmed (its environments boot from the image, which the nodes then
+have); tasks without a `docker_image` are listed (prebuild them first); probe
+environments the server could not delete are listed with the `ate-env delete`
+commands. 2 is a usage error: a tag without docker, an unknown domain, a
+missing role, or a knob past `WarmImage`'s limits, which are checked before
+any template is ensured: `--nodes` at most 256, `--probes-per-node` at most 8,
+their product at most 256, `--max-rounds` at most 10 (0, the default of each,
+leaves it to the server; with the server's 2 probes per node, more than 128
+nodes take `--probes-per-node 1`), `--probe-timeout` from a microsecond up. `--json
+<file>` writes the report. `ate-env image-status
+--template <base-template> <image>` shows one image's derived template and
+golden state on that base (without `--template`, on the server's default).
+
 ## Resources: one base template per class
 
 Substrate requires CPU and memory limits on every ActorTemplate, and

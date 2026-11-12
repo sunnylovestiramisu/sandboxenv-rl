@@ -23,6 +23,13 @@ user needs to know across them.
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
 ### Added
+- Harbor provider (`integrations/harbor`): `python -m ate_env_harbor.warm
+  <tasks-dir>` (and `examples/harbor/run-tb2.sh warm`) warms a dataset's
+  images before a run: it ensures the derived template of each (class
+  template, image) pair the tasks use, waits for the golden snapshots and
+  puts the images on every node of a placement domain (`--selector` or
+  `--domain`) with `WarmImage`; one line per pair, `--json` for the report,
+  exit 1 when a pair is not on every node, 2 for a usage error.
 - Harbor provider (`integrations/harbor`): `--ek worker_selector=key=value,...`
   (the `worker_selector` kwarg; a string in the syntax of `ate-env create
   --worker-selector`, or a mapping) pins a job's environments to a worker
