@@ -134,6 +134,11 @@ finally:
 channel yourself (e.g. custom gRPC options), pass
 `Client(channel=your_grpc_aio_channel)` — the client then never closes it.
 
+The client's channel is plaintext by default, even for an `https://` URL,
+as in the Go client. To use TLS, pass channel credentials:
+`Client("ate-env.example.com:443", credentials=grpc.ssl_channel_credentials())`.
+For a private CA, pass `grpc.ssl_channel_credentials(root_certificates=ca_pem)`.
+
 ### Create an environment
 
 ```python

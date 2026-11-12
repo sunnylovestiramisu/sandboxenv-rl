@@ -164,6 +164,7 @@ class Client:
         auth_token: str | None = None,
         tracer_config: TracerConfig | None = None,
         channel_options: Sequence[tuple[str, Any]] | None = None,
+        credentials: grpc.ChannelCredentials | None = None,
     ):
         """Create a client for the ate-env-api service at endpoint.
 
@@ -176,6 +177,12 @@ class Client:
         give the channel its own TCP connection). They are ignored when
         channel is given.
 
+        credentials makes the client's own channel use TLS, for example
+        ``grpc.ssl_channel_credentials()``. Without it the channel is
+        plaintext, even for an https:// endpoint, matching the Go client.
+        Passing both channel and credentials raises ValueError: a
+        caller-owned channel already has its credentials.
+
         tracer_config enables OpenTelemetry spans (``ate_env_client.<op>``)
         and, on a channel the client owns, the W3C trace context in the
         metadata of every call. It needs the ``tracing`` extra and is a
@@ -185,6 +192,8 @@ class Client:
         self._auth_token = auth_token or None
         self.tracer_config = tracer_config or TracerConfig()
         self.tracer = tracer_from_config(self.tracer_config)
+        if channel is not None and credentials is not None:
+            raise ValueError("ate_env_rl: pass either channel or credentials, not both")
         # host:port of a channel the client creates; None for a caller-owned one.
         self._target = None if channel is not None else _normalize_target(endpoint or "")
         if channel is not None:
@@ -197,11 +206,16 @@ class Client:
             if self.tracer:
                 # After auth, so the trace context rides on the final metadata.
                 interceptors += _trace_interceptors()
-            self._channel = grpc.aio.insecure_channel(
-                _normalize_target(endpoint),
-                options=list(channel_options) if channel_options else None,
-                interceptors=interceptors or None,
-            )
+            target = _normalize_target(endpoint)
+            options = list(channel_options) if channel_options else None
+            if credentials is not None:
+                self._channel = grpc.aio.secure_channel(
+                    target, credentials, options=options, interceptors=interceptors or None
+                )
+            else:
+                self._channel = grpc.aio.insecure_channel(
+                    target, options=options, interceptors=interceptors or None
+                )
             self._owns_channel = True
         self._environments = env_pb2_grpc.EnvironmentServiceStub(self._channel)
         self._processes = guest_pb2_grpc.ProcessServiceStub(self._channel)

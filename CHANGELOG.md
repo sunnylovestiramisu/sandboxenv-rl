@@ -23,6 +23,9 @@ user needs to know across them.
   pre-flight's job (`swebench-loader preflight`), not the prewarm's.
 
 ### Added
+- Python client: `Client(credentials=...)` connects to ate-env-api over TLS
+  with the given `grpc.ChannelCredentials`, as the Go client can with
+  `DialOptions`. Without it the channel stays plaintext.
 - `swebench-loader run -preflight`: with `-placement`, runs the pre-flight
   over the plan inside the same command before the run (the `preflight`
   subcommand's defaults), writing `preflight-events.jsonl` and
