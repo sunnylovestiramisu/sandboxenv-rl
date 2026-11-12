@@ -1,7 +1,7 @@
 # Plan: NeMo Gym sandbox provider
 
-Status: living document, last checked 2026-11-09 against NeMo Gym `v0.7.0` (the latest release,
-2026-10-12) and NeMo Gym `main` at `f49b582`. The criteria are in
+Status: living document, last checked 2026-11-10 against NeMo Gym `v0.7.0` (the latest release,
+2026-10-12) and NeMo Gym `main` at `22f6c79`. The criteria are in
 [acceptance-criteria.md](./acceptance-criteria.md). #290 recorded the gaps found on 2026-11-09; the
 gaps still open are tracked in #303.
 
@@ -29,21 +29,24 @@ procedure that finds drift against a new Gym release.
 - Images: `image_templates` maps an image to a registered template, else `rootfs_image` derives one
   from the base template.
 - Optional capabilities: `SupportsSandboxEndpoint` (port proxy), `SupportsSandboxPauseResume` (idle
-  parking with `SUSPEND_MODE_LOCAL` or durable suspend) and `ConnectableProvider` (#294).
+  parking with `SUSPEND_MODE_LOCAL` or durable suspend), `ConnectableProvider` (#294) and
+  `SupportsSandboxIndependentUploads` (file transfers on a connection of their own, thus
+  `SandboxSession.expire` can stop a running harness).
+- `preserve_background_services=True` through Gym's fallback to a plain `exec`: a service that
+  redirects its output keeps running after its command returns (NG-19).
 - The NeMo runtime layer (#94): NeMo Skills' sandbox server and NeMo Gym's exec server injected into
   any task image, reached through `endpoint()`.
 
 ## 3. What it does not cover, and why
 
-| Gym capability                                                                                                                                        | Since          | Decision                                                                                                                                                  |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SupportsSandboxIndependentUploads` (`SandboxSession.expire`)                                                                                         | after `v0.7.0` | planned (NG-18, #303): needs a check of the client's concurrency limits first                                                                             |
-| `SupportsSandboxBackgroundServices`                                                                                                                   | `v0.7.0`       | planned check (NG-19, #303): Gym falls back to plain `exec`; correct only if the guest keeps a command's background children alive after the command ends |
-| Compose capabilities: `SupportsSandboxNetwork`, `SupportsSandboxPortForwarding`, `SupportsSandboxRuntimeRequirements`, `SupportsSandboxSharedStorage` | `v0.7.0`       | not planned: one environment is one container; multi-container Compose tasks are out of scope                                                             |
-| Compose capabilities: `SupportsSandboxServiceOptions`, `SupportsSandboxPullPolicy`                                                                    | after `v0.7.0` | not planned, same reason                                                                                                                                  |
-| `SupportsSandboxSidecars`                                                                                                                             | after `v0.7.0` | not planned now; runtime layers (guest sidecars in the same rootfs) cover the services we need                                                            |
-| `SupportsSandboxPty`, `SupportsSandboxPtyAttach`                                                                                                      | `v0.7.0`       | not planned now: only Gym's `shell` CLI uses them; the guest supports a PTY, thus this is possible later                                                  |
-| Create failures as `NgFailureEvent`                                                                                                                   | after `v0.7.0` | deferred (NG-32): Gym still accepts `SandboxCreateError` from providers awaiting migration                                                                |
+| Gym capability                                                                                                                                        | Since          | Decision                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SupportsSandboxBackgroundServices`                                                                                                                   | `v0.7.0`       | not needed (NG-19): Gym falls back to a plain `exec`, and the guest keeps a command's background children alive after the command ends, which is all that the capability adds |
+| Compose capabilities: `SupportsSandboxNetwork`, `SupportsSandboxPortForwarding`, `SupportsSandboxRuntimeRequirements`, `SupportsSandboxSharedStorage` | `v0.7.0`       | not planned: one environment is one container; multi-container Compose tasks are out of scope                                                                                 |
+| Compose capabilities: `SupportsSandboxServiceOptions`, `SupportsSandboxPullPolicy`                                                                    | after `v0.7.0` | not planned, same reason                                                                                                                                                      |
+| `SupportsSandboxSidecars`                                                                                                                             | after `v0.7.0` | not planned now; runtime layers (guest sidecars in the same rootfs) cover the services we need                                                                                |
+| `SupportsSandboxPty`, `SupportsSandboxPtyAttach`                                                                                                      | `v0.7.0`       | not planned now: only Gym's `shell` CLI uses them; the guest supports a PTY, thus this is possible later                                                                      |
+| Create failures as `NgFailureEvent`                                                                                                                   | after `v0.7.0` | deferred (NG-32): Gym still accepts `SandboxCreateError` from providers awaiting migration                                                                                    |
 
 ## 4. Drift check for a new Gym release or `main`
 
@@ -65,7 +68,7 @@ capability the provider already knows about; step 8 records the result.
 
    `--extra gym` installs the release the workspace `uv.lock` pins (`0.7.0` today), not the newest
    one on PyPI; `--with` installs the version named, for a release the lock does not have yet.
-   Without a cluster the expected result is all passed and 3 skipped, the three e2e tests; `-rs`
+   Without a cluster the expected result is all passed and 4 skipped, the four e2e tests; `-rs`
    prints the reason of each skip. `test_capabilities_match_the_plan` (NG-34) runs only here: it
    fails when Gym adds a capability (a `Protocol` in `base.py`) that section 3 does not decide, when
    the provider stops implementing one or Gym drops or renames one it implements, when a name
@@ -100,21 +103,22 @@ capability the provider already knows about; step 8 records the result.
 
 ## 5. Order of the open work
 
-1. NG-27: run one Harbor episode through Gym's Harbor environment server on a cluster. Its
-   prerequisites, #291 (NG-9) and #294 (NG-17), are merged.
-2. NG-18 and NG-19: the expire capability and the background-services check (#303).
-3. NG-26: the first end-to-end Gym rollout with a stock Gym example (the original M1 exit
+1. NG-27: run one Harbor episode through Gym's Harbor environment server on a cluster
+   (`gym dataset validate environments/hello_world` with this provider; the oracle agent needs no
+   model). Its prerequisites, NG-9, NG-17 and NG-19, are met.
+2. NG-26: the first end-to-end Gym rollout with a stock Gym example (the original M1 exit
    criterion).
-4. NG-29 and NG-30: the pause-against-never comparison and create budgets under saturation, from the
+3. NG-29 and NG-30: the pause-against-never comparison and create budgets under saturation, from the
    comparison with `dims/gym-substrate`.
-5. NG-31: agree on one Substrate provider and its entry point name before an upstream proposal.
+4. NG-31: agree on one Substrate provider and its entry point name before an upstream proposal.
 
 ## 6. Drift log
 
 One row per drift check, newest first.
 
-| Date       | Gym ref                              | Result                                                                                                                                                                                                                                                                                      | Action                                      |
-| ---------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| 2026-11-09 | `main` `f49b582` (11 past `acb6773`) | One sandbox change, #4934 (file transfers are instrumented; the facade still passes a `Path` to `upload_file` and `download_file`). No provider-facing change. Unit tests: 91 passed, 3 skipped against `0.7.0` and against `f49b582`, after one test was adapted to Gym's own port checks. | NG-28 and NG-34 met; #303 for the open gaps |
-| 2026-11-09 | `main` `acb6773` (799 past `v0.7.0`) | Two breaks on the Harbor path: the facade sends `user` on each exec, and the Harbor environment server calls `serialize()` on each episode. Four capabilities added (sidecars, independent uploads, service options, pull policy), none required.                                           | #290; fixed by #291 and #294                |
-| 2026-10-27 | `0.4.0`                              | Error contract and parking compared with `dims/gym-substrate`; unit tests run against the 0.4.0 types.                                                                                                                                                                                      | #146, #147, #149                            |
+| Date       | Gym ref                              | Result                                                                                                                                                                                                                                                                                                    | Action                                      |
+| ---------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| 2026-11-10 | `main` `22f6c79` (77 past `f49b582`) | One provider-facing change, #4917: a `SandboxSpec.files` value can be `bytes`, and `create` failed on one. No new capability; `serialize(scope=...)` reaches `serialize_handle`, which already takes `scope`. Unit tests: 103 passed, 4 skipped against `0.7.0` and against `22f6c79` (rerun 2026-11-11). | `create` seeds `bytes`; NG-18 and NG-19 met |
+| 2026-11-09 | `main` `f49b582` (11 past `acb6773`) | One sandbox change, #4934 (file transfers are instrumented; the facade still passes a `Path` to `upload_file` and `download_file`). No provider-facing change. Unit tests: 91 passed, 3 skipped against `0.7.0` and against `f49b582`, after one test was adapted to Gym's own port checks.               | NG-28 and NG-34 met; #303 for the open gaps |
+| 2026-11-09 | `main` `acb6773` (799 past `v0.7.0`) | Two breaks on the Harbor path: the facade sends `user` on each exec, and the Harbor environment server calls `serialize()` on each episode. Four capabilities added (sidecars, independent uploads, service options, pull policy), none required.                                                         | #290; fixed by #291 and #294                |
+| 2026-10-27 | `0.4.0`                              | Error contract and parking compared with `dims/gym-substrate`; unit tests run against the 0.4.0 types.                                                                                                                                                                                                    | #146, #147, #149                            |

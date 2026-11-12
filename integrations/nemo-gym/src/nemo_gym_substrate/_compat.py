@@ -69,7 +69,7 @@ except ImportError:  # pragma: no cover - the in-repo test path
         ready_timeout_s: int | float | None = None
         workdir: str | None = None
         env: dict[str, str] = field(default_factory=dict)
-        files: dict[str, str] = field(default_factory=dict)
+        files: dict[str, str | bytes] = field(default_factory=dict)  # bytes: after nemo-gym 0.7.0
         metadata: dict[str, str] = field(default_factory=dict)
         resources: dict[str, Any] = field(default_factory=dict)
         entrypoint: list[str] | None = None

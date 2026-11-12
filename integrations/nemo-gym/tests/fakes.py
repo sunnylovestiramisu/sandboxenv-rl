@@ -370,10 +370,15 @@ class _BearerCheck(grpc.aio.ServerInterceptor):
 
 
 @contextlib.asynccontextmanager
-async def serve(state: FakeAteEnv | None = None):
-    """Run the fake ate-env-api on a loopback port; yields ``(target, state)``."""
+async def serve(state: FakeAteEnv | None = None, *, max_streams: int | None = None):
+    """Run the fake ate-env-api on a loopback port; yields ``(target, state)``.
+
+    ``max_streams`` is the HTTP/2 stream limit per client connection, as
+    ate-env-api's ``-max-concurrent-streams``; a call past it queues in the client.
+    """
     state = state or FakeAteEnv()
-    server = grpc.aio.server(interceptors=[_BearerCheck(state)])
+    options = [("grpc.max_concurrent_streams", max_streams)] if max_streams else None
+    server = grpc.aio.server(interceptors=[_BearerCheck(state)], options=options)
     env_pb2_grpc.add_EnvironmentServiceServicer_to_server(FakeEnvironmentService(state), server)
     guest_pb2_grpc.add_ProcessServiceServicer_to_server(FakeProcessService(state), server)
     guest_pb2_grpc.add_FileSystemServiceServicer_to_server(FakeFileSystemService(state), server)

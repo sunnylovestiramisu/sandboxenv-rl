@@ -486,6 +486,11 @@ class SubstrateSandboxProvider:
         self._client: Client | None = client
         self._owns_client = client is None
         self._channel: grpc.aio.Channel | None = None
+        # File transfers of a client the provider opens, and the park calls a
+        # transfer waits for, go over a connection of their own (see
+        # uploads_independent_of_execs).
+        self._file_client: Client | None = None
+        self._file_channel: grpc.aio.Channel | None = None
 
     # -- provider contract -------------------------------------------------
 
@@ -523,7 +528,9 @@ class SubstrateSandboxProvider:
         try:
             await self._wait_ready(env, spec.ready_timeout_s or self._create.ready_timeout_s)
             for target_path, content in (spec.files or {}).items():
-                await env.write_file(target_path, content.encode(), mode=0o644)
+                # A str is UTF-8 text; bytes (nemo-gym after 0.7.0) go unchanged.
+                data = content if isinstance(content, bytes) else content.encode()
+                await env.write_file(target_path, data, mode=0o644)
         except Exception:
             await self._best_effort_delete(env_id, atespace)
             raise
@@ -679,11 +686,28 @@ class SubstrateSandboxProvider:
             return f"substrate env {handle.sandbox_id!r} does not exist: {_describe(exc)}"
         return f"substrate env {handle.sandbox_id!r}: {_describe(exc)}"
 
+    def uploads_independent_of_execs(self) -> bool:
+        """Whether an upload never waits for capacity that running commands
+        hold (nemo-gym's ``SupportsSandboxIndependentUploads``, which
+        ``SandboxSession.expire`` needs to stop a running harness).
+
+        The one limit commands and file transfers can share is the HTTP/2
+        stream limit of a connection to ate-env-api (``-max-concurrent-streams``):
+        a command holds a stream for as long as it runs, and a call past the
+        limit queues in the client. File transfers of a client the provider
+        opens have a connection of their own, thus true. So do the suspend and
+        the state reads of a park: a transfer waits for the park of its
+        sandbox, before it under the sandbox's parking lock and after it under
+        a policy with no idle delay. A caller-owned client carries all of them
+        on its one channel, thus false. The guest's limit on concurrent
+        processes refuses a new command and does not apply to a file write."""
+        return self._owns_client
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         cancelled = False
         try:
             async with self._in_flight(handle):
-                await self._env(handle).write_file(
+                await self._file_env(handle).write_file(
                     target_path, Path(source_path).read_bytes(), mode=0o644
                 )
         except asyncio.CancelledError:
@@ -696,7 +720,7 @@ class SubstrateSandboxProvider:
         cancelled = False
         try:
             async with self._in_flight(handle):
-                content = await self._env(handle).read_file_bytes(source_path)
+                content = await self._file_env(handle).read_file_bytes(source_path)
             target = Path(target_path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
@@ -783,7 +807,8 @@ class SubstrateSandboxProvider:
         raw = handle.raw or {}
         try:
             info = await asyncio.wait_for(
-                self._ate().get(handle.sandbox_id, atespace=self._atespace_of(raw)),
+                # Under the parking lock, like _park: not on the commands' connection.
+                self._files().get(handle.sandbox_id, atespace=self._atespace_of(raw)),
                 timeout=self._connection.request_timeout_s,
             )
         except (EnvError, asyncio.TimeoutError):
@@ -963,32 +988,60 @@ class SubstrateSandboxProvider:
             await asyncio.gather(*pending, return_exceptions=True)
         if self._client is not None and self._owns_client:
             await self._client.close()
-        if self._channel is not None:
-            await self._channel.close()
+        if self._file_client is not None:
+            await self._file_client.close()
+        for channel in (self._channel, self._file_channel):
+            if channel is not None:
+                await channel.close()
         self._client = None if self._owns_client else self._client
-        self._channel = None
+        self._file_client = None
+        self._channel = self._file_channel = None
 
     # -- internals ----------------------------------------------------------
 
     def _ate(self) -> Client:
         if self._client is None:
-            self._client = self._open_client(self._connection.api_url)
+            self._client, self._channel = self._open_client(self._connection.api_url)
         return self._client
 
-    def _open_client(self, api_url: str) -> Client:
+    def _files(self) -> Client:
+        """The client for file transfers and for the calls made under a
+        sandbox's parking lock (the suspend and the state reads of a park),
+        which a transfer waits for: one with its own connection next to a
+        client the provider opened, else the caller's client."""
+        if not self._owns_client:
+            return self._ate()
+        if self._file_client is None:
+            self._file_client, self._file_channel = self._open_client(
+                self._connection.api_url, own_connection=True
+            )
+        return self._file_client
+
+    def _open_client(
+        self, api_url: str, *, own_connection: bool = False
+    ) -> tuple[Client, grpc.aio.Channel | None]:
+        """A client for ``api_url`` and the channel to close after it, if the
+        provider made one. Channels to one target share a connection unless
+        ``own_connection`` gives this one a subchannel pool of its own."""
+        options = [("grpc.use_local_subchannel_pool", 1)] if own_connection else None
         url = urlparse(api_url if "://" in api_url else f"//{api_url}")
         if url.scheme == "https":
             # ate_env_rl.Client only dials h2c itself; hand it a TLS channel.
             target = f"{url.hostname}:{url.port or 443}"
-            self._channel = grpc.aio.secure_channel(target, grpc.ssl_channel_credentials())
-            return Client(channel=self._channel, auth_token=self._auth_token)
-        return Client(api_url, auth_token=self._auth_token)
+            channel = grpc.aio.secure_channel(
+                target, grpc.ssl_channel_credentials(), options=options
+            )
+            return Client(channel=channel, auth_token=self._auth_token), channel
+        return Client(api_url, auth_token=self._auth_token, channel_options=options), None
 
     def _atespace_of(self, raw: Mapping[str, Any]) -> str:
         return str(raw.get("atespace") or self._create.atespace)
 
     def _env(self, handle: SandboxHandle) -> Env:
         return self._ate().env(handle.sandbox_id, atespace=self._atespace_of(handle.raw or {}))
+
+    def _file_env(self, handle: SandboxHandle) -> Env:
+        return self._files().env(handle.sandbox_id, atespace=self._atespace_of(handle.raw or {}))
 
     def _resolve_template(
         self, spec: SandboxSpec, opts: SubstrateProviderOptions
@@ -1138,11 +1191,13 @@ class SubstrateSandboxProvider:
         Returns the lifecycle status it settled in, or None when it no longer
         exists. The caller holds the sandbox's parking lock. The suspend RPC
         itself is never cancelled from here: a deadline overrun stops the
-        wait, not the checkpoint, and the state is read instead.
+        wait, not the checkpoint, and the state is read instead. The calls go
+        over the file transfers' connection, because a transfer waits for this
+        park and must not wait for a stream that a running command holds.
         """
         env_id = handle.sandbox_id
         atespace = self._atespace_of(handle.raw or {})
-        rpc = asyncio.create_task(self._ate().suspend(env_id, atespace=atespace, mode=mode))
+        rpc = asyncio.create_task(self._files().suspend(env_id, atespace=atespace, mode=mode))
         self._park_tasks.add(rpc)
         rpc.add_done_callback(self._park_tasks.discard)
         rpc.add_done_callback(lambda t: t.cancelled() or t.exception())  # never "never retrieved"
@@ -1182,7 +1237,7 @@ class SubstrateSandboxProvider:
             )
             try:
                 info = await asyncio.wait_for(
-                    self._ate().get(env_id, atespace=atespace),
+                    self._files().get(env_id, atespace=atespace),
                     timeout=call_timeout,
                 )
             except NotFoundError:

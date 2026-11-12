@@ -144,6 +144,62 @@ def test_pause_policy_parks_and_the_next_command_wakes() -> None:
     asyncio.run(scenario())
 
 
+def test_a_background_service_outlives_its_command(tmp_path: Path) -> None:
+    """Gym's ``preserve_background_services=True`` is a plain exec on this
+    provider: a service that redirects its output keeps running after the
+    command that started it returns, also past that command's deadline. An
+    upload goes through while a command runs (the stop marker of
+    ``SandboxSession.expire``)."""
+
+    async def scenario() -> None:
+        provider = SubstrateSandboxProvider(
+            {
+                "connection": {"api_url": API_URL},
+                **({"create": {"atespace": ATESPACE}} if ATESPACE else {}),
+            }
+        )
+        handle = None
+        try:
+            handle = await provider.create(
+                SandboxSpec(provider_options={"template": TEMPLATE}, ready_timeout_s=180)
+            )
+            # The service ends when the stop marker appears, as a harness
+            # supervisor does.
+            service = "while [ ! -e /tmp/stop ]; do sleep 0.2; done; echo stopped > /tmp/service.out"
+            started = await provider.exec(
+                handle,
+                f"nohup sh -c '{service}' > /tmp/service.log 2>&1 < /dev/null & echo $!",
+                timeout_s=5,
+            )
+            assert (started.return_code, started.error_type) == (0, None)
+            pid = int((started.stdout or "").strip())
+
+            await asyncio.sleep(6)  # past the deadline of the command that started it
+            alive = await provider.exec(handle, f"kill -0 {pid}")
+            assert (alive.return_code, alive.error_type) == (0, None)
+
+            # A foreground command waits for the service; the upload of the
+            # marker ends both while that command still runs.
+            assert provider.uploads_independent_of_execs()
+            waiter = asyncio.create_task(
+                provider.exec(handle, f"while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; cat /tmp/service.out", timeout_s=60)
+            )
+            await asyncio.sleep(1)
+            assert not waiter.done()
+            marker = tmp_path / "stop"
+            marker.write_text("expire\n")
+            await asyncio.wait_for(provider.upload_file(handle, marker, "/tmp/stop"), timeout=30)
+            result = await waiter
+            assert (result.return_code, result.error_type) == (0, None)
+            assert "stopped" in (result.stdout or "")
+        finally:
+            if handle is not None:
+                await provider.close(handle)
+            await provider.aclose()
+
+    asyncio.run(scenario())
+
+
 RUNTIME_TEMPLATE = os.environ.get("SUBSTRATE_E2E_RUNTIME_TEMPLATE")
 RUNTIME_PORT = int(os.environ.get("SUBSTRATE_E2E_RUNTIME_PORT", "6000"))
 RUNTIME_IMAGE = os.environ.get("SUBSTRATE_E2E_RUNTIME_IMAGE")

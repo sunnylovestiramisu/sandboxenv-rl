@@ -25,13 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.metadata
 import importlib.util
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
+import typing
 from pathlib import Path
 
 import grpc
@@ -475,6 +478,172 @@ def test_file_roundtrip(tmp_path: Path):
             dst = tmp_path / "down" / "up.bin"
             await provider.download_file(handle, "/data/up.bin", dst)
             assert dst.read_bytes() == b"\x00\x01payload-longer-than-one-chunk"
+
+    run(t())
+
+
+def test_create_seeds_a_bytes_file_unchanged():
+    # nemo-gym after 0.7.0: a SandboxSpec.files value is str or bytes.
+    async def t():
+        async with stack() as (provider, fake):
+            handle = await provider.create(SandboxSpec(files={"/task/img.png": b"\x89PNG\xff\x00"}))
+            assert fake.files[(handle.sandbox_id, "/task/img.png")] == b"\x89PNG\xff\x00"
+
+    run(t())
+
+
+def test_the_spec_mirror_types_a_file_as_str_or_bytes(monkeypatch):
+    # The mirror that _compat.py builds without nemo-gym follows Gym main, so
+    # a type checker accepts the bytes value that create() takes. The module
+    # is loaded again with the nemo-gym import blocked: with nemo-gym
+    # installed, _compat.SandboxSpec is Gym's own class.
+    monkeypatch.setitem(sys.modules, "nemo_gym.sandbox.providers.base", None)
+    spec = importlib.util.spec_from_file_location("_compat_mirror", _compat.__file__)
+    mirror = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "_compat_mirror", mirror)
+    spec.loader.exec_module(mirror)
+    assert mirror.NEMO_GYM_AVAILABLE is False
+    assert typing.get_type_hints(mirror.SandboxSpec)["files"] == dict[str, str | bytes]
+
+
+async def _hold_every_stream(provider, fake, handle, streams: int) -> list[asyncio.Task]:
+    """Start ``streams`` commands that never exit; each holds one HTTP/2 stream."""
+    fake.hang.add("sleepy")
+    tasks = [asyncio.create_task(provider.exec(handle, "sleepy")) for _ in range(streams)]
+    for _ in range(500):
+        if sum(1 for p in fake.procs.values() if p.argv[-1] == "sleepy") == streams:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # each exec is now on its output stream
+    return tasks
+
+
+async def _end_held_commands(fake, tasks: list[asyncio.Task]) -> None:
+    for proc in fake.procs.values():
+        if proc.exit_code is None:
+            proc.exit_code = 0
+    await asyncio.gather(*tasks)
+
+
+def test_an_upload_does_not_wait_behind_commands_that_hold_every_stream(tmp_path: Path):
+    src = tmp_path / "stop"
+    src.write_bytes(b"expire")
+
+    async def t():
+        async with serve(max_streams=2) as (target, fake):
+            provider = SubstrateSandboxProvider({"connection": {"api_url": target}})
+            try:
+                assert provider.uploads_independent_of_execs() is True
+                handle = await provider.create(SandboxSpec())
+                tasks = await _hold_every_stream(provider, fake, handle, 2)
+                # The commands' connection has no stream left: a third command queues.
+                third = asyncio.create_task(provider.exec(handle, "true"))
+                await asyncio.sleep(0.3)
+                assert not third.done()
+                await asyncio.wait_for(provider.upload_file(handle, src, "/run/stop"), timeout=5)
+                assert fake.files[(handle.sandbox_id, "/run/stop")] == b"expire"
+                dst = tmp_path / "back"
+                await asyncio.wait_for(provider.download_file(handle, "/run/stop", dst), timeout=5)
+                assert dst.read_bytes() == b"expire"
+                await _end_held_commands(fake, tasks)
+                assert (await third).return_code == 0
+            finally:
+                await provider.aclose()
+
+    run(t())
+
+
+def test_a_caller_owned_client_does_not_promise_independent_uploads(tmp_path: Path):
+    # The control for the test above: on one channel the upload queues behind
+    # the commands, thus the provider must not claim the capability.
+    src = tmp_path / "stop"
+    src.write_bytes(b"expire")
+
+    async def t():
+        async with serve(max_streams=2) as (target, fake):
+            client = Client(target)
+            provider = SubstrateSandboxProvider(client=client)
+            try:
+                assert provider.uploads_independent_of_execs() is False
+                handle = await provider.create(SandboxSpec())
+                tasks = await _hold_every_stream(provider, fake, handle, 2)
+                upload = asyncio.create_task(provider.upload_file(handle, src, "/run/stop"))
+                await asyncio.sleep(0.5)
+                assert not upload.done()
+                await _end_held_commands(fake, tasks)
+                await asyncio.wait_for(upload, timeout=5)
+            finally:
+                await provider.aclose()
+                await client.close()
+
+    run(t())
+
+
+def test_an_upload_to_an_idle_sandbox_does_not_wait_behind_commands_under_a_parking_policy(
+    tmp_path: Path,
+):
+    # SandboxSession.expire on an idle sandbox while other rollouts of the same
+    # provider hold every stream of the commands' connection: the park after
+    # the upload must not queue behind those commands.
+    src = tmp_path / "stop"
+    src.write_bytes(b"expire")
+
+    async def t():
+        async with serve(max_streams=2) as (target, fake):
+            provider = SubstrateSandboxProvider(
+                {
+                    "connection": {"api_url": target, "request_timeout_s": 5.0},
+                    "create": {"suspend_policy": "pause_after_exec", "idle_before_suspend_s": 0},
+                }
+            )
+            tasks: list[asyncio.Task] = []
+            try:
+                assert provider.uploads_independent_of_execs() is True
+                busy = await provider.create(SandboxSpec())
+                idle = await provider.create(SandboxSpec())
+                tasks = await _hold_every_stream(provider, fake, busy, 2)
+                parks = len(fake.suspends)
+                await asyncio.wait_for(provider.upload_file(idle, src, "/run/stop"), timeout=2)
+                assert fake.files[(idle.sandbox_id, "/run/stop")] == b"expire"
+                dst = tmp_path / "back"
+                await asyncio.wait_for(provider.download_file(idle, "/run/stop", dst), timeout=2)
+                assert dst.read_bytes() == b"expire"
+                # Each transfer woke the idle sandbox and parked it again.
+                assert [eid for eid, _ in fake.suspends[parks:]] == [idle.sandbox_id] * 2
+                assert fake.envs[idle.sandbox_id]["status"] == int(EnvironmentStatus.PAUSED)
+            finally:
+                await _end_held_commands(fake, tasks)
+                await provider.aclose()
+
+    run(t())
+
+
+def test_pause_does_not_wait_behind_commands_that_hold_every_stream(tmp_path: Path):
+    # pause() holds the sandbox's parking lock, which an upload to that sandbox
+    # waits for, thus its control-plane calls must not queue behind commands.
+    src = tmp_path / "stop"
+    src.write_bytes(b"expire")
+
+    async def t():
+        async with serve(max_streams=2) as (target, fake):
+            provider = SubstrateSandboxProvider(
+                {"connection": {"api_url": target, "request_timeout_s": 5.0}}
+            )
+            tasks: list[asyncio.Task] = []
+            try:
+                busy = await provider.create(SandboxSpec())
+                idle = await provider.create(SandboxSpec())
+                await provider.pause(idle)
+                tasks = await _hold_every_stream(provider, fake, busy, 2)
+                # Parked already: pause() confirms it with the control plane.
+                await asyncio.wait_for(provider.pause(idle), timeout=2)
+                await asyncio.wait_for(provider.upload_file(idle, src, "/run/stop"), timeout=2)
+                # Awake after the upload: pause() parks it again.
+                await asyncio.wait_for(provider.pause(idle), timeout=2)
+                assert fake.envs[idle.sandbox_id]["status"] == int(EnvironmentStatus.PAUSED)
+            finally:
+                await _end_held_commands(fake, tasks)
+                await provider.aclose()
 
     run(t())
 
@@ -1421,10 +1590,14 @@ def test_an_idle_park_gives_up_on_a_sandbox_shared_while_it_waited_for_the_lock(
 # one nemo-gym drops or renames among _IMPLEMENTED fails it too. A name
 # nemo-gym drops among _NOT_IMPLEMENTED stays there without a signal: v0.7.0
 # lacks four of these names, thus the check cannot require that each exists.
-_IMPLEMENTED = {"ConnectableProvider", "SupportsSandboxEndpoint", "SupportsSandboxPauseResume"}
+_IMPLEMENTED = {
+    "ConnectableProvider",
+    "SupportsSandboxEndpoint",
+    "SupportsSandboxIndependentUploads",
+    "SupportsSandboxPauseResume",
+}
 _NOT_IMPLEMENTED = {
     "SupportsSandboxBackgroundServices",
-    "SupportsSandboxIndependentUploads",
     "SupportsSandboxNetwork",
     "SupportsSandboxPortForwarding",
     "SupportsSandboxPty",
@@ -1436,6 +1609,10 @@ _NOT_IMPLEMENTED = {
     "SupportsSandboxSidecars",
 }
 _NOT_CAPABILITIES = {"SandboxProvider", "SandboxPtySession"}
+# Implemented capabilities that the named nemo-gym release predates. Only that
+# release may lack the name; `main` (which reports `<release>rc0`) and each
+# later release must define it.
+_IMPLEMENTED_AFTER = {"SupportsSandboxIndependentUploads": "0.7.0"}
 
 _needs_nemo_gym = pytest.mark.skipif(importlib.util.find_spec("nemo_gym") is None, reason="needs nemo-gym installed")
 
@@ -1458,7 +1635,9 @@ def _check_capabilities_match_the_plan() -> None:
     names = {n for n, obj in vars(base).items() if isinstance(obj, type) and is_protocol(obj)} - _NOT_CAPABILITIES
     assert names - _IMPLEMENTED - _NOT_IMPLEMENTED == set(), "a new nemo-gym capability: decide it in the plan"
     implemented = {n for n in names if isinstance(provider, getattr(base, n))}
-    assert implemented == _IMPLEMENTED, "the implemented capabilities differ from the plan"
+    version = importlib.metadata.version("nemo-gym")
+    expected = {n for n in _IMPLEMENTED if n in names or _IMPLEMENTED_AFTER.get(n) != version}
+    assert implemented == expected, "the implemented capabilities differ from the plan"
     # The entry point resolves to this provider, not to a built-in of the same name.
     assert get_provider_class("substrate") is SubstrateSandboxProvider
 

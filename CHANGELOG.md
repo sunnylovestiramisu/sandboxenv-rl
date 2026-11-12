@@ -307,6 +307,14 @@ user needs to know across them.
   from the Git tag (`setuptools-scm`) and is published to PyPI via OIDC Trusted
   Publishing when a GitHub Release is published; `hack/release/create-release.py`
   drafts release notes and cuts draft releases (see [docs/release.md](docs/release.md)).
+- `integrations/nemo-gym`: the provider implements NeMo Gym's
+  `SupportsSandboxIndependentUploads`, which `SandboxSession.expire` needs to
+  stop a running harness. `upload_file` and `download_file` use a gRPC
+  connection of their own, so a file transfer no longer queues behind running
+  commands at ate-env-api's `-max-concurrent-streams`. The suspend and the
+  state reads of a park use that connection too, because a transfer waits for
+  the park of its sandbox. `uploads_independent_of_execs()` is false for a provider built with a
+  caller-owned `client=`.
 - Python client: `ate_env_rl.adapters.r2egym`, the R2E-Gym adapter
   (`make_fleet_repo_env`, `fresh_eval_env`, `r2egym_command_files`;
   `AteEnvRuntime` and `AteEnvRepoEnv` are built on first access), moved from
@@ -452,6 +460,10 @@ user needs to know across them.
   past the deadline) fails the task and stops the trajectory, as
   `run_fleet_bench.py` does on its `TimeoutError`. Before, the Go arm marked
   the step ok and ran on, so the two arms disagreed on `failed`.
+- `integrations/nemo-gym`: `create` seeds a `bytes` value of
+  `SandboxSpec.files` unchanged. NeMo Gym `main` allows `str | bytes` there
+  (binary files such as images), and a `bytes` value failed the create with
+  `AttributeError`.
 - `integrations/nemo-gym`: `exec(user=...)` no longer raises `ValueError`.
   NeMo Gym `main` sends `user` on many commands (the Harbor environment
   server's default user, `user="root"` from the transfer helpers), and each

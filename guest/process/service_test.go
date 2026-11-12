@@ -790,3 +790,34 @@ func TestTTYExitWhileDescendantHoldsTerminal(t *testing.T) {
 		t.Fatalf("exit_code = %d, want 0", exit.GetExitCode())
 	}
 }
+
+// A service that a command starts in the background with its output
+// redirected outlives the command: the command's exit is reported at once,
+// and the timeout of the command, which kills the process group, does not
+// fire after the command ended. NeMo Gym's preserve_background_services
+// relies on this (docs/plans/nemo-gym, NG-19).
+func TestBackgroundServiceOutlivesItsCommand(t *testing.T) {
+	client := setupTestServer(t)
+	started := time.Now()
+	proc := start(t, client, &ateenvv1alpha.StartProcessRequest{
+		Command: []string{"sh", "-c", `sleep 30 > /dev/null 2>&1 < /dev/null & echo $!`},
+		Timeout: durationpb.New(2 * time.Second),
+	})
+	stdout, _, exit := collect(t, client, &ateenvv1alpha.StreamProcessOutputRequest{ProcessId: proc.GetProcessId(), Follow: true})
+	pid, err := strconv.Atoi(strings.TrimSpace(stdout))
+	if err != nil {
+		t.Fatalf("service pid from stdout %q: %v", stdout, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		t.Fatalf("exit reported after %v; want soon after the shell exits, before the timeout", elapsed)
+	}
+	if exit.GetExitCode() != 0 || exit.GetTimedOut() {
+		t.Fatalf("exit_code = %d, timed_out = %v; want 0, false", exit.GetExitCode(), exit.GetTimedOut())
+	}
+	// Past the command's timeout the service is still there.
+	time.Sleep(2500*time.Millisecond - time.Since(started))
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("service %d is gone after its command returned: %v", pid, err)
+	}
+}

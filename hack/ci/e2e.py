@@ -399,7 +399,8 @@ def run_tests(
             *py,
             str(root / "integrations/nemo-gym/tests/test_e2e.py"),
             "-k",
-            "test_full_lifecycle or test_pause_policy_parks_and_the_next_command_wakes",
+            "test_full_lifecycle or test_pause_policy_parks_and_the_next_command_wakes"
+            " or test_a_background_service_outlives_its_command",
             "-v",
             env={
                 **test_env,

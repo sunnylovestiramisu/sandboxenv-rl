@@ -282,6 +282,28 @@ than slots and think times of seconds or more, parking lets the pool drain. A pa
 pinned to its node until its upload lands, so a drain or a pool rollout before then loses it; use
 `suspend_after_exec`, or suspend the fleet durably, before either.
 
+### Stopping a running harness, and services a command leaves behind
+
+The provider implements nemo-gym's `SupportsSandboxIndependentUploads` (after nemo-gym 0.7.0),
+which `SandboxSession.expire` needs: the stop is a file that the harness's supervisor watches for,
+thus the upload must not wait behind the commands it stops. The one limit that commands and file
+transfers can share is the HTTP/2 stream limit of a connection to ate-env-api
+(`-max-concurrent-streams`, 4096 by default): a command holds one stream for as long as it runs.
+`upload_file` and `download_file` use a connection of their own, thus
+`uploads_independent_of_execs()` returns true. The suspend and the state reads of a park (idle
+parking and `pause()`) use that connection too, because a transfer waits for the park of its
+sandbox: a park under way finishes before the transfer starts, and with `idle_before_suspend_s: 0`
+the transfer returns after the sandbox is parked again. It returns false for a provider built with a
+caller-owned `client=`, because that client has one channel for both.
+
+Gym's `preserve_background_services=True` is an ordinary `exec` here, and that is correct: a
+service that a command starts in the background keeps running after the command returns, also
+past the command's `timeout_s`. The service must redirect its stdout and stderr, as Gym requires
+on each provider (`nohup server > /tmp/server.log 2>&1 < /dev/null &`). A background process that
+keeps the command's stdout or stderr open holds the command until its timeout, and the timeout
+kills the command's process group, the service included. One sandbox runs at most 10 commands at
+a time (the guest's limit); a command past it returns `error_type="sandbox"`.
+
 ### Services inside the sandbox: the NeMo runtime layer
 
 Some NeMo components talk to a service inside the sandbox instead of running commands through
